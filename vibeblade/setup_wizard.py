@@ -804,7 +804,7 @@ def interactive_model_select(ram_gb, vram_gb):
         print()
         choice = radio(
             "Select a model",
-            [(f"{i+1}. {m[1]} ({m[3]}) [{m[2]}]", i) for i, m in enumerate(candidates)],
+            [(f"{i+1}. {m[1]} ({m[3]}) [{m[2]}]", i) for i, (_, m) in enumerate(candidates)],
             default=0,
         )
         if choice is None:
