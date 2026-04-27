@@ -238,6 +238,56 @@ def find_in_lm_studio(
     return results
 
 
+def find_in_ollama(
+    quant_filter: str = "",
+) -> list[Path]:
+    """Search Ollama model storage for GGUF files.
+
+    Windows: %USERPROFILE%/.ollama/models/manifests/
+    macOS/Linux: ~/.ollama/models/manifests/
+    Ollama stores models as GGUF blobs inside per-registry subdirectories.
+    """
+    candidates = []
+
+    ollama_root = Path.home() / ".ollama" / "models"
+    # Ollama stores manifests and blobs
+    candidates.append(ollama_root / "manifests")
+    candidates.append(ollama_root / "blobs")
+
+    results: list[Path] = []
+    for d in candidates:
+        results.extend(find_gguf_files(d, recursive=True, quant_filter=quant_filter))
+
+    return results
+
+
+def find_in_gpt4all(
+    quant_filter: str = "",
+) -> list[Path]:
+    """Search GPT4All model directories for GGUF files.
+
+    Windows: %LOCALAPPDATA%/nomic.ai/GPT4All/
+    macOS:   ~/Library/Application Support/nomic.ai/GPT4All/
+    Linux:   ~/.local/share/nomic.ai/GPT4All/
+    """
+    candidates = []
+
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(Path(local_app) / "nomic.ai" / "GPT4All")
+    elif sys.platform == "darwin":
+        candidates.append(Path.home() / "Library" / "Application Support" / "nomic.ai" / "GPT4All")
+    else:
+        candidates.append(Path.home() / ".local" / "share" / "nomic.ai" / "GPT4All")
+
+    results: list[Path] = []
+    for d in candidates:
+        results.extend(find_gguf_files(d, recursive=True, quant_filter=quant_filter))
+
+    return results
+
+
 def find_in_directory(
     repo_id: str = "",
     quant_filter: str = "",
@@ -315,7 +365,31 @@ def resolve_model_path(
                 found = name_match
         return found[0].resolve()
 
-    # 5. Search local directories
+    # 5. Search Ollama
+    found = find_in_ollama(quant_filter=quant)
+    if found:
+        if model_input:
+            name_match = [
+                f for f in found
+                if model_input.lower() in f.name.lower()
+            ]
+            if name_match:
+                found = name_match
+        return found[0].resolve()
+
+    # 6. Search GPT4All
+    found = find_in_gpt4all(quant_filter=quant)
+    if found:
+        if model_input:
+            name_match = [
+                f for f in found
+                if model_input.lower() in f.name.lower()
+            ]
+            if name_match:
+                found = name_match
+        return found[0].resolve()
+
+    # 7. Search local directories
     found = find_in_directory(quant_filter=quant)
     if found and model_input:
         name_match = [
@@ -329,7 +403,7 @@ def resolve_model_path(
     if found:
         return found[0].resolve()
 
-    # 6. Nothing found — raise with helpful message
+    # 8. Nothing found — raise with helpful message
     raise FileNotFoundError(
         f"Could not find model '{model_input}'.\n"
         f"\n"
@@ -337,6 +411,8 @@ def resolve_model_path(
         f"  - Local path: {model_path.resolve()}\n"
         f"  - HuggingFace cache: ~/.cache/huggingface/hub/\n"
         f"  - LM Studio: %LOCALAPPDATA%/LM Studio/models/\n"
+        f"  - Ollama: ~/.ollama/models/\n"
+        f"  - GPT4All: %LOCALAPPDATA%/nomic.ai/GPT4All/\n"
         f"  - Current directory: {Path.cwd()}\n"
         f"\n"
         f"To download: python -m vibeblade wizard"
@@ -365,6 +441,8 @@ def scan_cached_models(quant_filter: str = "") -> list[dict]:
 
     _add(find_in_hf_cache(quant_filter=quant_filter), "HuggingFace cache")
     _add(find_in_lm_studio(quant_filter=quant_filter), "LM Studio")
+    _add(find_in_ollama(quant_filter=quant_filter), "Ollama")
+    _add(find_in_gpt4all(quant_filter=quant_filter), "GPT4All")
     _add(find_in_directory(quant_filter=quant_filter), "Local")
 
     # Sort by size descending

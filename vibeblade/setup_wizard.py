@@ -782,26 +782,123 @@ def search_huggingface(query: str, limit: int = 10) -> list[tuple[str, str, str]
         return []
 
 def interactive_model_select(ram_gb, vram_gb):
-    """Show categorized model picker with hardware awareness + HuggingFace search."""
+    """Show model picker — asks about existing downloads first, then catalog."""
     candidates = recommend_models(ram_gb, vram_gb)
-
-    # ── Scan for already-downloaded models ──
-    detected = []
-    try:
-        from .model_hub import scan_cached_models
-        cached = scan_cached_models()
-        for m in cached:
-            detected.append((m["path"], m["name"], m["size_gb"], m["source"]))
-    except Exception:
-        pass
 
     while True:
         print()
 
-        # Show detected downloaded models first
+        # ── Step 2a: Ask if user already has models downloaded ──
+        print(f"  {_b('Do you already have LLM models installed on this computer?')}")
+        print(f"  {_d('(e.g. from LM Studio, Ollama, GPT4All, HuggingFace, or downloaded manually)')}")
+        print()
+
+        has_existing = radio("Choose an option", [
+            ("Yes — scan my computer for downloaded models", "scan"),
+            ("No — show me the model catalog to download", "catalog"),
+            ("I have a model file — let me paste the path", "manual_path"),
+        ], default=0)
+
+        if has_existing == "manual_path":
+            # Let user paste a direct path to a .gguf file
+            custom_path = text_input(
+                "Enter the full path to your .gguf model file",
+                default="",
+            )
+            if custom_path:
+                custom_path = Path(custom_path.strip('"').strip("'"))
+                if custom_path.is_file() and custom_path.suffix.lower() == ".gguf":
+                    size_gb = round(custom_path.stat().st_size / (1024**3), 1)
+                    from .model_hub import _detect_gguf_quant
+                    quant = _detect_gguf_quant(custom_path.name)
+                    return (
+                        str(custom_path.resolve()),
+                        custom_path.name[:30],
+                        "Downloaded",
+                        f"~{size_gb}GB",
+                        ram_gb or 8,
+                        0,
+                        quant if quant != "unknown" else "Q4_K_M",
+                        f"Local file: {custom_path.parent}",
+                    )
+                else:
+                    print(f"\n  {_r('File not found or not a .gguf file.')}")
+                    print(f"  {_d('Check the path and try again.')}")
+                    pause("Press [Enter] to continue")
+                    continue
+            continue
+
+        if has_existing == "scan":
+            # ── Scan all known model locations ──
+            print("\n  Scanning your computer for downloaded models...")
+            detected = []
+            try:
+                from .model_hub import scan_cached_models
+                cached = scan_cached_models()
+                for m in cached:
+                    detected.append((m["path"], m["name"], m["size_gb"], m["source"]))
+            except Exception as exc:
+                print(f"  {_y(f'Scan error: {exc}')}")
+
+            if not detected:
+                print(f"\n  {_y('No downloaded models found on this computer.')}")
+                print(f"  {_d('Scanned: HuggingFace cache, LM Studio, Ollama, GPT4All, and local directories.')}")
+                print(f"  {_d('Tip: Make sure models are in their default install locations.')}")
+                pause("Press [Enter] to continue")
+                continue
+
+            # Show what we found
+            panel("Downloaded Models Found",
+                  f"{len(detected)} model(s) found on your system\n"
+                  f"Sources: {', '.join(sorted(set(s for _, _, _, s in detected)))}")
+            rows = []
+            for i, (path, name, size, source) in enumerate(detected):
+                short_name = name[:40]
+                rows.append((str(i+1), short_name, f"{size}GB", source))
+            print_table(["#", "Model File", "Size", "Source"], rows)
+
+            print()
+            use_detected = confirm(
+                "Use one of these downloaded models?",
+                text="Select one above, or choose 'No' to browse the download catalog.",
+                default=True,
+            )
+            if use_detected:
+                choice = radio(
+                    "Which model would you like to use?",
+                    [(f"{name[:40]} ({size}GB) [{source}]", i)
+                     for i, (_, name, size, source) in enumerate(detected)],
+                    default=0,
+                )
+                path, name, size, source = detected[choice]
+                from .model_hub import _detect_gguf_quant
+                quant = _detect_gguf_quant(name)
+                return (
+                    str(path),
+                    name[:30],
+                    "Downloaded",
+                    f"~{size}GB",
+                    ram_gb or 8,
+                    0,
+                    quant if quant != "unknown" else "Q4_K_M",
+                    f"Local file from {source}",
+                )
+
+            # User said no — fall through to catalog below
+
+        # ── Step 2b: Show catalog (also scan detected in background) ──
+        detected = []
+        try:
+            from .model_hub import scan_cached_models
+            cached = scan_cached_models()
+            for m in cached:
+                detected.append((m["path"], m["name"], m["size_gb"], m["source"]))
+        except Exception:
+            pass
+
         if detected:
             panel("Downloaded Models Found",
-                  f"{len(detected)} model(s) detected on your system")
+                  f"{len(detected)} model(s) detected — listed first")
             rows = []
             for i, (path, name, size, source) in enumerate(detected):
                 short_name = name[:40]
@@ -815,7 +912,7 @@ def interactive_model_select(ram_gb, vram_gb):
               f"RAM: {ram_gb}GB | VRAM: {vram_gb or 0}GB")
 
         rows = [(str(i+1), m[0].split("/")[-1][:30], m[2], m[3],
-                   f"≥{m[4]}GB", f"≥{m[5]}GB", m[7][:50])
+                   f"\u2265{m[4]}GB", f"\u2265{m[5]}GB", m[7][:50])
                   for i, (_, m) in enumerate(candidates)]
         print_table(["#", "Model", "Type", "Size", "RAM", "VRAM", "Description"], rows)
 
