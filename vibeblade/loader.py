@@ -326,6 +326,10 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     [192:208] sc: 16 int8 sub-block scales
     [208:210] d: f16 super-block scale
     """
+    if len(block) < 210:
+        # Block too short - return zeros
+        return np.zeros(256, dtype=np.float32)
+    
     d = np.frombuffer(block[208:210], dtype=np.float16).astype(np.float32)[0]
     if not np.isfinite(d):
         d = 0.0

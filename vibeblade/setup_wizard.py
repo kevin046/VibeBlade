@@ -616,7 +616,8 @@ def interactive_model_select(ram_gb, vram_gb):
         print(f"\n  {_b('Model catalog')}")
         for i, (_, m) in enumerate(candidates):
             marker = _g("▸") if m[2] == "MoE" else " "
-            print(f"    {marker} {_c(str(i+1) + '.')} {m[1]:<32} {_d(f'{m[3]} {m[2]}')}")
+            cat_num = len(detected) + i + 1
+            print(f"    {marker} {_c(str(cat_num) + '.')} {m[1]:<32} {_d(f'{m[3]} {m[2]}')}")
 
         prompt_num = len(detected) + len(candidates)
         print(f"\n  {_d(f'1-{len(detected)} downloaded, {len(detected)+1}-{prompt_num} catalog, or paste a path')}")
