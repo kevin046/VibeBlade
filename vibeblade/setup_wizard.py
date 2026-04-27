@@ -62,7 +62,7 @@ HAS_PT = False
 try:
     from prompt_toolkit.shortcuts import (
         radiolist_dialog, checkboxlist_dialog,
-        input_dialog, message_dialog, confirm,
+        input_dialog, message_dialog, confirm as pt_confirm,
     )
     from prompt_toolkit.styles import Style
     HAS_PT = True
@@ -593,7 +593,7 @@ def checkbox(title, options, defaults=None):
 def confirm(title, text="", default=True):
     if HAS_PT:
         msg = title if not text else f"{title}\n{text}"
-        return confirm(message=msg)
+        return pt_confirm(msg)
     else:
         ch = input(f"\n  {title} {'[Y/n]: ' if default else '[y/N]: '}")
         return ch.lower() in ("y","yes") if ch else default
