@@ -1,7 +1,6 @@
 """Tests for ConFu — contemplate-token speculative decoding."""
 
 import numpy as np
-import pytest
 
 from vibeblade.confu import (
     ContemplateTokenLayer,
@@ -94,7 +93,7 @@ class TestConFuSpeculator:
     def _make_target_fn(self, vocab_size=1000, hidden_dim=256):
         """Create a mock target model function."""
         rng = np.random.RandomState(42)
-        output_head = rng.randn(hidden_dim, vocab_size).astype(np.float32) * 0.01
+        rng.randn(hidden_dim, vocab_size).astype(np.float32) * 0.01
 
         def target_fn(token_ids):
             # Mock: produce logits based on last token embedding

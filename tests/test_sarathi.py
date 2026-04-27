@@ -1,6 +1,5 @@
 """Tests for SARATHI chunked prefill scheduler."""
 
-import pytest
 
 from vibeblade.sarathi import (
     RequestPhase,
@@ -141,7 +140,7 @@ class TestSarathiScheduler:
         sched.add_request(prompt_tokens=50, priority=1.0)
         sched.add_request(prompt_tokens=50, priority=10.0)
         sched.add_request(prompt_tokens=50, priority=5.0)
-        plan = sched.schedule()
+        sched.schedule()
         # With batch_size=1, highest priority should be admitted
         stats = sched.get_stats()
         assert stats["active"] == 1

@@ -1,7 +1,6 @@
 """Tests for SageSched — uncertainty-aware scheduler."""
 
 import math
-import pytest
 
 from vibeblade.sagesched import (
     SageConfig,
@@ -49,7 +48,7 @@ class TestEntropyFunctions:
         h_logits = entropy_from_logits(logits)
         # Compute probs manually
         max_l = max(logits)
-        exps = [math.exp(l - max_l) for l in logits]
+        exps = [math.exp(logit - max_l) for logit in logits]
         s = sum(exps)
         probs = [e / s for e in exps]
         h_probs = entropy_from_probs(probs)

@@ -19,28 +19,28 @@ class TestHadamardRotation:
         for size in [1, 2, 4, 8, 16]:
             from vibeblade.rotatekv import _sylvester_hadamard
             H = _sylvester_hadamard(size)
-            I = H @ H.T
-            np.testing.assert_allclose(I, np.eye(size), atol=1e-5)
+            I_mat = H @ H.T
+            np.testing.assert_allclose(I_mat, np.eye(size), atol=1e-5)
 
     def test_block_diagonal_orthogonal(self):
         """Block-diagonal rotation matrix should be orthogonal."""
         R = hadamard_rotation_matrix(64, block_size=16)
-        I = R @ R.T
-        np.testing.assert_allclose(I, np.eye(64), atol=1e-5)
+        I_mat = R @ R.T
+        np.testing.assert_allclose(I_mat, np.eye(64), atol=1e-5)
 
     def test_non_power_of_two_dim(self):
         """Should handle dimensions that aren't multiples of block_size."""
         R = hadamard_rotation_matrix(48, block_size=16)
         assert R.shape == (48, 48)
-        I = R @ R.T
-        np.testing.assert_allclose(I, np.eye(48), atol=1e-5)
+        I_mat = R @ R.T
+        np.testing.assert_allclose(I_mat, np.eye(48), atol=1e-5)
 
     def test_dim_larger_than_block(self):
         """Multiple blocks when dim > block_size."""
         R = hadamard_rotation_matrix(128, block_size=32)
         assert R.shape == (128, 128)
-        I = R @ R.T
-        np.testing.assert_allclose(I, np.eye(128), atol=1e-5)
+        I_mat = R @ R.T
+        np.testing.assert_allclose(I_mat, np.eye(128), atol=1e-5)
 
     def test_single_element_dim(self):
         R = hadamard_rotation_matrix(1)

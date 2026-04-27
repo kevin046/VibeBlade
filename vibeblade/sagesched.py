@@ -26,8 +26,8 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -118,7 +118,7 @@ def entropy_from_logits(logits: list[float] | tuple[float, ...]) -> float:
         return 0.0
     # Numerically stable softmax
     max_logit = max(logits)
-    exps = [math.exp(l - max_logit) for l in logits]
+    exps = [math.exp(logit - max_logit) for logit in logits]
     sum_exps = sum(exps)
     if sum_exps == 0:
         return 0.0

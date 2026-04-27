@@ -1,7 +1,6 @@
 """Tests for EMA-based NeuronPredictor and dReLU gate activation."""
 
 import numpy as np
-import pytest
 
 from vibeblade.sparse import (
     drelu_gate,
