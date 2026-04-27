@@ -626,27 +626,50 @@ def spinner(text, coro_fn, *args, **kwargs):
         return result
 
 # ── Offload Strategy Recommendation ─────────────────────────────────────────
-def recommend_offload(ram_gb, vram_gb, model_type, total_experts=8):
-    """Return recommended offload config."""
-    if vram_gb and vram_gb >= 8:
-        vram_s = min(vram_gb, 16)
-    else:
-        vram_s = 0
+def recommend_offload(ram_gb, vram_gb, model_type, model_size_gb=0):
+    """Return recommended offload config that uses ALL available memory.
+    
+    Strategy:
+    - Hot experts → VRAM (fastest)
+    - Warm experts → RAM
+    - Cold experts → SSD only if model doesn't fit in VRAM+RAM
+    - For dense models, layers are split VRAM-first then RAM
+    """
+    total_mem = (vram_gb or 0) + (ram_gb or 32)
+    model_fits = total_mem >= model_size_gb if model_size_gb > 0 else True
 
-    ram_s  = ram_gb or 64
-    ssd_en = (ram_gb or 999) < 64 or has_ssd()
+    # Use all VRAM for hot experts / model layers
+    vram_s = vram_gb or 0
 
-    # Expert offloading
+    # Use all RAM for warm experts / remaining layers
+    ram_s = ram_gb or 32
+
+    # SSD: only enabled if model exceeds VRAM+RAM
+    ssd_en = not model_fits and has_ssd()
+
+    # Expert split fractions (only matter for MoE)
     if model_type == "MoE":
-        hot_frac  = 0.20  # top 20% of experts in VRAM
-        ram_frac  = 0.50  # 50% in RAM
-        ssd_frac  = 0.30  # 30% on SSD
+        if vram_gb and ram_gb:
+            # Proportional split based on available memory
+            hot_frac = vram_gb / total_mem if total_mem > 0 else 0.15
+            ram_frac = ram_gb / total_mem if total_mem > 0 else 0.70
+            ssd_frac = max(0, 1.0 - hot_frac - ram_frac)
+        elif vram_gb:
+            hot_frac = 0.30
+            ram_frac = 0.70
+            ssd_frac = 0.0
+        else:
+            hot_frac = 0.0
+            ram_frac = 1.0
+            ssd_frac = 0.0
     elif model_type == "Dense":
-        hot_frac  = 0.10
-        ram_frac  = 0.70
-        ssd_frac  = 0.20
+        hot_frac = vram_gb / total_mem if (total_mem > 0 and vram_gb) else 0.0
+        ram_frac = 1.0 - hot_frac
+        ssd_frac = 0.0
     else:
-        hot_frac, ram_frac, ssd_frac = 0.15, 0.60, 0.25
+        hot_frac = 0.15
+        ram_frac = 0.85
+        ssd_frac = 0.0
 
     return {
         "vram_gb":     vram_s,
@@ -670,64 +693,89 @@ def describe_offload(cfg):
     return "\n".join(lines)
 
 # ── Memory Tier Selector ───────────────────────────────────────────────────────
-def interactive_offload(ram_gb, vram_gb, model_type):
+def interactive_offload(ram_gb, vram_gb, model_type, model_size_gb=0):
     """Step-by-step offload config with recommendations."""
-    recommended = recommend_offload(ram_gb, vram_gb, model_type)
-    defaults = {
-        "vram": str(recommended["vram_gb"]),
-        "ram":  str(recommended["ram_gb"]),
-        "ssd":  "yes" if recommended["ssd_enabled"] else "no",
-        "hot":  str(int(recommended["hot_frac"]*100)),
-    }
+    recommended = recommend_offload(ram_gb, vram_gb, model_type, model_size_gb)
+    total_mem = (vram_gb or 0) + (ram_gb or 32)
+    model_fits = total_mem >= model_size_gb if model_size_gb > 0 else True
 
     print()
     panel("Recommended Offload Configuration",
           describe_offload(recommended), "bold green")
 
+    if model_fits:
+        print(f"  💡 Model fits in VRAM+RAM ({total_mem}GB). SSD not needed.")
+    else:
+        print(f"  ⚠️  Model ({model_size_gb}GB) exceeds VRAM+RAM ({total_mem}GB). SSD tier will be used for overflow.")
+
     if confirm("Accept recommended configuration?", default=True):
         return recommended
 
     print()
-    # VRAM
+    # VRAM — use all of it by default, let user dial down if they want
     if vram_gb and vram_gb > 0:
-        vram_choices = [(f"{i}GB", i) for i in range(0, min(vram_gb+1, 33), 2)]
-        vram_sel = radio("How much VRAM to allocate for hot experts?",
-                          vram_choices, default=int(defaults["vram"])//2)
+        vram_choices = [(f"{i}GB", i) for i in range(0, min(vram_gb + 1, 65), 2)]
+        if (vram_gb % 2) != 0:
+            vram_choices.append((f"{vram_gb}GB", vram_gb))
+        # Default index: find the one closest to vram_gb (use all)
+        default_vram_idx = next(
+            (i for i, (_, v) in enumerate(vram_choices) if v >= vram_gb),
+            len(vram_choices) - 1,
+        )
+        vram_sel = radio("How much VRAM to allocate?",
+                          vram_choices, default=default_vram_idx)
         vram_gb_cfg = vram_sel
     else:
         vram_gb_cfg = 0
 
-    # RAM
+    # RAM — use all of it by default
     ram_choices = []
     step = 16 if ram_gb >= 64 else 8
-    for r in range(8, min(ram_gb+1, 257), step):
+    for r in range(8, min(ram_gb + 1, 257), step):
         ram_choices.append((f"{r}GB", r))
-    if ram_gb not in [x[1] for x in ram_choices]:
+    if ram_gb and ram_gb not in [x[1] for x in ram_choices]:
         ram_choices.append((f"{ram_gb}GB", ram_gb))
-    default_ram = min(defaults["ram"], ram_gb) if ram_gb else int(defaults["ram"])
-    default_idx = max(0, next((i for i,x in enumerate(ram_choices) if x[1]<=default_ram), 0))
-    ram_sel = radio("How much RAM to allocate for warm experts?",
-                    ram_choices, default=ram_choices[min(default_idx, len(ram_choices)-1)][1])
+    default_ram_idx = next(
+        (i for i, (_, v) in enumerate(ram_choices) if v >= (ram_gb or 32)),
+        len(ram_choices) - 1,
+    )
+    ram_sel = radio("How much RAM to allocate?",
+                    ram_choices, default=default_ram_idx)
     ram_gb_cfg = ram_sel
 
-    # SSD
-    ssd_enabled = confirm("Enable SSD tier for cold experts? (Recommended if RAM < 64GB)",
-                          default=recommended["ssd_enabled"])
+    # SSD — only offer if model doesn't fit in VRAM+RAM
+    allocated = vram_gb_cfg + ram_gb_cfg
+    if model_size_gb > 0 and allocated >= model_size_gb:
+        ssd_enabled = False
+        print(f"\n  ✅ {allocated}GB allocated, model needs {model_size_gb}GB — SSD not needed.")
+    elif model_size_gb > 0:
+        ssd_enabled = confirm("Model exceeds allocated memory. Enable SSD tier for overflow?",
+                              default=True)
+    else:
+        ssd_enabled = confirm("Enable SSD tier for cold experts?",
+                              default=False)
 
-    # Hot threshold
-    hot_choices = [("10% — Aggressive (VRAM focused)",  10),
-                   ("15% — Balanced (recommended)",       15),
-                   ("20% — Generous (better quality)",    20),
-                   ("25% — Maximum (more VRAM used)",     25)]
-    hot_sel = radio("What fraction of experts to keep hot in VRAM?",
-                    hot_choices, default=15)
+    # Hot threshold (only relevant for MoE)
+    if model_type == "MoE" and vram_gb_cfg > 0:
+        hot_choices = [
+            ("10% — Aggressive (minimal VRAM, more in RAM)", 10),
+            ("15% — Balanced",                                15),
+            ("20% — Generous (recommended)",                  20),
+            ("30% — VRAM focused (faster, uses more VRAM)",   30),
+            ("50% — Max VRAM (best speed if experts fit)",    50),
+        ]
+        hot_sel = radio("What fraction of experts to keep hot in VRAM?",
+                        hot_choices, default=2)
+        hot_frac = hot_sel / 100
+    else:
+        hot_frac = vram_gb_cfg / allocated if allocated > 0 else 0.0
 
     return {
         "vram_gb":     vram_gb_cfg,
         "ram_gb":      ram_gb_cfg,
         "ssd_enabled": ssd_enabled,
-        "hot_frac":    hot_sel / 100,
-        "ram_frac":    1.0 - (hot_sel/100),
+        "hot_frac":    hot_frac,
+        "ram_frac":    1.0 - hot_frac,
         "ssd_frac":    0.0 if not ssd_enabled else 0.25,
     }
 
@@ -1176,7 +1224,11 @@ def main():
     print()
 
     model_type = model[2]
-    offload = interactive_offload(ram, vram_total or 0, model_type)
+    # Parse model size from label like "~26GB" or "~115GB"
+    import re
+    size_match = re.search(r"(\d+)", model[3])
+    model_size_gb = int(size_match.group(1)) if size_match else 0
+    offload = interactive_offload(ram, vram_total or 0, model_type, model_size_gb)
 
     print()
     panel("Final Offload Configuration", describe_offload(offload), "bold green")
