@@ -255,10 +255,9 @@ def _dequant_q3_k(block: bytes) -> np.ndarray:
     
     # qs_hi: 64 bytes, extract 2 bits at positions 6,4,2,0 from each byte
     qs_hi = np.frombuffer(block[82:146], dtype=np.uint8)
-    qs_expanded = np.column_stack([qs_hi] * 4)
+    qs_hi_u32 = qs_hi.astype(np.uint32)
     shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
-    qs_upper = ((qs_expanded.astype(np.uint32) >> shifts) & 3).astype(np.float32)
-    qs_upper = qs_upper.T.ravel()
+    qs_upper = ((qs_hi_u32[:, np.newaxis] >> shifts) & 3).astype(np.float32).ravel()
     
     # Full qs = upper 2 bits << 1 | h_bit (3-bit value)
     qs = qs_upper * 2.0 + h_bits
@@ -309,7 +308,9 @@ def _dequant_q5_k(block: bytes) -> np.ndarray:
     qs_all[0::2] = np.concatenate([qs & 0x0F, qs2 & 0x0F]).astype(np.float32)
     qs_all[1::2] = np.concatenate([(qs >> 4) & 0x0F, (qs2 >> 4) & 0x0F]).astype(np.float32)
 
-    qh_bits = np.unpackbits(qh).astype(np.float32)
+    qh_bits = np.zeros(256, dtype=np.float32)
+    for i in range(8):
+        qh_bits[i::8] = ((qh >> (7 - i)) & 1).astype(np.float32)
     val = qs_all + qh_bits * 16.0
 
     sc_idx = np.repeat(np.arange(8), 32)
@@ -348,11 +349,10 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     ql_low[1::2] = ((ql >> 4) & 0x0F).astype(np.float32)
 
     # qh: 64 bytes, extract 2 bits at positions 6,4,2,0 from each byte
-    # np.column_stack creates (64,4), but ravel() gives wrong order - use reshape differently
-    qh_expanded = np.column_stack([qh] * 4)
+    # Use broadcasting instead of column_stack — much faster
+    qh_u32 = qh.astype(np.uint32)
     shifts_arr = np.array([6, 4, 2, 0], dtype=np.uint32)
-    qh_high = ((qh_expanded.astype(np.uint32) >> shifts_arr) & 3).astype(np.float32)
-    qh_high = qh_high.T.ravel()
+    qh_high = ((qh_u32[:, np.newaxis] >> shifts_arr) & 3).astype(np.float32).ravel()
 
     q = ql_low + qh_high * 16.0
     # scales: repeat each of 16 values 16 times = 256
