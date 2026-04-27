@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61.0", "pybind11>=2.12.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibeblade"
+version = "1.3.0-alpha"
+description = "Unified CPU/RAM Sparse Inference Protocol - Bypass the VRAM Wall"
+readme = "README.md"
+license = {text = "BSL-1.1"}
+authors = [
+    {name = "Kevin Lin"},
+]
+keywords = ["ai", "llm", "inference", "sparse", "vram", "ram", "optimization", "avx512",
+            "grammar", "structured-output", "metal", "vulkan", "gpu", "constrained-decoding"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License (BSL 1.1)",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24.0", "psutil>=5.9.0"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+grammar = ["jsonschema>=4.0.0"]
+gpu-metal = []  # Requires macOS 13+ / Apple Silicon (C++ build)
+gpu-vulkan = []  # Requires Vulkan SDK 1.2+ (C++ build)
+all = ["vibeblade[grammar,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/kevin046/VibeBlade"
+Repository = "https://github.com/kevin046/VibeBlade"
+Issues = "https://github.com/kevin046/VibeBlade/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vibeblade*"]
+
+[tool.ruff]
+line-length = 88

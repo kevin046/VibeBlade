@@ -1,0 +1,48 @@
+---
+name: Performance Report
+about: Share benchmark results or report a performance issue
+title: "[PERF] "
+labels: performance
+assignees: ""
+---
+
+## Performance Type
+
+- [ ] Benchmark results to share
+- [ ] Performance regression
+- [ ] Slow operation on specific hardware
+- [ ] Optimization suggestion
+
+## Benchmark Results
+
+If sharing results, fill in what you can:
+
+```
+VibeBlade version:
+Backend (NumPy / ONNX CPU / ONNX CUDA / TensorRT / Metal / Vulkan):
+OS:
+CPU:
+GPU (if applicable):
+RAM:
+Python:
+```
+
+### Results
+
+```
+(paste benchmark output here)
+```
+
+## Expected Performance
+
+What performance were you expecting? Reference any prior runs or other frameworks compared against.
+
+## Minimal Reproduction (if regression)
+
+```python
+# Code to reproduce the performance issue
+```
+
+## Additional Context
+
+Compiler flags, BLAS library, any relevant system configuration.

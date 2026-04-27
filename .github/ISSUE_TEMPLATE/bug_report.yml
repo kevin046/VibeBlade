@@ -1,0 +1,37 @@
+---
+name: Bug Report
+about: Report a bug or unexpected behavior
+title: "[BUG] "
+labels: bug
+assignees: ""
+---
+
+## Bug Description
+
+A clear description of what the bug is.
+
+## Reproduction Steps
+
+```python
+# Code that reproduces the bug
+```
+
+## Expected Behavior
+
+What you expected to happen.
+
+## Actual Behavior
+
+What actually happened (include error messages/tracebacks).
+
+## Environment
+
+- **OS**:
+- **Python version**:
+- **VibeBlade version**:
+- **Backend** (NumPy / ONNX CPU / ONNX CUDA / TensorRT):
+- **Hardware** (CPU/GPU/RAM):
+
+## Additional Context
+
+Anything else that might help diagnose the issue.

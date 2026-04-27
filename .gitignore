@@ -1,0 +1,36 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.so
+*.pyd
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Benchmarks output
+benchmarks/output/

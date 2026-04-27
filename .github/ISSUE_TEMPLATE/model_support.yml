@@ -1,0 +1,44 @@
+---
+name: Model Support Request
+about: Request support for a specific LLM architecture or model format
+title: "[MODEL] "
+labels: enhancement, model-support
+assignees: ""
+---
+
+## Model Name
+
+Which model or architecture do you want supported?
+
+## Model Details
+
+- **Architecture** (Llama, Mistral, Phi, Qwen, Gemma, other):
+- **Parameters** (7B, 13B, 70B, etc.):
+- **Format** (GGUF, safetensors, PyTorch, other):
+- **Quantization** (if applicable — GPTQ, AWQ, GGUF quants):
+- **Link** (HuggingFace or source):
+
+## Use Case
+
+What are you trying to do with this model? (Inference, fine-tuning, research, etc.)
+
+## What's Missing
+
+What specifically prevents this model from working with VibeBlade today?
+- [ ] Model loading fails
+- [ ] Architecture not implemented
+- [ ] Quantization not supported
+- [ ] Tokenizer issue
+- [ ] Other:
+
+## Minimal Reproduction
+
+```python
+# Code showing what you tried
+```
+
+## Error Output
+
+```
+(paste error/traceback)
+```

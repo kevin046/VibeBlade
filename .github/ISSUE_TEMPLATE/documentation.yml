@@ -1,0 +1,31 @@
+---
+name: Documentation
+about: Report missing, unclear, or incorrect documentation
+title: "[DOCS] "
+labels: documentation
+assignees: ""
+---
+
+## Doc Issue Type
+
+- [ ] Missing documentation
+- [ ] Unclear or confusing
+- [ ] Incorrect information
+- [ ] Outdated
+- [ ] Typo / grammar
+
+## Location
+
+File or section where the issue is (e.g., `README.md`, `CONTRIBUTING.md`, docstring in `vibeblade/gpu.py`):
+
+## Current Content
+
+What does it say now? (Quote or screenshot)
+
+## Suggested Fix
+
+What should it say instead?
+
+## Additional Context
+
+Anything else that would help improve the documentation.

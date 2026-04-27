@@ -1,0 +1,41 @@
+---
+name: Help Wanted / Good First Issue
+about: Label an issue for community contributors to pick up
+title: "[HELP WANTED] "
+labels: help wanted, good first issue
+assignees: ""
+---
+
+> **Note:** This template is for maintainers to create community-friendly issues.
+> If you're a contributor looking for something to work on, filter by the
+> `help wanted` label.
+
+## Problem
+
+Clear description of the problem to solve.
+
+## Proposed Solution
+
+Suggested approach. Be specific enough that a new contributor can get started.
+
+## Scope
+
+- [ ] Small (1-2 hours)
+- [ ] Medium (half day)
+- [ ] Large (1+ days)
+
+## Skills Needed
+
+What should a contributor know to tackle this?
+
+- e.g., "Familiarity with NumPy"
+- e.g., "Understanding of attention mechanisms"
+- e.g., "Experience with Vulkan or Metal"
+
+## Getting Started
+
+Files to look at, relevant tests to run, any pointers.
+
+## Acceptance Criteria
+
+- [ ] What must be true for this to be considered done

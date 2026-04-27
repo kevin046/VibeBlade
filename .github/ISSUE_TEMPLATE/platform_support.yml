@@ -1,0 +1,40 @@
+---
+name: Hardware / Platform Support
+about: Request support for a new hardware platform or report platform-specific issues
+title: "[PLATFORM] "
+labels: platform, enhancement
+assignees: ""
+---
+
+## Platform Details
+
+- **OS**:
+- **Architecture** (x86_64 / ARM64 / RISC-V / other):
+- **CPU**:
+- **GPU** (if applicable):
+- **Python version**:
+- **VibeBlade version**:
+
+## Request Type
+
+- [ ] New platform support (not yet supported)
+- [ ] Platform-specific bug
+- [ ] Backend not detected / falling back incorrectly
+
+## Description
+
+What platform are you trying to run on and what's happening?
+
+## Expected Behavior
+
+What should happen on this platform?
+
+## Logs / Error Output
+
+```
+(paste relevant output)
+```
+
+## What I've Tried
+
+Steps you've already taken to resolve this.

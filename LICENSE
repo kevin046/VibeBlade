@@ -1,0 +1,121 @@
+Business Source License 1.1
+
+Parameters:
+
+  Licensor:             VibeDrift Inc. (Kevin Lin)
+  Licensed Work:        VibeBlade — Unified CPU/RAM Sparse Inference Protocol
+                       (https://github.com/kevin046/VibeBlade)
+  Additional Use Grant: You may use the Licensed Work for personal,
+                       educational, and non-commercial internal research purposes
+                       without restriction.
+  Change Date:          2028-05-01
+
+Version: 1.1
+
+---
+
+1. Definitions
+
+  "Licensor" means VibeDrift Inc.
+
+  "You" (and "Your") means an individual or a legal entity exercising
+  rights under, and complying with all of the terms of, this License.
+
+  "Licensed Work" means the VibeBlade software, including source code,
+  documentation, and associated files.
+
+  "Derivative Works" means any work that is based on the Licensed Work
+  or portions thereof, and for which editorial revisions, annotations,
+  elaborations, or other modifications represent an original work of
+  authorship.
+
+  "Change Date" means the date specified above, after which the Licensed
+  Work becomes available under the open-source license specified in
+  Section 6.
+
+  "Non-Commercial Use" means use that is not primarily intended for
+  commercial advantage or monetary compensation.
+
+2. Grant of License
+
+  Subject to the terms and conditions of this License, the Licensor
+  hereby grants You a worldwide, non-exclusive, non-sublicensable,
+  revocable license to:
+
+  (a) Use, copy, and modify the Licensed Work for Non-Commercial Use;
+
+  (b) Use, copy, and modify the Licensed Work for internal evaluation,
+      testing, and development purposes within Your organization;
+
+  (c) Use the Licensed Work for personal projects and open-source
+      contributions that are not directly monetized.
+
+3. Restrictions
+
+  (a) You may NOT sell, rent, lease, or otherwise commercialize the
+      Licensed Work or Derivative Works without a separate commercial
+      license from the Licensor.
+
+  (b) You may NOT offer the Licensed Work as a service (SaaS, API, or
+      otherwise) to third parties without a separate commercial license.
+
+  (c) You may NOT remove or alter any license notices in the Licensed Work.
+
+  (d) Derivative Works must include prominent notice that they are
+      derived from VibeBlade and are subject to this License.
+
+4. Redistribution
+
+  You may redistribute the Licensed Work in source or object form,
+  provided that:
+
+  (a) You include a copy of this License with the redistribution;
+
+  (b) You retain all copyright, patent, trademark, and attribution
+      notices;
+
+  (c) Any modifications are clearly marked as such.
+
+5. Patent Grant
+
+  Subject to the terms and conditions of this License, the Licensor
+  hereby grants You a non-exclusive, worldwide, non-sublicensable,
+  revocable license under Licensor's patent claims that are necessarily
+  infringed by the Licensed Work to make, use, sell, offer for sale,
+  and import the Licensed Work, solely to the extent such use is
+  permitted under Section 2.
+
+6. Change Date License
+
+  On or after the Change Date, the Licensed Work is automatically made
+  available under the following open-source license:
+
+  Apache License, Version 2.0
+  (https://www.apache.org/licenses/LICENSE-2.0)
+
+  This conversion is automatic and irrevocable. After the Change Date,
+  all restrictions in Sections 2, 3, 4, and 5 cease to apply, and the
+  Apache 2.0 license governs all use, modification, and distribution
+  of the Licensed Work.
+
+7. Term
+
+  This License terminates automatically if You breach any of its terms.
+  Upon termination, You must cease all use and distribution of the
+  Licensed Work.
+
+8. Disclaimer
+
+  THE LICENSED WORK IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+  NONINFRINGEMENT. IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY
+  CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OR
+  DISTRIBUTION OF THE LICENSED WORK.
+
+9. Source Availability
+
+  Source code is available at:
+  https://github.com/kevin046/VibeBlade
+
+  For commercial licensing inquiries, contact: kevin.lin@vibedrift.com

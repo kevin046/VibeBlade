@@ -1,0 +1,22 @@
+---
+name: Question
+about: Ask a question about VibeBlade
+title: "[QUESTION] "
+labels: question
+assignees: ""
+---
+
+Before opening a question, please check:
+
+- [ ] [Existing issues](https://github.com/kevin046/VibeBlade/issues) — your question may already be answered
+- [ ] [Contributing guide](https://github.com/kevin046/VibeBlade/blob/main/CONTRIBUTING.md) — setup and development info
+- [ ] [README](https://github.com/kevin046/VibeBlade#readme) — quickstart and usage examples
+
+## Question
+
+Describe your question clearly. Include:
+
+- What you're trying to do
+- What you've tried
+- Where you got stuck
+- Relevant logs or error messages
