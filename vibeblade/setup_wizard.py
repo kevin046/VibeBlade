@@ -946,7 +946,7 @@ def verify_install():
         print("    ✗ pytest install failed")
 
     print("  [2/2] Running test suite...")
-    ok, out = run("pytest tests/test_sparse.py -v --tb=line -q 2>&1 | tail -5", fatal=False)
+    ok, out = run("pytest tests/test_sparse.py --tb=line -q", fatal=False)
     if ok and "passed" in out.lower():
         print("    ✓ All tests pass!")
         return True
