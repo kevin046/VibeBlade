@@ -61,8 +61,8 @@ def table(headers, rows, title=""):
 HAS_PT = False
 try:
     from prompt_toolkit.shortcuts import (
-        radio_list_dialog, checkbox_list_dialog,
-        input_dialog, message_dialog, confirm_dialog,
+        radiolist_dialog, checkboxlist_dialog,
+        input_dialog, message_dialog, confirm,
     )
     from prompt_toolkit.styles import Style
     HAS_PT = True
@@ -474,18 +474,37 @@ def run(args: str | list[str], fatal: bool = False, cwd: str | None = None) -> t
 
 # ── Model Catalogue ────────────────────────────────────────────────────────────
 # Format: (repo_id, display_name, type, size_label, ram_min, vram_min, quant_default, description)
+# Ordered: MoE first (VibeBlade's strength), then dense.
 MODELS = [
-    # --- Dense (Small) ---
+    # --- MoE (VibeBlade excels here) ---
+    ("mistralai/Mixtral-8x7B-Instruct-v0.1",
+     "Mixtral 8×7B ⭐", "MoE", "~26GB", 32, 8, "Q4_K_M",
+     "Golden standard MoE. 8 experts, 2 active/token. Runs great with VibeBlade tiering."),
+    ("meta-llama/Llama-4-Scout-17B-16E-Instruct",
+     "Llama 4 Scout (109B MoE)", "MoE", "~40GB", 48, 8, "Q4_K_M",
+     "Meta's Llama 4. 16 experts, fast inference. VibeBlade showcase."),
+    ("deepseek-ai/DeepSeek-R1-0528-Q4_K_M-GGUF",
+     "DeepSeek R1", "MoE", "~67GB", 64, 8, "Q4_K_M",
+     "DeepSeek's reasoning model. Long chain-of-thought. 67B MoE."),
+    ("Qwen/Qwen3-235B-A22B",
+     "Qwen 3 235B MoE", "MoE", "~90GB", 96, 8, "Q4_K_M",
+     "Alibaba's MoE flagship. 22B active params, massive quality."),
+    ("meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+     "Llama 4 Maverick (400B MoE)", "MoE", "~110GB", 128, 16, "Q4_K_M",
+     "Meta's flagship. 128 experts, SOTA open-source quality."),
+    ("MiniMaxAI/MiniMax-M2.7-01",
+     "MiniMax M2.7 (456B MoE) ⭐", "MoE", "~115GB", 128, 16, "Q4_K_M",
+     "VibeBlade showcase. 456B params, best MoE efficiency."),
+    # --- Dense (VibeBlade still helps via sparsity + tiering) ---
     ("microsoft/Phi-4-mini-instruct",
      "Phi-4 Mini (3.8B)", "Dense", "~2.5GB", 8, 0, "Q4_K_M",
      "Microsoft. Tiny but punchy — great for edge devices."),
     ("meta-llama/Llama-3.1-8B-Instruct",
-     "Llama 3.1 8B ⭐", "Dense", "~5GB", 8, 0, "Q4_K_M",
-     "Golden standard. Most popular 8B model, excellent all-rounder."),
+     "Llama 3.1 8B", "Dense", "~5GB", 8, 0, "Q4_K_M",
+     "Most popular 8B model, excellent all-rounder."),
     ("mistralai/Mistral-7B-Instruct-v0.3",
      "Mistral 7B v0.3", "Dense", "~4GB", 8, 0, "Q4_K_M",
      "Fast & versatile. Battle-tested, huge community."),
-    # --- Dense (Medium) ---
     ("mistralai/Mistral-Small-3.1-24B-Instruct-2503",
      "Mistral Small 3.1 (24B)", "Dense", "~14GB", 24, 4, "Q4_K_M",
      "Mistral's best small model. Vision + text, excellent quality."),
@@ -495,27 +514,7 @@ MODELS = [
     ("google/gemma-3-27b-it",
      "Gemma 3 27B", "Dense", "~16GB", 32, 4, "Q4_K_M",
      "Google's latest Gemma. Strong reasoning, multilingual."),
-    # --- MoE ---
-    ("meta-llama/Llama-4-Scout-17B-16E-Instruct",
-     "Llama 4 Scout (109B MoE)", "MoE", "~40GB", 64, 8, "Q4_K_M",
-     "Meta's Llama 4. 16 active experts, fast inference."),
-    ("mistralai/Mixtral-8x7B-Instruct-v0.1",
-     "Mixtral 8×7B ⭐", "MoE", "~26GB", 48, 8, "Q4_K_M",
-     "Golden standard MoE. 8 experts, 2 active/token, battle-tested."),
-    ("Qwen/Qwen3-235B-A22B",
-     "Qwen 3 235B MoE", "MoE", "~90GB", 96, 8, "Q4_K_M",
-     "Alibaba's MoE flagship. 22B active params, massive quality."),
-    # --- Large / Specialized ---
-    ("meta-llama/Llama-4-Maverick-17B-128E-Instruct",
-     "Llama 4 Maverick (400B MoE)", "MoE", "~110GB", 128, 16, "Q4_K_M",
-     "Meta's flagship. 128 experts, SOTA open-source quality."),
-    ("deepseek-ai/DeepSeek-R1-0528-Q4_K_M-GGUF",
-     "DeepSeek R1", "MoE", "~67GB", 96, 8, "Q4_K_M",
-     "DeepSeek's reasoning model. Long chain-of-thought."),
-    ("MiniMaxAI/MiniMax-M2.7-01",
-     "MiniMax M2.7 (456B MoE)", "MoE", "~115GB", 128, 16, "Q4_K_M",
-     "VibeBlade showcase. 456B params, best MoE efficiency."),
-    ("custom", "(Custom / Browse HuggingFace)", "Custom", "?GB", 4, 0, "Q4_K_M",
+    ("custom", "✏️  Custom / Browse HuggingFace", "Custom", "?GB", 4, 0, "Q4_K_M",
      "Enter any HuggingFace repo ID or local GGUF path."),
 ]
 
@@ -536,17 +535,25 @@ def recommend_models(ram_gb, vram_gb):
 
 # ── Dialog Helpers (prompt_toolkit) ──────────────────────────────────────────
 def radio(title, options, default=0):
-    """Show a radio-list dialog and return selected key or index."""
+    """Show a radio-list dialog and return the return_value from the selected option.
+    
+    Options format: [(display_label, return_value), ...]
+    Default is an index into the options list.
+    
+    Returns return_value from the selected option, or None if cancelled.
+    """
     if HAS_PT:
-        return radio_list_dialog(
+        # radiolist_dialog values format: (value, text) — value is returned
+        dialog_values = [(ret, display) for display, ret in options]
+        return radiolist_dialog(
             title=title,
             text="Use arrow keys to navigate, Enter to confirm:",
-            options=[(label, key) for key, label in options],
+            values=dialog_values,
             default=options[default][1] if default < len(options) else None,
         ).run()
     else:
         print(f"\n  {title}")
-        for i, (key, label) in enumerate(options):
+        for i, (_ret, label) in enumerate(options):
             print(f"    {i+1}. {label}")
         while True:
             try:
@@ -557,18 +564,24 @@ def radio(title, options, default=0):
                 pass
 
 def checkbox(title, options, defaults=None):
-    """Show a checkbox dialog and return list of selected keys."""
+    """Show a checkbox dialog and return list of selected values.
+    
+    Options format: [(display_label, return_value), ...]
+    Defaults is a list of return_values to pre-check.
+    """
     if HAS_PT:
-        return checkbox_list_dialog(
+        # checkboxlist_dialog values format: (value, text)
+        dialog_values = [(ret, display) for display, ret in options]
+        return checkboxlist_dialog(
             title=title,
             text="Use space to toggle, Enter to confirm:",
-            options=[(label, key) for key, label in options],
+            values=dialog_values,
             default_values=defaults or [],
         ).run()
     else:
         print(f"\n  {title} (comma-separated numbers)")
-        for i, (key, label) in enumerate(options):
-            print(f"    {i+1}. {label} {'[default]' if defaults and key in defaults else ''}")
+        for i, (_ret, label) in enumerate(options):
+            print(f"    {i+1}. {label} {'[default]' if defaults and _ret in defaults else ''}")
         while True:
             try:
                 nums = input("  Choices (e.g. 1,3): ").strip()
@@ -579,7 +592,8 @@ def checkbox(title, options, defaults=None):
 
 def confirm(title, text="", default=True):
     if HAS_PT:
-        return confirm_dialog(title=title, text=text, default=default).run()
+        msg = title if not text else f"{title}\n{text}"
+        return confirm(message=msg)
     else:
         ch = input(f"\n  {title} {'[Y/n]: ' if default else '[y/N]: '}")
         return ch.lower() in ("y","yes") if ch else default
@@ -790,9 +804,13 @@ def interactive_model_select(ram_gb, vram_gb):
         print()
         choice = radio(
             "Select a model",
-            [(f"{i+1}. {m[1]} ({m[3]}) [{m[2]}]", i) for i, m in candidates],
+            [(f"{i+1}. {m[1]} ({m[3]}) [{m[2]}]", i) for i, m in enumerate(candidates)],
             default=0,
         )
+        if choice is None:
+            continue
+        if not isinstance(choice, int) or choice < 0 or choice >= len(candidates):
+            continue
         selected = candidates[choice][1]
 
         # If user picked "Custom / Browse HuggingFace", offer sub-options
