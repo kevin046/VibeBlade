@@ -13,7 +13,7 @@ pip install -e . && python -m vibeblade wizard
 
 Wizard auto-detects hardware, installs remaining prerequisites, configures memory offload, and downloads a model.
 
-[![Build](https://github.com/kevin046/VibeBlade/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/kevin046/VibeBlade/actions)
+[![Build](https://github.com/kevin046/VibeBlade/actions/workflows/build.yml/badge.svg?branch=main&style=flat-square)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Tests: 665 passed](https://img.shields.io/badge/tests-665%20passed-brightgreen.svg)]()
