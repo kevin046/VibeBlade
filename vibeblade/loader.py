@@ -257,7 +257,8 @@ def _dequant_q3_k(block: bytes) -> np.ndarray:
     qs_hi = np.frombuffer(block[82:146], dtype=np.uint8)
     qs_expanded = np.column_stack([qs_hi] * 4)
     shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
-    qs_upper = ((qs_expanded >> shifts) & 3).astype(np.float32).ravel()
+    qs_upper = ((qs_expanded.astype(np.uint32) >> shifts) & 3).astype(np.float32)
+    qs_upper = qs_upper.T.ravel()
     
     # Full qs = upper 2 bits << 1 | h_bit (3-bit value)
     qs = qs_upper * 2.0 + h_bits
@@ -339,9 +340,11 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     ql_low[1::2] = ((ql >> 4) & 0x0F).astype(np.float32)
 
     # qh: 64 bytes, extract 2 bits at positions 6,4,2,0 from each byte
+    # np.column_stack creates (64,4), but ravel() gives wrong order - use reshape differently
     qh_expanded = np.column_stack([qh] * 4)
-    shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
-    qh_high = ((qh_expanded >> shifts) & 3).astype(np.float32).ravel()
+    shifts_arr = np.array([6, 4, 2, 0], dtype=np.uint32)
+    qh_high = ((qh_expanded.astype(np.uint32) >> shifts_arr) & 3).astype(np.float32)
+    qh_high = qh_high.T.ravel()
 
     q = ql_low + qh_high * 16.0
     scales = np.repeat(sc, 16)
