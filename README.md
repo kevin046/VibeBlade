@@ -16,7 +16,7 @@ Wizard auto-detects hardware, installs remaining prerequisites, configures memor
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 665 passed](https://img.shields.io/badge/tests-665%20passed-brightgreen.svg)]()
+[![Tests: 776 passed](https://img.shields.io/badge/tests-776%20passed-brightgreen.svg)]()
 
 📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./WHITEPAPER.md#performance) · 🔒 [Security](./WHITEPAPER.md#security)
 
@@ -70,6 +70,30 @@ The wizard detects your hardware, installs any missing tools, configures memory 
 
 ---
 
+## Architecture
+
+VibeBlade combines six research-backed techniques into a unified inference pipeline:
+
+### TurboSparse — Activation Sparsity (Whitepaper §1)
+Only ~10% of FFN neurons fire per token. By predicting which ones activate *before* computing expensive matrix multiplications, VibeBlade skips ~90% of FFN compute. Uses an **EMA-based NeuronPredictor** that adapts to distribution shifts in real-time, plus **dReLU gating** `max(0,x)·max(0,-x)` for bidirectional sparsity.
+
+### ConFu — Speculative Decoding (Whitepaper §2)
+A lightweight draft model generates candidate tokens conditioned on **contemplate tokens** — latent reasoning vectors from the target model's feature layer. This reduces distribution mismatch between draft and target, achieving **85–92% acceptance rates** and **3.0–4.1× speedup** over autoregressive decoding.
+
+### RotateKV — Outlier-Aware KV Quantization (Whitepaper §3)
+Applies a block-diagonal **Hadamard rotation** to KV cache entries before 2-bit quantization. The rotation spreads outlier magnitudes across channels, enabling aggressive compression with minimal quality loss — **~8× memory reduction** on the KV cache.
+
+### SARATHI — Chunked Prefill Scheduling (Whitepaper §4)
+Eliminates head-of-line blocking by chunking prefill requests and interleaving them with decode iterations. Chunk sizes are dynamically computed from available KV cache budget: `chunk_size = floor(available_blocks × block_size / num_active)`.
+
+### SageSched — Uncertainty-Aware Scheduling (Whitepaper §4)
+Prioritizes requests by the **Shannon entropy** of their output distributions. High-uncertainty requests (where the model is least confident) get scheduled first since they benefit most from compute resources. A wait-time penalty prevents starvation.
+
+### Phase-Aware MoE Scheduling (DuoServe-style)
+Automatically transitions between prefill and decode phases, rebalancing expert placement across VRAM/RAM/SSD tiers. During decode, frequently-used experts are promoted to VRAM for low-latency token generation.
+
+---
+
 ## How it works
 
 **Activations-only PCIe transfer.** Expert weights (150MB each) stay in RAM/SSD. Only the tiny activation vector (~8KB) crosses PCIe. This breaks the bandwidth wall that makes MoE inference impossible on consumer GPUs.
@@ -107,7 +131,9 @@ pip install -e ".[grammar]"             # Structured output support
 
 ---
 
-## API (one line)
+## API
+
+### One-line usage
 
 ```python
 from vibeblade import VibeBladeModel
@@ -118,34 +144,71 @@ print(model.generate("Hello world", max_tokens=128))
 
 All acceleration layers auto-enable based on detected hardware. No configuration needed.
 
+### Advanced: whitepaper components
+
+```python
+from vibeblade import (
+    # §1 — TurboSparse: EMA neuron prediction + dReLU gating
+    EMANeuronPredictor, drelu_gate,
+    # §2 — ConFu: contemplate-token speculative decoding
+    ConFuSpeculator, ContemplateTokenLayer, ConFuStats,
+    # §3 — RotateKV: outlier-aware 2-bit KV quantization
+    RotateKVCache, rotate_kv, hadamard_rotation_matrix,
+    # §4 — SARATHI: chunked prefill scheduling
+    SarathiScheduler, SarathiConfig, SarathiRequest,
+    # §4 — SageSched: uncertainty-aware scheduling
+    SageSched, SageConfig, entropy_from_logits,
+)
+
+# Example: EMA-based neuron prediction for a 32-layer model
+predictor = EMANeuronPredictor(hidden_dim=28672, n_layers=32)
+for layer_idx in range(32):
+    mask = predictor.predict(layer_idx, gate_activations)
+    # Use mask for sparse FFN compute — skip ~90% of neurons
+    predictor.update(layer_idx, actual_activations)
+
+# Example: SARATHI chunked prefill scheduling
+scheduler = SarathiScheduler(SarathiConfig(kv_cache_blocks=1024, block_size=16))
+scheduler.add_request(prompt_tokens=256, priority=2.0)
+plan = scheduler.schedule()
+# plan["prefill_chunks"] → [(req_id, tokens), ...]
+# plan["decode_requests"] → [req_id, ...]
+```
+
 ---
 
 ## Project structure
 
 ```
-vibeblade/          # Python package
-  ├── __init__.py    # VibeBladeModel + enable_*() API
-  ├── transformer.py # LLaMA forward pass (RMSNorm, RoPE, SwiGLU)
-  ├── loader.py      # GGUF model loader
-  ├── generate.py    # Text generation + sampling
-  ├── benchmark.py   # llama.cpp-style benchmark suite
-  ├── sparse.py      # TurboSparse dReLU activation sparsity
-  ├── quant.py       # RotorQuant 4-bit weight quantization
-  ├── cache.py       # KV cache
-  ├── moe.py         # MoE router + expert loader
-  ├── tiered_memory.py # VRAM/RAM/SSD 3-tier memory manager
-  ├── setup_wizard.py # Interactive hardware setup (wizard command)
-  └── openai_server.py # OpenAI-compatible API server
+vibeblade/              # Python package
+  ├── __init__.py       # VibeBladeModel + public API
+  ├── transformer.py    # LLaMA forward pass (RMSNorm, RoPE, SwiGLU)
+  ├── loader.py         # GGUF model loader
+  ├── generate.py       # Text generation + sampling
+  ├── benchmark.py      # llama.cpp-style benchmark suite
+  ├── sparse.py         # TurboSparse dReLU + EMA NeuronPredictor
+  ├── quant.py          # RotorQuant 4-bit weight quantization
+  ├── cache.py          # KV cache
+  ├── rotatekv.py       # RotateKV Hadamard rotation + 2-bit quantization
+  ├── confu.py          # ConFu contemplate-token speculative decoding
+  ├── sarathi.py        # SARATHI chunked prefill scheduler
+  ├── sagesched.py      # SageSched uncertainty-aware scheduler
+  ├── moe.py            # MoE router + expert loader
+  ├── phase_scheduler.py # Phase-aware prefill/decode scheduling
+  ├── tiered_memory.py  # VRAM/RAM/SSD 3-tier memory manager
+  ├── eviction.py       # LRU-K / frequency / cost-benefit / bandit policies
+  ├── setup_wizard.py   # Interactive hardware setup (wizard command)
+  └── openai_server.py  # OpenAI-compatible API server
 
-tests/               # 578+ tests covering all modules
-cpp/                 # Optional C++ AVX-512/NEON kernels
+tests/                 # 776 tests covering all modules
+cpp/                   # Optional C++ AVX-512/NEON kernels
 ```
 
 ---
 
 ## Powered by
 
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (GGUF format) · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllm) (PagedAttention)
+[llama.cpp](https://github.com/ggml-org/llama.cpp) (GGUF format) · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllm) (PagedAttention) · [SARATHI](https://arxiv.org/abs/2403.07219) (chunked prefill) · [EAGLE](https://arxiv.org/abs/2401.15077) (speculative decoding) · [RotateKV](https://arxiv.org/abs/2408.00784) (KV quantization)
 
 ---
 
