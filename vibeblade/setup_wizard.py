@@ -785,12 +785,34 @@ def interactive_model_select(ram_gb, vram_gb):
     """Show categorized model picker with hardware awareness + HuggingFace search."""
     candidates = recommend_models(ram_gb, vram_gb)
 
+    # ── Scan for already-downloaded models ──
+    detected = []
+    try:
+        from .model_hub import scan_cached_models
+        cached = scan_cached_models()
+        for m in cached:
+            detected.append((m["path"], m["name"], m["size_gb"], m["source"]))
+    except Exception:
+        pass
+
     while True:
         print()
+
+        # Show detected downloaded models first
+        if detected:
+            panel("Downloaded Models Found",
+                  f"{len(detected)} model(s) detected on your system")
+            rows = []
+            for i, (path, name, size, source) in enumerate(detected):
+                short_name = name[:40]
+                rows.append((str(i+1), short_name, f"{size}GB", source))
+            print_table(["#", "Model File", "Size", "Source"], rows)
+            print(f"  {_y('Tip:')} Select a downloaded model above, or pick from the catalog below.")
+            print()
+
         panel("Model Selection",
               f"Showing {len(candidates) - 1} models your hardware can run.\n"
-              f"RAM: {ram_gb}GB | VRAM: {vram_gb or 0}GB",
-              "bold cyan")
+              f"RAM: {ram_gb}GB | VRAM: {vram_gb or 0}GB")
 
         rows = [(str(i+1), m[0].split("/")[-1][:30], m[2], m[3],
                    f"≥{m[4]}GB", f"≥{m[5]}GB", m[7][:50])
@@ -798,16 +820,57 @@ def interactive_model_select(ram_gb, vram_gb):
         print_table(["#", "Model", "Type", "Size", "RAM", "VRAM", "Description"], rows)
 
         print()
+        # Build options: detected models first, then catalog
+        all_options = []
+        if detected:
+            for i, (path, name, size, source) in enumerate(detected):
+                all_options.append((f"D{i+1}. {name} ({size}GB) [{source}]",
+                                    ("detected", i)))
+            all_options.append(("", "separator_detected"))
+
+        for i, (_, m) in enumerate(candidates):
+            all_options.append((f"{m[1]} ({m[3]}) [{m[2]}]",
+                                ("catalog", i)))
+
+        # Remove separators for radio display
+        radio_options = [(label, val) for label, val in all_options
+                         if val != "separator_detected"]
+
         choice = radio(
             "Select a model",
-            [(f"{i+1}. {m[1]} ({m[3]}) [{m[2]}]", i) for i, (_, m) in enumerate(candidates)],
+            radio_options,
             default=0,
         )
         if choice is None:
             continue
-        if not isinstance(choice, int) or choice < 0 or choice >= len(candidates):
+
+        # Handle detected model selection
+        if isinstance(choice, tuple) and choice[0] == "detected":
+            idx = choice[1]
+            path, name, size, source = detected[idx]
+            # Build a model tuple from the detected file
+            from .model_hub import _detect_gguf_quant
+            quant = _detect_gguf_quant(name) if "unknown" not in _detect_gguf_quant(name).lower() else "Q4_K_M"
+            return (
+                str(path),       # repo_id = local path
+                name[:30],        # display name
+                "Downloaded",     # type
+                f"~{size}GB",     # size label
+                ram_gb or 8,      # min ram
+                0,                # min vram
+                quant,            # quant
+                f"Local file from {source}",
+            )
+
+        # Handle catalog selection
+        if isinstance(choice, tuple) and choice[0] == "catalog":
+            cat_idx = choice[1]
+        else:
+            cat_idx = choice
+
+        if cat_idx < 0 or cat_idx >= len(candidates):
             continue
-        selected = candidates[choice][1]
+        selected = candidates[cat_idx][1]
 
         # If user picked "Custom / Browse HuggingFace", offer sub-options
         if selected[0] == "custom":
