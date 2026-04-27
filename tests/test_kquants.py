@@ -2,7 +2,6 @@
 
 import struct
 import numpy as np
-import pytest
 from vibeblade.loader import (
     GGUF_TYPE_Q3_K,
     GGUF_TYPE_Q4_K,

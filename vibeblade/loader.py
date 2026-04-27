@@ -388,7 +388,7 @@ def _dequant_q8_k(block: bytes) -> np.ndarray:
 def _dequant_q8_1(block: bytes, block_size: int = 32) -> np.ndarray:
     """Dequantize a Q8_1 block: f16 scale + f16 s + f16 b + 32 int8 values."""
     d = np.frombuffer(block[0:2], dtype=np.float16).astype(np.float32)[0]
-    s = np.frombuffer(block[2:4], dtype=np.float16).astype(np.float32)[0]
+    np.frombuffer(block[2:4], dtype=np.float16)  # s (sum, unused in dequant)
     b = np.frombuffer(block[4:8], dtype=np.float16).astype(np.float32)[0]
     vals = np.frombuffer(block[8:8 + block_size], dtype=np.int8).astype(np.float32)
     return vals * d + b
