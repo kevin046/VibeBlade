@@ -1244,10 +1244,10 @@ def main():
     clear_screen()
 
     print()
-    print("_c(_b(" + "="*60 + "))")
-    print("_c(_b(     VIBEBlade SETUP WIZARD))")
-    print("_c(_b(     Interactive Guided Setup))")
-    print("_c(_b(" + "="*60 + "))")
+    print(_c(_b("=" * 60)))
+    print(_c(_b("     VIBEBlade SETUP WIZARD")))
+    print(_c(_b("     Interactive Guided Setup")))
+    print(_c(_b("=" * 60)))
     print()
 
     # ── Welcome ──────────────────────────────────────────────────────────────
@@ -1266,7 +1266,7 @@ def main():
 
     # ── Step 1: Detect Hardware ───────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 1: Hardware Detection))")
+    print(_c(_b("STEP 1: Hardware Detection")))
     print()
 
     ram  = get_ram_gb()
@@ -1279,7 +1279,7 @@ def main():
 
     # If RAM/SSD detection failed, ask user manually
     if ram is None:
-        print("_y(⚠ Automatic RAM detection failed.)")
+        print(_y("⚠ Automatic RAM detection failed."))
         try:
             ans = input("  Enter your total RAM in GB (e.g. 32): ").strip()
             if ans and ans.isdigit():
@@ -1287,7 +1287,7 @@ def main():
         except (EOFError, KeyboardInterrupt):
             pass
     if not ssd:
-        print("_y(⚠ Automatic SSD detection failed.)")
+        print(_y("⚠ Automatic SSD detection failed."))
         try:
             ans = input("  Do you have an SSD? (Y/n): ").strip().lower()
             if ans != "n":
@@ -1315,18 +1315,18 @@ def main():
 
 
     if not py_ok:
-        print("\n_r(ERROR: Python 3.10+ required. Please upgrade Python.)")
+        print("\n" + _r("ERROR: Python 3.10+ required. Please upgrade Python."))
         sys.exit(1)
 
     pause("Press [Enter] to continue")
 
     # ── Step 2: Model Selection ──────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 2: Choose Model))")
+    print(_c(_b("STEP 2: Choose Model")))
     print()
 
     model = interactive_model_select(ram, vram_total or 0)
-    print(f"\n  _g(Selected:) {model[1]} ({model[0]})")
+    print(f'\n  {_g("Selected:")} {model[1]} ({model[0]})')
     print(f"             Type: {model[2]} | Size: {model[3]} | Min RAM: {model[4]}GB")
 
     custom_id = None
@@ -1334,14 +1334,14 @@ def main():
         custom_id = text_input("Enter HuggingFace model ID or local GGUF path",
                                 default="")
         if not custom_id:
-            print("_r(No model specified — exiting.)")
+            print(_r("No model specified — exiting."))
             sys.exit(1)
 
     pause("Press [Enter] to continue")
 
     # ── Step 3: Offload Config ───────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 3: Memory Offloading))")
+    print(_c(_b("STEP 3: Memory Offloading")))
     print()
 
     model_type = model[2]
@@ -1359,16 +1359,16 @@ def main():
 
     # ── Step 4: Quantization ─────────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 4: Quantization))")
+    print(_c(_b("STEP 4: Quantization")))
     print()
     quant = interactive_quant_select()
-    print(f"\n  _g(Selected:) {quant}")
+    print(f'\n  {_g("Selected:")} {quant}')
 
     pause("Press [Enter] to continue")
 
     # ── Step 5: Install & Verify ────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 5: Install VibeBlade))")
+    print(_c(_b("STEP 5: Install VibeBlade")))
     print()
 
     turbodir = Path.cwd()
@@ -1380,11 +1380,11 @@ def main():
 
     # ── Auto-detect acceleration backend ─────────────────────────────────
     accel_extra, accel_name = detect_accel_backend()
-    print(f"  _g(_b(Detected acceleration:)) {accel_name}")
+    print(f"  {_g(_b('Detected acceleration:'))} {accel_name}")
     if accel_extra:
-        print(f"  _d(Installing with extras: pip install -e .{accel_extra})")
+            print(f"  {_d('Installing with extras: pip install -e .' + accel_extra)}")
     else:
-        print("  _d(Installing base package (no GPU extras needed))")
+            print("  " + _d("Installing base package (no GPU extras needed)"))
     print()
 
     if not venv_dir.exists():
@@ -1418,13 +1418,13 @@ def main():
 
     # ── Step 6: Write Config ────────────────────────────────────────────────
     clear_screen()
-    print("_c(_b(STEP 6: Generate Config))")
+    print(_c(_b("STEP 6: Generate Config")))
     print()
 
     model_id = custom_id if custom_id else model[0]
     cfg = write_config(model_id, offload, quant)
 
-    print("  Generated _c(vibeblade.yaml:)")
+    print("  Generated " + _c("vibeblade.yaml:"))
     print(json.dumps(cfg, indent=2))
 
     # ── Step 7: Optional Download ───────────────────────────────────────────
@@ -1433,7 +1433,7 @@ def main():
         print(f"  {_d(model[0])}")
     elif inet and model[0] != "custom":
         clear_screen()
-        print("_c(_b(STEP 7: Download Model (Optional)))")
+        print(_c(_b("STEP 7: Download Model (Optional)")))
         print()
         dl = confirm("Download the model now?",
                       text=f"This will download {model[1]} (~{model[3]}) from HuggingFace.\n"
@@ -1447,15 +1447,15 @@ def main():
             else:
                 print(f"\n  ✗ Download failed: {path}")
     else:
-        print("_d(STEP 7: Download skipped (offline or custom model))")
+        print(_d("STEP 7: Download skipped (offline or custom model)"))
 
     # ── Final Summary ────────────────────────────────────────────────────────
     clear_screen()
-    activate = ("venv\\\\Scripts\\\\activate" if platform.system()=="Windows"
+    activate = ("venv\\Scripts\\activate" if platform.system()=="Windows"
                  else "source venv/bin/activate")
-    print("_g(_b(" + "="*60 + "))")
-    print("_g(_b(       SETUP COMPLETE!))")
-    print("_g(_b(" + "="*60 + "))")
+    print(_g(_b("=" * 60)))
+    print(_g(_b("       SETUP COMPLETE!")))
+    print(_g(_b("=" * 60)))
 
     print_table(["Setting", "Value"], [
         ("Model", model_id),
@@ -1468,31 +1468,51 @@ def main():
         ("Config file", "vibeblade.yaml"),
     ])
 
-
     print()
-    print("  _g(_b(NEXT STEPS:))")
+    print("  " + _g(_b("NEXT STEPS:")))
     print("  1. Activate environment:")
-    print(f"       _y({activate})")
+    print("       " + _y(activate))
     print()
     print("  2. Run benchmark:")
-    print("       _y(python -m vibeblade bench --quick)")
+    print("       " + _y("python -m vibeblade bench --quick"))
     print()
     print("  3. Run inference:")
-    print("       _y(python -m vibeblade run --config vibeblade.yaml)")
-    print("       _y(python -m vibeblade run --prompt \"Hello world\")")
+    print("       " + _y("python -m vibeblade run --config vibeblade.yaml"))
+    print("       " + _y("python -m vibeblade run --prompt \"Hello world\""))
     print()
     print("  4. Start API server:")
-    print(f"       _y(python -m vibeblade serve --model {model_id} --port 8000)")
+    print("       " + _y(f"python -m vibeblade serve --model {model_id} --port 8000"))
     print()
-    print("_g(_b(" + "="*60 + "))")
+    print("  5. Chat with your model:")
+    print("       " + _y("python -m vibeblade chat --config vibeblade.yaml"))
     print()
-    print("  _d(VibeBlade by _b(VibeDrift Inc.) — vibedrift.com | github.com/kevin046/VibeBlade)")
+    print(_g(_b("=" * 60)))
     print()
+
+    # ── Offer to launch chat immediately ─────────────────────────────────
+    launch_chat = confirm(
+        "Launch chat now?",
+        text="Start chatting with your model right away?",
+        default=True,
+    )
+    if launch_chat:
+        print(f"\n  {_c(_b('Launching VibeBlade Chat...'))}")
+        print()
+        try:
+            from .chat import chat_loop
+            chat_loop(model_path=model_id)
+        except Exception as e:
+            print(f"  {_r(f'Could not launch chat: {e}')}")
+            print(f"  {_d('You can start it manually later with:')}")
+            print(f"  {_d('python -m vibeblade chat --config vibeblade.yaml')}")
+    else:
+        print(f"  {_d('VibeBlade by _b(VibeDrift Inc.) — vibedrift.com | github.com/kevin046/VibeBlade)')}")
+        print()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n  _y(Setup interrupted. Re-run anytime:)")
-        print("  _c(  python setup_wizard.py)")
+        print("\n\n  " + _y("Setup interrupted. Re-run anytime:"))
+        print("  " + _c("  python setup_wizard.py"))
         sys.exit(0)

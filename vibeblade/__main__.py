@@ -103,11 +103,13 @@ def main():
         print("  bench       Run performance benchmark suite")
         print("  run         Run inference with memory tiering")
         print("  wizard      Interactive guided setup wizard")
+        print("  chat        Interactive chat with loaded model")
         print()
         print("  serve --help      Show serve options")
         print("  bench --help      Show benchmark options")
         print("  run --help        Show run options")
         print("  wizard --help     Show wizard options")
+        print("  chat --help       Show chat options")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -138,6 +140,46 @@ def main():
     elif cmd == "wizard":
         from . import setup_wizard as _sw
         _sw.main()
+    elif cmd == "chat":
+        from .chat import chat_loop
+        import argparse
+
+        parser = argparse.ArgumentParser(
+            prog="vibeblade chat",
+            description="Interactive chat with a local LLM",
+        )
+        parser.add_argument("--model", type=str, default=None, help="Path to .gguf file")
+        parser.add_argument("--config", type=str, default="vibeblade.yaml", help="Path to vibeblade.yaml")
+        parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens per response")
+        parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+        parser.add_argument("--top-k", type=int, default=50, help="Top-k filtering")
+        parser.add_argument("--top-p", type=float, default=0.9, help="Top-p (nucleus) filtering")
+        args = parser.parse_args(sys.argv[2:])
+
+        # Resolve model path
+        model_path = args.model
+        if not model_path:
+            # Try config file
+            try:
+                import yaml
+                with open(args.config, "r") as f:
+                    cfg = yaml.safe_load(f)
+                model_path = cfg.get("model", "")
+            except Exception:
+                pass
+        if not model_path:
+            print("No model specified. Use --model or --config.", file=sys.stderr)
+            print("  python -m vibeblade chat --model model.gguf", file=sys.stderr)
+            print("  python -m vibeblade chat --config vibeblade.yaml", file=sys.stderr)
+            sys.exit(1)
+
+        chat_loop(
+            model_path=model_path,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+        )
     else:
         print(f"Unknown command: {cmd}")
         print("Use 'serve', 'bench', 'run', or 'wizard'")
