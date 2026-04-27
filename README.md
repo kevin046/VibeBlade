@@ -6,12 +6,19 @@
 [![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
 [![Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
 
+**Linux / macOS**
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
 pip install -e . && python -m vibeblade wizard
 ```
 
-Wizard auto-detects hardware, installs remaining prerequisites, configures memory offload, and downloads a model.
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
+pip install -e .; python -m vibeblade wizard
+```
+
+The wizard detects your hardware, installs any missing tools, configures memory offload, and downloads a model. You're ready to run in under 5 minutes.
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
@@ -56,26 +63,6 @@ VibeBlade achieves this by running 3–6× larger models at the same speed throu
 | M4 Ultra (128GB) | 114.0 t/s | 15.0 t/s | 7.6× |
 | RTX 4090 (24GB) | 18.4 t/s | 3.1 t/s | 5.9× |
 | Strix Halo (128GB) | 22.0 t/s | 4.2 t/s | 5.2× |
-
----
-
-## Quick start
-
-Pick your platform and run these two commands:
-
-**Linux / macOS**
-```bash
-git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e . && python -m vibeblade wizard
-```
-
-**Windows (PowerShell)**
-```powershell
-git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
-pip install -e .; python -m vibeblade wizard
-```
-
-The wizard detects your hardware, installs any missing tools, configures memory offload, and downloads a model. You're ready to run in under 5 minutes.
 
 ---
 
