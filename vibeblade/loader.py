@@ -30,7 +30,7 @@ import numpy as np
 
 # ── GGUF constants ──
 
-GGUF_MAGIC = 0x46475547
+GGUF_MAGIC = 0x46554747  # "GGUF" as little-endian uint32
 
 # GGUF tensor type IDs (the ones we handle)
 GGUF_TYPE_F32 = 0
