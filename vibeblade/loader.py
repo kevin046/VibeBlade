@@ -93,7 +93,7 @@ _QBLOCK_BYTES: dict[int, int] = {
     GGUF_TYPE_Q8_0: 34,   # 2 (scale) + 32
     GGUF_TYPE_Q8_1: 40,   # 2 (scale) + 2 (sum) + 4 (b) + 32
     GGUF_TYPE_Q2_K: 84,   # 2 + 2 + 16 + 64
-    GGUF_TYPE_Q3_K: 110,  # 2 + 2 + 16 + 32 + 32 + 32
+ GGUF_TYPE_Q3_K: 178, # 2 + 2 + 16 + 32 + 32 + 32 + 64 (d, mins, scales, h, qs_hi, qs_lo)
     GGUF_TYPE_Q4_K: 144,  # 2 + 2 + 12 + 2 + 2 + 12 + 2 + 2 + 12 + 128
     GGUF_TYPE_Q5_K: 176,  # 2 + 2 + 12 + 2 + 2 + 12 + 4 + 12 + 128 + 32
     GGUF_TYPE_Q6_K: 210,  # 2 + 2 + 16 + 32 + 64 + 64 + 32
@@ -236,27 +236,35 @@ def _unpack_6bit(packed: np.ndarray, n_values: int) -> np.ndarray:
 
 
 def _dequant_q3_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q3_K block (256 elements, 110 bytes) — vectorized."""
+    """Dequantize a Q3_K block (256 elements, 178 bytes) — vectorized."""
+    # Layout: d(2) + mins(32) + scales(16) + h(32) + qs_hi(64) + qs_lo(64) = 178 bytes
     d = np.frombuffer(block[0:2], dtype=np.float16).astype(np.float32)[0]
     if not np.isfinite(d):
         d = 0.0
-    h = np.frombuffer(block[2:34], dtype=np.uint8)
-    qs = np.frombuffer(block[34:98], dtype=np.uint8)
-    sc_packed = np.frombuffer(block[98:110], dtype=np.uint8)
-
+    
+    # scales: 16 bytes unpacked to 16 values (6-bit each)
+    sc_packed = np.frombuffer(block[34:50], dtype=np.uint8)
     scales = _unpack_6bit(sc_packed, 16)
-
-    # 4 values per qs byte (2 bits each)
-    qs_exp = np.repeat(qs, 4)                         # 256
-    qs_lo = ((qs_exp >> np.tile([0, 2, 4, 6], 64)) & 0x03).astype(np.float32)
-
-    # 8 bits per h byte (1 bit each)
-    h_exp = np.repeat(h.astype(np.uint32), 8)         # 256
-    h_bit = ((h_exp >> np.tile(np.arange(8), 32)) & 1).astype(np.float32)
-
-    q = qs_lo + h_bit * 4.0
+    
+    # h: 32 bytes (256 bits, 1 bit per value)
+    h = np.frombuffer(block[50:82], dtype=np.uint8)
+    # Extract 1 bit at each position using stride-based extraction
+    h_bits = np.zeros(256, dtype=np.float32)
+    for i in range(8):
+        h_bits[i::8] = ((h >> (7 - i)) & 1).astype(np.float32)
+    
+    # qs_hi: 64 bytes, extract 2 bits at positions 6,4,2,0 from each byte
+    qs_hi = np.frombuffer(block[82:146], dtype=np.uint8)
+    qs_expanded = np.column_stack([qs_hi] * 4)
+    shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
+    qs_upper = ((qs_expanded >> shifts) & 3).astype(np.float32).ravel()
+    
+    # Full qs = upper 2 bits << 1 | h_bit (3-bit value)
+    qs = qs_upper * 2.0 + h_bits
+    
+    # Apply scale
     sc_idx = np.repeat(np.arange(16), 16)
-    return (q - 4.0) * scales[sc_idx] * d
+    return (qs - 4.0) * scales[sc_idx] * d
 
 
 
@@ -312,10 +320,10 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     """Dequantize a Q6_K block (256 elements, 210 bytes) — vectorized.
 
     Layout:
-      [0:128]   ql: 4-bit low quants (2 per byte)
-      [128:192] qh: 2-bit high quants (4 per byte)
-      [192:208] sc: 16 int8 sub-block scales
-      [208:210] d:  f16 super-block scale
+    [0:128] ql: 4-bit low quants (2 per byte)
+    [128:192] qh: 2-bit high quants (4 per byte)
+    [192:208] sc: 16 int8 sub-block scales
+    [208:210] d: f16 super-block scale
     """
     d = np.frombuffer(block[208:210], dtype=np.float16).astype(np.float32)[0]
     if not np.isfinite(d):
@@ -330,12 +338,13 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     ql_low[0::2] = (ql & 0x0F).astype(np.float32)
     ql_low[1::2] = ((ql >> 4) & 0x0F).astype(np.float32)
 
-    # qh: 4 × 2-bit fields per byte → 256 values
-    qh_exp = np.repeat(qh.astype(np.uint32), 4)  # 256
-    qh_high = ((qh_exp >> np.tile([0, 2, 4, 6], 64)) & 0x03).astype(np.float32)
+    # qh: 64 bytes, extract 2 bits at positions 6,4,2,0 from each byte
+    qh_expanded = np.column_stack([qh] * 4)
+    shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
+    qh_high = ((qh_expanded >> shifts) & 3).astype(np.float32).ravel()
 
     q = ql_low + qh_high * 16.0
-    scales = np.repeat(sc, 16)   # 16 sub-blocks × 16 values = 256
+    scales = np.repeat(sc, 16)
     return (q - 32.0) * scales * d
 
 
