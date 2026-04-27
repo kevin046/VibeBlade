@@ -2,7 +2,7 @@
 
 **Kevin Lin — Vibedrift Inc.**
 
-**Version 1.2 — April 2026**
+**Version 1.3 — April 2026**
 
 ---
 
@@ -695,4 +695,4 @@ The next step is validation: benchmarking these estimates against real hardware 
 
 ---
 
-*VibeBlade is open source under the Apache 2.0 license: [github.com/kevin046/VibeBlade](https://github.com/kevin046/VibeBlade)*
+*VibeBlade is open source under the BSL 1.1 license: [github.com/kevin046/VibeBlade](https://github.com/kevin046/VibeBlade). Free for personal, educational, and non-commercial use. Automatically converts to Apache 2.0 on May 1, 2028.*
