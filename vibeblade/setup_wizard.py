@@ -936,17 +936,32 @@ def download_model(model_id, quant="Q4_K_M", progress_cb=None):
         return False, str(e)
 
 # ── Verify / Run Tests ─────────────────────────────────────────────────────────
+def _venv_python() -> str:
+    """Return the Python executable from the venv (if running inside wizard)."""
+    # Wizard stores venv path; detect it from sys.prefix or nearby venv dir
+    from pathlib import Path
+    import os
+    base = Path(os.getcwd())
+    for candidate in [base / "venv", base.parent / "venv"]:
+        if candidate.exists():
+            scripts = candidate / ("Scripts" if os.name == "nt" else "bin")
+            exe = scripts / ("python.exe" if os.name == "nt" else "python")
+            if exe.exists():
+                return str(exe)
+    return sys.executable
+
 def verify_install():
+    py = _venv_python()
     print()
     print("  [1/2] Installing pytest...")
-    ok, _ = run("pip install pytest -q", fatal=False)
+    ok, _ = run([py, "-m", "pip", "install", "pytest", "-q"], fatal=False)
     if ok:
         print("    ✓ pytest installed")
     else:
         print("    ✗ pytest install failed")
 
     print("  [2/2] Running test suite...")
-    ok, out = run("pytest tests/test_sparse.py --tb=line -q", fatal=False)
+    ok, out = run([py, "-m", "pytest", "tests/test_sparse.py", "--tb=line", "-q"], fatal=False)
     if ok and "passed" in out.lower():
         print("    ✓ All tests pass!")
         return True
