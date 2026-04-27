@@ -33,7 +33,9 @@ def main():
     )
     parser.add_argument(
         "model",
-        help="Model identifier (e.g., minimax-m2.7) or path to GGUF file",
+        nargs="?",
+        default=None,
+        help="Model identifier (HF repo ID, model name, or .gguf path). Not needed with --config.",
     )
     parser.add_argument(
         "--vram",
@@ -75,6 +77,13 @@ def main():
         type=str,
         default=None,
         help="Path to vibeblade.yaml config file (overrides --vram/--ram flags)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        dest="model_flag",
+        help="Override model path (for use with --config)",
     )
     parser.add_argument(
         "--profile-experts",
@@ -167,25 +176,45 @@ def main():
         return
 
     # Inference mode
-    model_path = args.model
-    if not os.path.isfile(model_path):
-        # Try as model hub identifier
-        print(f"Model path '{model_path}' not found locally.")
-        print("Checking model hub...")
-        try:
-            from .model_hub import resolve_model_path
-            model_path = resolve_model_path(model_path)
-            print(f"Resolved to: {model_path}")
-        except Exception as e:
-            print(f"Error resolving model: {e}", file=sys.stderr)
-            sys.exit(1)
+    model_input = args.model_flag or args.model
 
-    if not os.path.isfile(model_path):
-        print(f"Model file not found: {model_path}", file=sys.stderr)
+    # If no model specified, try to read from config file
+    if not model_input and args.config:
+        try:
+            import yaml
+            with open(args.config, "r") as f:
+                cfg_data = yaml.safe_load(f)
+            model_input = cfg_data.get("model", "")
+        except Exception:
+            pass
+
+    if not model_input:
+        print("No model specified. Use: python -m vibeblade run <model-or-path>", file=sys.stderr)
+        print("  Or: python -m vibeblade run --config vibeblade.yaml", file=sys.stderr)
         sys.exit(1)
 
-    prompt = args.prompt or "Hello, how are you?"
+    # Resolve model path — checks local file, HF cache, LM Studio
+    from .model_hub import resolve_model_path
+
+    # Read quant from config if available
+    quant = ""
+    try:
+        import yaml
+        with open(args.config or "vibeblade.yaml", "r") as f:
+            cfg_data = yaml.safe_load(f)
+        quant = cfg_data.get("quantization", "")
+    except Exception:
+        pass
+
+    try:
+        model_path = str(resolve_model_path(model_input, quant=quant))
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
     print(f"Model:  {model_path}")
+
+    prompt = args.prompt or "Hello, how are you?"
     print(f"Prompt: {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
     print()
 

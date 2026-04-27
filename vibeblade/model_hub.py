@@ -1,471 +1,383 @@
-"""VibeBlade Model Hub — HuggingFace integration for quantized model discovery & download.
+"""Model discovery — find GGUF files from HuggingFace cache, LM Studio, or local paths.
 
-Supports searching, browsing, and downloading pre-quantized models in GGUF,
-AWQ, GPTQ, and safetensors formats. Compatible with LM Studio, llama.cpp,
-Ollama, KoboldCpp, and other GGUF-consuming platforms.
+VibeBlade searches for models in this order:
+1. Exact local file path
+2. HF cache (~/.cache/huggingface/hub/)
+3. LM Studio directory (%LOCALAPPDATA%/LM Studio/ on Windows, ~/.cache/lm-studio/ on Linux)
+4. Current working directory
 """
 
 from __future__ import annotations
 
-import logging
 import os
 import re
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
-logger = logging.getLogger(__name__)
 
-# ── Constants ──
+# ── File Classification ──────────────────────────────────────────────────────
 
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
+# Common GGUF quantization patterns
+_GGUF_QUANT_RE = re.compile(
+    r"[._-]([IQ]?[QBKM][0-9](?:_[0-9A-Z]+)?)\b",
+    re.IGNORECASE,
+)
 
-# Quantization format tags on HuggingFace
-QUANT_TAGS = {
-    "gguf": ["gguf"],
-    "awq": ["awq"],
-    "gptq": ["gptq", "gptq-4bit", "gptq-8bit"],
-    "bnb": ["bitsandbytes", "bnb-4bit", "bnb-8bit"],
-}
-
-# Popular quantized model publishers (curated for quality)
-POPULAR_QUANT_PUBLISHERS = [
-    "bartowski",
-    "TheBloke",
-    "QuantFactory",
-    "ikawrakow",
-    "leliuga",
-    "MaziyarPanahi",
+# Direct match for common quant types (more specific, checked first)
+_DIRECT_QUANTS = [
+    "IQ4_XS", "IQ3_XXS", "IQ3_S", "IQ2_XXS", "IQ2_S", "IQ1_S",
+    "IQ4_NL", "IQ3_M", "IQ2_M", "IQ1_M",
+    "Q2_K", "Q3_K_S", "Q3_K_M", "Q3_K_L",
+    "Q4_0", "Q4_1", "Q4_K_S", "Q4_K_M", "Q4_K_L",
+    "Q5_0", "Q5_1", "Q5_K_S", "Q5_K_M",
+    "Q6_K", "Q8_0",
+    "F16", "F32", "BF16", "FP16",
 ]
 
-# Recommended GGUF quant sizes (sorted by preference)
-GGUF_QUANT_SIZES = [
-    "Q4_K_M",
-    "Q4_K_S",
-    "Q5_K_M",
-    "Q5_K_S",
-    "Q6_K",
-    "Q8_0",
-    "Q3_K_M",
-    "Q2_K",
-    "F16",
-    "F32",
-    "IQ4_XS",
-]
 
-# ── Data Classes ──
+def _detect_gguf_quant(filename: str) -> str:
+    """Extract quantization type from a GGUF filename.
 
+    Examples:
+        "model.Q4_K_M.gguf" -> "Q4_K_M"
+        "model-f16.gguf" -> "F16"
+        "model.IQ4_XS.gguf" -> "IQ4_XS"
+        "model.Q8_0.gguf" -> "Q8_0"
+    """
+    upper = filename.upper()
+    # Try direct match first (most common quant types)
+    for q in _DIRECT_QUANTS:
+        if q in upper:
+            return q
+    # Fallback regex
+    m = _GGUF_QUANT_RE.search(upper)
+    if m:
+        return m.group(1).upper()
+    return "unknown"
+
+
+def classify_file(filename: str) -> tuple[str, str]:
+    """Classify a model file by format and quantization.
+
+    Returns (format, quant_type).
+    """
+    name = filename.lower()
+    if name.endswith(".gguf"):
+        return "gguf", _detect_gguf_quant(filename)
+    if name.endswith(".safetensors"):
+        if "gptq" in name:
+            return "gptq", "GPTQ"
+        if "awq" in name:
+            return "awq", "AWQ"
+        return "safetensors", "full"
+    return "unknown", "unknown"
+
+
+def is_quantized_file(filename: str) -> bool:
+    """Check if a filename indicates a quantized model."""
+    name = filename.lower()
+    if name.endswith(".gguf"):
+        q = _detect_gguf_quant(filename)
+        return q != "F16" and q != "F32" and q != "BF16" and q != "FP16" and q != "unknown"
+    return "awq" in name or "gptq" in name or "int4" in name or "int8" in name
+
+
+# ── Data Classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class QuantizedFile:
-    """A single quantized file available for download."""
+    """A quantized model file with metadata."""
+
     filename: str
     size_bytes: int
-    quant_type: str  # e.g., "Q4_K_M", "Q5_K_S", "awq-4bit"
-    format: str      # "gguf", "awq", "gptq", "safetensors"
-    url: str = ""
+    quant_type: str
+    format: str
 
     @property
     def size_human(self) -> str:
-        for unit in ("B", "KB", "MB", "GB", "TB"):
-            if self.size_bytes < 1024:
-                return f"{self.size_bytes:.1f} {unit}"
-            self.size_bytes /= 1024
-        return f"{self.size_bytes:.1f} PB"
-
-    def to_dict(self) -> dict:
-        return {
-            "filename": self.filename,
-            "size_bytes": self.size_bytes,
-            "size_human": self.size_human,
-            "quant_type": self.quant_type,
-            "format": self.format,
-            "url": self.url,
-        }
+        """Human-readable file size."""
+        if self.size_bytes >= 1024**3:
+            return f"{self.size_bytes / 1024**3:.1f} GB"
+        if self.size_bytes >= 1024**2:
+            return f"{self.size_bytes / 1024**2:.1f} MB"
+        return f"{self.size_bytes} B"
 
 
 @dataclass
 class HubModel:
-    """A model on HuggingFace with quantized files."""
+    """A model on the HuggingFace Hub."""
+
     model_id: str
     author: str
-    tags: list[str] = field(default_factory=list)
-    likes: int = 0
-    downloads: int = 0
-    last_modified: Optional[str] = None
-    quantized_files: list[QuantizedFile] = field(default_factory=list)
-    formats: list[str] = field(default_factory=list)
-    description: str = ""
+    formats: list[str]
+    quantized_files: list[QuantizedFile]
 
     @property
-    def name(self) -> str:
-        return self.model_id.split("/")[-1]
+    def file_count(self) -> int:
+        return len(self.quantized_files)
 
     def to_dict(self) -> dict:
         return {
             "model_id": self.model_id,
             "author": self.author,
-            "name": self.name,
-            "tags": self.tags,
-            "likes": self.likes,
-            "downloads": self.downloads,
-            "last_modified": self.last_modified,
             "formats": self.formats,
-            "description": self.description[:200] if self.description else "",
-            "quantized_files": [f.to_dict() for f in self.quantized_files],
-            "file_count": len(self.quantized_files),
+            "file_count": self.file_count,
+            "quantized_files": [
+                {"filename": f.filename, "size": f.size_human, "quant": f.quant_type}
+                for f in self.quantized_files
+            ],
         }
 
 
-# ── Quant Type Detection ──
+def find_gguf_files(
+    directory: str | Path,
+    recursive: bool = True,
+    quant_filter: str = "",
+) -> list[Path]:
+    """Scan a directory for .gguf files.
 
-
-def _detect_gguf_quant(filename: str) -> str:
-    """Extract quantization type from GGUF filename.
-
-    Examples:
-        llama-2-7b-chat.Q4_K_M.gguf → "Q4_K_M"
-        model.Q5_K_S.gguf → "Q5_K_S"
-        model-f16.gguf → "F16"
-        model.IQ4_XS.gguf → "IQ4_XS"
+    Parameters
+    ----------
+    directory:
+        Directory to scan.
+    recursive:
+        If True, search subdirectories.
+    quant_filter:
+        If set, only return files matching this quantization (e.g. "Q4_K_M").
     """
-    stem = Path(filename).stem.upper()
-    # Try standard GGUF quant patterns
-    patterns = [
-        r"[.-](Q4_0|Q4_1|Q5_0|Q5_1|Q8_0)",
-        r"[.-](Q[234568]_[KXM]_[SMLX])",
-        r"[.-](Q[234568]_[KXM])",
-        r"[.-](IQ[234]_\w+)",
-        r"[.-](F(16|32))",
-        r"[.-](BF16)",
-        r"[.-](Q[234568]_\d+)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, stem)
-        if m:
-            return m.group(1).upper()
-    # Fallback: check if it's a plain GGUF (likely F16)
-    return "F16"
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+
+    pattern = "*.gguf"
+    if recursive:
+        files = sorted(directory.rglob(pattern))
+    else:
+        files = sorted(directory.glob(pattern))
+
+    if quant_filter:
+        q = quant_filter.upper()
+        files = [f for f in files if q in f.name.upper()]
+
+    return files
 
 
-def _detect_awq_quant(filename: str) -> str:
-    """Detect AWQ quant type from filename."""
-    lower = filename.lower()
-    if "4bit" in lower or "g128" in lower:
-        return "AWQ-4bit"
-    if "8bit" in lower or "g64" in lower:
-        return "AWQ-8bit"
-    return "AWQ"
+def find_in_hf_cache(
+    repo_id: str = "",
+    quant_filter: str = "",
+) -> list[Path]:
+    """Search HuggingFace hub cache for GGUF files.
 
+    HF cache layout: ~/.cache/huggingface/hub/models--<org>--<name>/blobs/
+    or: ~/.cache/huggingface/hub/models--<org>--<name>/snapshots/<hash>/
 
-def _detect_gptq_quant(filename: str) -> str:
-    """Detect GPTQ quant type from filename."""
-    lower = filename.lower()
-    if "4bit" in lower or "g128" in lower or "4-" in lower:
-        return "GPTQ-4bit"
-    if "8bit" in lower or "g64" in lower or "8-" in lower:
-        return "GPTQ-8bit"
-    if "3bit" in lower or "3-" in lower:
-        return "GPTQ-3bit"
-    return "GPTQ"
-
-
-def classify_file(filename: str) -> tuple[str, str]:
-    """Classify a file by format and quantization type.
-
-    Returns:
-        (format, quant_type) e.g. ("gguf", "Q4_K_M")
+    On Windows: %USERPROFILE%\\.cache\\huggingface\\hub\\
     """
-    lower = filename.lower()
+    cache_root = Path.home() / ".cache" / "huggingface" / "hub"
+    if not cache_root.is_dir():
+        return []
 
-    if lower.endswith(".gguf"):
-        return "gguf", _detect_gguf_quant(filename)
+    # Normalize repo_id for directory matching: "org/name" -> "org--name"
+    repo_prefix = repo_id.replace("/", "--").lower() if repo_id else ""
 
-    if ".awq." in lower or "awq" in lower:
-        return "awq", _detect_awq_quant(filename)
+    results: list[Path] = []
+    for model_dir in cache_root.iterdir():
+        if not model_dir.is_dir() or not model_dir.name.startswith("models--"):
+            continue
 
-    if ".gptq." in lower or "gptq" in lower:
-        return "gptq", _detect_gptq_quant(filename)
+        # Filter by repo_id if provided
+        if repo_prefix and repo_prefix not in model_dir.name.lower():
+            continue
 
-    if lower.endswith(".safetensors"):
-        return "safetensors", "full"
+        # Check snapshots and blobs for .gguf
+        snapshots = model_dir / "snapshots"
+        if snapshots.is_dir():
+            for snap in snapshots.iterdir():
+                if snap.is_dir():
+                    results.extend(find_gguf_files(snap, recursive=True, quant_filter=quant_filter))
 
-    return "unknown", "unknown"
+        # Also check blobs (HF stores files as SHA256 hashes)
+        blobs = model_dir / "blobs"
+        if blobs.is_dir():
+            for f in blobs.iterdir():
+                if f.suffix == "" and f.stat().st_size > 1_000_000:  # > 1MB, likely a model
+                    # Check refs to see if this blob is a .gguf
+                    refs_file = model_dir / "refs" / "main"
+                    if refs_file.exists():
+                        # Parse the pointers file to resolve blob names
+                        pass  # Blobs without extensions are harder — skip
+
+    return results
 
 
-def is_quantized_file(filename: str) -> bool:
-    """Check if a file is a quantized model file."""
-    fmt, _ = classify_file(filename)
-    return fmt in ("gguf", "awq", "gptq")
+def find_in_lm_studio(
+    quant_filter: str = "",
+) -> list[Path]:
+    """Search LM Studio model directories for GGUF files.
+
+    Windows: %LOCALAPPDATA%/LM Studio/models/
+    macOS:   ~/Library/Application Support/LM Studio/models/
+    Linux:   ~/.cache/lm-studio/models/
+    """
+    candidates = []
+
+    if os.name == "nt":
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(Path(local_app) / "LM Studio" / "models")
+    elif sys.platform == "darwin":
+        candidates.append(Path.home() / "Library" / "Application Support" / "LM Studio" / "models")
+    else:
+        candidates.append(Path.home() / ".cache" / "lm-studio" / "models")
+
+    results: list[Path] = []
+    for d in candidates:
+        results.extend(find_gguf_files(d, recursive=True, quant_filter=quant_filter))
+
+    return results
 
 
-def _get_single_gguf_info(filename: str) -> Optional[str]:
-    """For 'single-file' GGUF repos, detect the quant type from the one GGUF file."""
-    if filename.lower().endswith(".gguf"):
-        return _detect_gguf_quant(filename)
-    return None
+def find_in_directory(
+    repo_id: str = "",
+    quant_filter: str = "",
+) -> list[Path]:
+    """Search current directory and common local model paths."""
+    results: list[Path] = []
+
+    # Current directory
+    results.extend(find_gguf_files(Path.cwd(), recursive=True, quant_filter=quant_filter))
+
+    # Common model directories
+    for d in ["models", "gguf", "weights", ".models"]:
+        p = Path.cwd() / d
+        results.extend(find_gguf_files(p, recursive=True, quant_filter=quant_filter))
+
+    return results
 
 
-# ── Main Hub Interface ──
+def resolve_model_path(
+    model_input: str,
+    quant: str = "",
+) -> Path:
+    """Resolve a model identifier to a local .gguf file path.
 
+    Parameters
+    ----------
+    model_input:
+        One of:
+        - Absolute or relative path to a .gguf file (returned as-is if it exists)
+        - HuggingFace repo ID (e.g. "lmstudio-community/Qwen3.6-35B-A3B-GGUF")
+        - Model name fragment (e.g. "Qwen3.6-35B")
+    quant:
+        Preferred quantization filter (e.g. "Q4_K_M").
 
-class ModelHub:
-    """HuggingFace Model Hub client for discovering and downloading quantized models."""
+    Returns
+    -------
+    Path to the .gguf file.
 
-    def __init__(self, token: str = ""):
-        from huggingface_hub import HfApi  # lazy: optional dep
+    Raises
+    ------
+    FileNotFoundError if no matching model is found.
+    """
+    model_path = Path(model_input)
 
-        self.api = HfApi(token=token or HF_TOKEN or None)
+    # 1. Direct file path
+    if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+        return model_path.resolve()
 
-    def search(
-        self,
-        query: str = "",
-        fmt: str = "gguf",
-        limit: int = 20,
-        sort: str = "downloads",
-        tag: str = "",
-    ) -> list[HubModel]:
-        """Search HuggingFace for quantized models.
+    # 2. Path without extension — try appending .gguf
+    if model_path.is_file():
+        return model_path.resolve()
 
-        Args:
-            query: Search query (model name, architecture, etc.)
-            fmt: Format filter — "gguf", "awq", "gptq", "all"
-            limit: Max results
-            sort: "downloads" | "likes" | "recent"
-            tag: HuggingFace model tag for category filtering
-                 (e.g., "moe", "text-generation", "code", "math")
+    # 3. Search by repo_id in HF cache
+    print(f"  Searching for model: {model_input}")
+    found = find_in_hf_cache(repo_id=model_input, quant_filter=quant)
+    if found:
+        # Pick the best match — prefer files matching quant
+        if quant:
+            q_match = [f for f in found if quant.upper() in f.name.upper()]
+            if q_match:
+                found = q_match
+        return found[0].resolve()
 
-        Returns:
-            List of HubModel with quantized file info
-        """
-        # Build filter — use GGUF tag as the filter
-        filters: list[str] = []
-        if fmt == "gguf":
-            filters.append("gguf")
-        elif fmt in ("awq", "gptq"):
-            filters.append(fmt)
+    # 4. Search LM Studio
+    found = find_in_lm_studio(quant_filter=quant)
+    if found:
+        # Filter by model name if repo_id provided
+        if model_input:
+            name_parts = model_input.lower().replace("/", "-").split("--")
+            name_match = [
+                f for f in found
+                if any(part.lower() in f.name.lower() for part in name_parts)
+            ]
+            if name_match:
+                found = name_match
+        return found[0].resolve()
 
-        # Category tag filter (HuggingFace uses model-tags like "moe", "text-generation")
-        if tag and tag.lower() not in ("all", "featured"):
-            filters.append(tag)
-
-        filter_val = ",".join(filters) if filters else None
-
-        sort_val = "downloads"
-        if sort == "likes":
-            sort_val = "likes"
-        elif sort == "recent":
-            sort_val = "lastModified"
-
-        models = self.api.list_models(
-            search=query or None,
-            filter=filter_val,
-            limit=limit,
-            sort=sort_val,
-        )
-
-        results = []
-        for hf_model in models:
-            try:
-                hub_model = self._enrich_model(hf_model.id)
-                if hub_model.quantized_files:
-                    results.append(hub_model)
-            except Exception as e:
-                logger.debug("Failed to enrich %s: %s", hf_model.id, e)
-                continue
-
-        return results
-
-    def search_gguf(
-        self,
-        query: str = "",
-        quant_size: str = "",
-        limit: int = 20,
-    ) -> list[HubModel]:
-        """Search specifically for GGUF models, optionally filtering by quant size."""
-        results = self.search(query=query, fmt="gguf", limit=limit)
-
-        if quant_size:
-            quant_upper = quant_size.upper()
-            filtered = []
-            for m in results:
-                m.quantized_files = [
-                    f for f in m.quantized_files
-                    if f.quant_type.upper() == quant_upper
-                ]
-                if m.quantized_files:
-                    filtered.append(m)
-            return filtered
-
-        return results
-
-    def get_model(self, model_id: str) -> HubModel:
-        """Get detailed info about a specific model including all quantized files."""
-        return self._enrich_model(model_id)
-
-    def _enrich_model(self, model_id: str) -> HubModel:
-        """Fetch model metadata and list quantized files."""
-        from huggingface_hub import model_info  # lazy: optional dep
-        from huggingface_hub.utils import RepositoryNotFoundError  # lazy: optional dep
-
-        try:
-            info = model_info(model_id, token=self.api.token)
-        except RepositoryNotFoundError:
-            raise ValueError(f"Model not found on HuggingFace: {model_id}")
-
-        siblings = getattr(info, "siblings", []) or []
-        tags = getattr(info, "tags", []) or []
-
-        quantized_files = []
-        formats = set()
-
-        for sib in siblings:
-            fname = sib.rfilename
-            fmt, qtype = classify_file(fname)
-
-            if fmt in ("gguf", "awq", "gptq"):
-                size = getattr(sib, "size", 0) or 0
-                quantized_files.append(QuantizedFile(
-                    filename=fname,
-                    size_bytes=size,
-                    quant_type=qtype,
-                    format=fmt,
-                ))
-                formats.add(fmt)
-
-        # Sort files by quant quality preference
-        quantized_files.sort(key=lambda f: _quant_preference(f.quant_type))
-
-        author = model_id.split("/")[0] if "/" in model_id else "unknown"
-
-        return HubModel(
-            model_id=model_id,
-            author=author,
-            tags=tags,
-            likes=getattr(info, "likes", 0) or 0,
-            downloads=getattr(info, "downloads", 0) or 0,
-            last_modified=str(getattr(info, "last_modified", ""))[:10],
-            quantized_files=quantized_files,
-            formats=sorted(formats),
-            description=getattr(info, "card_data", None) and
-                       getattr(info.card_data, "description", "") or "",
-        )
-
-    def download(
-        self,
-        model_id: str,
-        filename: str,
-        local_dir: str = "",
-        quant_type: str = "",
-        progress_callback=None,
-    ) -> str:
-        """Download a file from HuggingFace.
-
-        Args:
-            model_id: HF repo (e.g. "TheBloke/Llama-2-7B-GGUF")
-            filename: Specific file to download
-            local_dir: Where to save. Defaults to ~/.vibeblade/models/
-            quant_type: If set, auto-pick the best matching file
-            progress_callback: Optional callback(bytes_downloaded, total_bytes)
-
-        Returns:
-            Absolute path to the downloaded file.
-        """
-        from huggingface_hub import hf_hub_download  # lazy: optional dep
-
-        model = self._enrich_model(model_id)
-
-        if not local_dir:
-            local_dir = str(Path.home() / ".vibeblade" / "models" / model_id.replace("/", "_"))
-
-        Path(local_dir).mkdir(parents=True, exist_ok=True)
-
-        # Auto-select file if quant_type specified but not filename
-        if not filename and quant_type:
-            model = self.get_model(model_id)
-            q_upper = quant_type.upper()
-            for f in model.quantized_files:
-                if f.quant_type.upper() == q_upper:
-                    filename = f.filename
-                    break
-            if not filename:
-                raise ValueError(
-                    f"No {quant_type} file found for {model_id}. "
-                    f"Available: {[f.quant_type for f in model.quantized_files]}"
-                )
-
-        if not filename:
-            raise ValueError("Either filename or quant_type must be specified")
-
-        logger.info("Downloading %s/%s → %s", model_id, filename, local_dir)
-
-        path = hf_hub_download(
-            repo_id=model_id,
-            filename=filename,
-            local_dir=local_dir,
-            token=self.api.token,
-        )
-
-        logger.info("Downloaded to %s", path)
-        return path
-
-    def download_gguf(
-        self,
-        model_id: str,
-        quant: str = "Q4_K_M",
-        local_dir: str = "",
-    ) -> str:
-        """Download a GGUF model with specified quantization.
-
-        Convenience method — auto-finds the best matching GGUF file.
-
-        Args:
-            model_id: HF model ID
-            quant: Quant type (e.g., "Q4_K_M", "Q5_K_S")
-            local_dir: Save location
-
-        Returns:
-            Path to downloaded GGUF file
-        """
-        return self.download(model_id, filename="", local_dir=local_dir, quant_type=quant)
-
-    def get_compatible_platforms(self, fmt: str = "gguf") -> list[dict]:
-        """Get list of platforms compatible with a format.
-
-        Returns platform info with name, format support, and notes.
-        """
-        platforms = [
-            {"name": "llama.cpp", "formats": ["gguf"], "notes": "Universal GGUF engine"},
-            {"name": "LM Studio", "formats": ["gguf"], "notes": "Desktop GUI, auto-detects quant"},
-            {"name": "Ollama", "formats": ["gguf"], "notes": "CLI/server, uses GGUF internally"},
-            {"name": "KoboldCpp", "formats": ["gguf"], "notes": "Browser-based UI, GGUF native"},
-            {"name": "TextGen WebUI", "formats": ["gguf", "awq", "gptq"], "notes": "Multi-backend web UI"},
-            {"name": "MLX", "formats": ["gguf", "safetensors"], "notes": "Apple Silicon unified memory"},
-            {"name": "vLLM", "formats": ["awq", "gptq", "safetensors"], "notes": "Production serving"},
-            {"name": "VibeBlade", "formats": ["gguf", "safetensors"], "notes": "CPU/RAM sparse inference"},
+    # 5. Search local directories
+    found = find_in_directory(quant_filter=quant)
+    if found and model_input:
+        name_match = [
+            f for f in found
+            if model_input.lower() in f.name.lower()
         ]
-        return [p for p in platforms if fmt in p["formats"]]
+        if name_match:
+            found = name_match
+        elif found:
+            pass  # return all found
+    if found:
+        return found[0].resolve()
+
+    # 6. Nothing found — raise with helpful message
+    raise FileNotFoundError(
+        f"Could not find model '{model_input}'.\n"
+        f"\n"
+        f"Searched:\n"
+        f"  - Local path: {model_path.resolve()}\n"
+        f"  - HuggingFace cache: ~/.cache/huggingface/hub/\n"
+        f"  - LM Studio: %LOCALAPPDATA%/LM Studio/models/\n"
+        f"  - Current directory: {Path.cwd()}\n"
+        f"\n"
+        f"To download: python -m vibeblade wizard"
+    )
+
+def scan_cached_models(quant_filter: str = "") -> list[dict]:
+    """Scan all known model locations and return a summary of found models.
+
+    Returns list of {"path": Path, "name": str, "size_gb": float, "source": str}
+    """
+    seen: set[str] = set()
+    models: list[dict] = []
+
+    def _add(files: list[Path], source: str):
+        for f in files:
+            resolved = str(f.resolve())
+            if resolved not in seen:
+                seen.add(resolved)
+                size_gb = f.stat().st_size / (1024**3)
+                models.append({
+                    "path": f.resolve(),
+                    "name": f.name,
+                    "size_gb": round(size_gb, 1),
+                    "source": source,
+                })
+
+    _add(find_in_hf_cache(quant_filter=quant_filter), "HuggingFace cache")
+    _add(find_in_lm_studio(quant_filter=quant_filter), "LM Studio")
+    _add(find_in_directory(quant_filter=quant_filter), "Local")
+
+    # Sort by size descending
+    models.sort(key=lambda m: m["size_gb"], reverse=True)
+    return models
 
 
-def _quant_preference(quant_type: str) -> int:
-    """Score for sorting quant types by recommendation order (lower = better)."""
-    prefs = {
-        "Q4_K_M": 0, "Q5_K_M": 1, "Q5_K_S": 2, "Q6_K": 3,
-        "Q4_K_S": 4, "Q8_0": 5, "Q3_K_M": 6, "IQ4_XS": 7,
-        "Q2_K": 8, "F16": 9, "F32": 10, "BF16": 11,
-    }
-    return prefs.get(quant_type.upper(), 50)
+def is_model_cached(repo_id: str, quant: str = "") -> bool:
+    """Check if a model is already downloaded locally."""
+    try:
+        resolve_model_path(repo_id, quant=quant)
+        return True
+    except FileNotFoundError:
+        return False
 
 
-# ── Quick CLI helpers ──
-
-def quick_search(query: str, fmt: str = "gguf", limit: int = 10) -> list[HubModel]:
-    """One-shot search without instantiating ModelHub."""
-    hub = ModelHub()
-    return hub.search(query=query, fmt=fmt, limit=limit)
-
-
-def quick_download(model_id: str, quant: str = "Q4_K_M") -> str:
-    """One-shot download GGUF model."""
-    hub = ModelHub()
-    return hub.download_gguf(model_id, quant)

@@ -945,7 +945,21 @@ def interactive_quant_select():
 
 # ── Download Models via HF Hub ────────────────────────────────────────────────
 def download_model(model_id, quant="Q4_K_M", progress_cb=None):
-    """Download a GGUF model using huggingface_hub."""
+    """Download a GGUF model using huggingface_hub.
+
+    If the model is already cached (HF cache, LM Studio, or local), returns
+    the existing path without re-downloading.
+    """
+    # ── Check if model is already downloaded ──
+    from .model_hub import resolve_model_path
+    try:
+        existing = resolve_model_path(model_id, quant=quant)
+        if existing and existing.exists():
+            print(f"  Found existing model: {existing}")
+            return True, str(existing)
+    except FileNotFoundError:
+        pass  # Not cached — proceed with download
+
     try:
         from huggingface_hub import HfApi
     except ImportError:
@@ -969,14 +983,12 @@ def download_model(model_id, quant="Q4_K_M", progress_cb=None):
         if progress_cb:
             progress_cb(f"Downloading {model_id} / {target}...")
 
-        # Stream download
+        # Stream download to HF cache (standard location)
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(
             repo_id=model_id,
             filename=target,
             repo_type="model",
-            local_dir=str(cache_dir / model_id.replace("/","_")),
-            local_dir_use_symlinks=False,
             resume_download=True,
         )
         return True, path
