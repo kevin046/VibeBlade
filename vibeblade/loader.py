@@ -227,8 +227,11 @@ def _unpack_6bit(packed: np.ndarray, n_values: int) -> np.ndarray:
     needed = n_values * 6
     if len(bits) < needed:
         bits = np.pad(bits, (0, needed - len(bits)))
-    rows = bits[:needed].reshape(n_values, 6).astype(np.float32)
-    return (rows * np.array([1, 2, 4, 8, 16, 32], dtype=np.float32)).sum(axis=1)
+    # Extract 6-bit values by shifting and masking
+    values = np.zeros(n_values, dtype=np.float32)
+    for j in range(6):
+        values += bits[j::6][:n_values].astype(np.float32) * (1 << j)
+    return values
 
 
 
@@ -512,10 +515,12 @@ class GGUFLoader:
         for t in self.tensor_infos:
             if t["name"] == name:
                 return t
-        raise KeyError(f"Tensor not found: {name}")
+            raise KeyError(f"Tensor not found: {name}")
 
-    def load_tensor(self, name: str, dtype: np.dtype = np.dtype("float32")) -> np.ndarray:
-        """Load and dequantize a tensor.
+    def load_tensor(self, name: str, dtype: np.dtype = np.dtype("float32"),
+                    progress_cb=None) -> np.ndarray:
+        """
+        Load a tensor by name.
 
         Returns an f32 (or f16 if requested) numpy array.
         For quantized types, this reads the raw blocks and dequantizes.
@@ -535,7 +540,8 @@ class GGUFLoader:
             return arr.astype(dtype) if dtype != np_dtype else arr
 
         if tid in _DEQUANT_FN:
-            arr = self._dequant_blocks(raw, tid, n_elements)
+            arr = self._dequant_blocks(raw, tid, n_elements,
+                                      progress_cb=progress_cb, tensor_name=name)
             return arr.reshape(shape).astype(dtype)
 
         # Unsupported quant — return raw bytes as best-effort
@@ -572,7 +578,8 @@ class GGUFLoader:
             return n_blocks * block_bytes
         raise ValueError(f"Unknown tensor type {tid}")
 
-    def _dequant_blocks(self, raw: bytes, tid: int, n_elements: int) -> np.ndarray:
+    def _dequant_blocks(self, raw: bytes, tid: int, n_elements: int,
+                        progress_cb=None, tensor_name: str = "") -> np.ndarray:
         """Dequantize raw block data to f32."""
         fn = _DEQUANT_FN[tid]
         block_size = _QBLOCK_SIZE[tid]
@@ -590,13 +597,26 @@ class GGUFLoader:
                 out[i * block_size:(i + 1) * block_size] = fn(
                     raw[start:end], block_size
                 )
+            if progress_cb and (i + 1) % 50 == 0:
+                progress_cb(tensor_name, i + 1, n_blocks)
 
+        if progress_cb:
+            progress_cb(tensor_name, n_blocks, n_blocks)
         return out[:n_elements]
 
-    def load_all_tensors(self, dtype: np.dtype = np.dtype("float32")) -> dict[str, np.ndarray]:
+    def load_all_tensors(self, dtype: np.dtype = np.dtype("float32"),
+                         progress_cb=None) -> dict[str, np.ndarray]:
         """Load all tensors. Returns {name: ndarray}."""
-        return {info["name"]: self.load_tensor(info["name"], dtype)
-                for info in self.tensor_infos}
+        total = len(self.tensor_infos)
+        tensors = {}
+        for idx, info in enumerate(self.tensor_infos):
+            if progress_cb:
+                progress_cb(info["name"], idx, total, loading=True)
+            tensors[info["name"]] = self.load_tensor(info["name"], dtype,
+                                                     progress_cb=progress_cb)
+            if progress_cb:
+                progress_cb(info["name"], idx + 1, total, loading=True)
+        return tensors
 
     def close(self) -> None:
         if self._mmap is not None:
@@ -625,11 +645,11 @@ def estimate_model_size_gb(n_params: int, quant_type: int) -> float:
     return n_params * bpp / (1024**3)
 
 
-def load_model(path: str) -> dict:
+def load_model(path: str, progress_cb=None) -> dict:
     """Load a GGUF model and return metadata, tensors, and config."""
     with GGUFLoader(path) as loader:
         metadata = dict(loader.metadata)
-        tensors = loader.load_all_tensors()
+        tensors = loader.load_all_tensors(progress_cb=progress_cb)
         config = _extract_config(metadata)
     return {"metadata": metadata, "tensors": tensors, "config": config}
 

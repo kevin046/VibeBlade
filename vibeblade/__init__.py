@@ -175,13 +175,15 @@ class VibeBladeModel:
     - KV cache for fast autoregressive generation
     """
     
-    def __init__(self, model_path: str, hot_budget: float = 0.1, use_sparse: bool = True):
+    def __init__(self, model_path: str, hot_budget: float = 0.1, use_sparse: bool = True,
+                 progress_cb=None):
         """Load a GGUF model.
         
         Args:
             model_path: path to .gguf model file
             hot_budget: fraction of neurons for PowerInfer fast path (0.0-1.0)
             use_sparse: enable TurboSparse activation sparsity
+            progress_cb: optional callback(name, done, total, loading=bool)
         """
         from pathlib import Path
         path = Path(model_path)
@@ -195,7 +197,7 @@ class VibeBladeModel:
         
         # Load model
         if path.suffix == ".gguf":
-            data = load_model(model_path)
+            data = load_model(model_path, progress_cb=progress_cb)
             self.metadata = data["metadata"]
             self.config = data["config"]
             self.weights = data["tensors"]

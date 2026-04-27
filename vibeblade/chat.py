@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import sys
 
 # ── Terminal helpers (same as setup_wizard) ──────────────────────────────────
 
@@ -111,14 +112,35 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     print(f"  {_d('───────────────────────────────────────────')}")
     print()
 
-    # Load model
-    print("  Loading model...", end="", flush=True)
+    # Load model with progress
+    import time
+    load_start = time.time()
+    last_tensor = [None]
+
+    def _progress(name, done, total, loading=False):
+        """Show loading progress — timer + tensor name."""
+        elapsed = time.time() - load_start
+        if loading:
+            pct = done / max(total, 1)
+            bar_len = 20
+            filled = int(bar_len * pct)
+            bar = _g("█" * filled) + _d("░" * (bar_len - filled))
+            short_name = name.split(".")[-1][:24] if name else ""
+            sys.stdout.write(
+                f"\r  {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')}  {short_name:<24}"
+            )
+            sys.stdout.flush()
+            last_tensor[0] = name
+
     try:
         from . import VibeBladeModel
-        model = VibeBladeModel(model_path)
+        model = VibeBladeModel(model_path, progress_cb=_progress)
     except ImportError:
         from vibeblade import VibeBladeModel
-        model = VibeBladeModel(model_path)
+        model = VibeBladeModel(model_path, progress_cb=_progress)
+
+    elapsed = time.time() - load_start
+    print(f"\r  {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')}  {'done':<24}  ")
 
     # Enable MoE if detected
     if model.is_moe:
