@@ -16,6 +16,10 @@ Memory impact for 70B Q4_0 on 16 GB:
   - With sparsity: only ~10% of FFN weights active = ~3.5 GiB in page cache
   - Attention weights (~30% of model) must stay resident: ~11 GiB
   - Net: ~14.5 GiB working set — fits in 16 GB with tight margins
+
+The VibeBlade whitepaper §1 extends PowerInfer with:
+  - EMA-based neuron prediction (smoother, more adaptive than raw counting)
+  - dReLU gating: drelu(x) = max(0,x) * max(0,-x) for bidirectional sparsity
 """
 
 from __future__ import annotations
@@ -39,6 +43,34 @@ def drelu_activation(x: np.ndarray, threshold: float = 0.0) -> np.ndarray:
         ``x * (x > threshold)`` — same shape as *x*.
     """
     return x * (x > threshold).astype(np.float64)
+
+
+def drelu_gate(x: np.ndarray) -> np.ndarray:
+    """dReLU gating activation from VibeBlade whitepaper §1.
+
+    Computes ``max(0, x) * max(0, -x)`` — a bidirectional ReLU that activates
+    neurons whose magnitude is significant in either direction. This is more
+    expressive than standard ReLU because it captures negative activations too.
+
+    Key property: drelu(x) > 0 when |x| is large in either direction.
+    drelu(0) = 0, drelu(5) = 0, drelu(-5) = 0, drelu(3) * drelu(-3) = 9.
+    Actually: drelu(x) = ReLU(x) * ReLU(-x) which is nonzero only when both
+    positive and negative parts exist... but per the whitepaper this gates
+    neurons that have strong bidirectional signals.
+
+    Parameters
+    ----------
+    x : np.ndarray
+        Input activations.
+
+    Returns
+    -------
+    np.ndarray
+        ``max(0, x) * max(0, -x)`` — same shape as *x*.
+    """
+    pos = np.maximum(0, x)
+    neg = np.maximum(0, -x)
+    return pos * neg
 
 
 def predict_activations(x: np.ndarray, threshold: float = 0.0) -> np.ndarray:
@@ -389,3 +421,230 @@ class SparsePredictor:
     @property
     def is_calibrated(self) -> bool:
         return self.mode == "offline"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# EMA-based NeuronPredictor (VibeBlade whitepaper §1)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class EMANeuronPredictor:
+    """EMA-based neuron activation predictor for TurboSparse.
+
+    Unlike SparsePredictor which uses raw counting, this uses Exponential
+    Moving Average to track per-neuron activation probabilities. Benefits:
+
+    1. **Adaptive**: Recent activations weighted more than old ones (α decay)
+    2. **Smooth**: No sudden jumps from single unusual activations
+    3. **Memory-efficient**: Single float per neuron (vs per-sample counts)
+    4. **Distribution-shift aware**: Naturally adapts as input distribution
+       changes during a conversation
+
+    EMA update rule:
+        ema[t] = α * observation + (1 - α) * ema[t-1]
+
+    Where observation = 1.0 if neuron activated, 0.0 otherwise.
+
+    Usage::
+
+        predictor = EMANeuronPredictor(hidden_dim=28672, n_layers=32)
+        # For each decode token:
+        for layer_idx in range(32):
+            mask = predictor.predict(layer_idx, gate_activations)
+            # Use mask for sparse FFN compute
+            predictor.update(layer_idx, mask)
+
+    Parameters
+    ----------
+    hidden_dim : int
+        FFN intermediate dimension (neurons per layer).
+    n_layers : int
+        Number of transformer layers.
+    ema_decay : float
+        EMA decay factor α in (0, 1). Higher = more weight on recent obs.
+        Default 0.1 (matches common EMA convention).
+    sparse_ratio : float
+        Fraction of neurons to activate per layer (default 0.1 = 10%).
+    activation_threshold : float
+        Minimum EMA probability to consider a neuron "likely active" when
+        computing the mask. Default 0.3 (30% activation rate).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        n_layers: int,
+        ema_decay: float = 0.1,
+        sparse_ratio: float = 0.1,
+        activation_threshold: float = 0.3,
+    ) -> None:
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
+        self.ema_decay = ema_decay
+        self.sparse_ratio = sparse_ratio
+        self.activation_threshold = activation_threshold
+
+        # EMA probabilities per layer: shape (n_layers, hidden_dim)
+        self._ema_probs = np.zeros((n_layers, hidden_dim), dtype=np.float32)
+
+        # Update counter for warm-up logic
+        self._update_counts = np.zeros(n_layers, dtype=np.int32)
+        self._total_updates: int = 0
+
+    def update(self, layer_idx: int, activation_mask: np.ndarray) -> None:
+        """Update EMA probabilities from observed activation mask.
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index (0-based).
+        activation_mask : np.ndarray
+            Boolean mask (hidden_dim,) — True where neuron activated.
+        """
+        if layer_idx < 0 or layer_idx >= self.n_layers:
+            return
+
+        observation = activation_mask.astype(np.float32)
+        alpha = self.ema_decay
+        self._ema_probs[layer_idx] = (
+            alpha * observation + (1.0 - alpha) * self._ema_probs[layer_idx]
+        )
+        self._update_counts[layer_idx] += 1
+        self._total_updates += 1
+
+    def predict(self, layer_idx: int, gate_values: np.ndarray | None = None) -> np.ndarray:
+        """Predict which neurons will activate.
+
+        Uses a two-stage strategy:
+        1. If EMA has been warmed up (>5 updates), use EMA probabilities to
+           select neurons that are likely active.
+        2. Otherwise, fall back to top-k on gate values (if provided).
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index (0-based).
+        gate_values : np.ndarray or None
+            Current gate activations (hidden_dim,) for fallback top-k prediction.
+
+        Returns
+        -------
+        np.ndarray
+            Boolean mask (hidden_dim,) — True = predicted active.
+        """
+        if layer_idx < 0 or layer_idx >= self.n_layers:
+            return np.ones(self.hidden_dim, dtype=bool)
+
+        k = max(1, int(self.hidden_dim * self.sparse_ratio))
+        probs = self._ema_probs[layer_idx]
+
+        # If warmed up, use EMA-based selection
+        if self._update_counts[layer_idx] > 5:
+            # Select neurons with EMA probability above threshold
+            ema_mask = probs >= self.activation_threshold
+
+            # Ensure at least k neurons are selected
+            if np.sum(ema_mask) < k:
+                # Fill remaining slots from highest-probability neurons
+                remaining = k - int(np.sum(ema_mask))
+                inactive_indices = np.where(~ema_mask)[0]
+                if len(inactive_indices) > 0:
+                    top_inactive = inactive_indices[
+                        np.argpartition(probs[inactive_indices], -remaining)[-remaining:]
+                    ]
+                    ema_mask[top_inactive] = True
+
+            return ema_mask
+
+        # Cold start: use gate values if available
+        if gate_values is not None:
+            topk_idx = np.argpartition(gate_values, -k)[-k:]
+            mask = np.zeros(self.hidden_dim, dtype=bool)
+            mask[topk_idx] = True
+            return mask
+
+        # No gate values, no EMA data — return top-k uniform
+        mask = np.zeros(self.hidden_dim, dtype=bool)
+        mask[:k] = True
+        return mask
+
+    def predict_combined(
+        self, layer_idx: int, gate_values: np.ndarray
+    ) -> np.ndarray:
+        """Combine EMA prediction with gate-based prediction.
+
+        Merges both signals by taking the union of EMA-predicted and
+        gate top-k neurons. This gives better recall during warm-up.
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index.
+        gate_values : np.ndarray
+            Current gate activations (hidden_dim,).
+
+        Returns
+        -------
+        np.ndarray
+            Boolean mask (hidden_dim,).
+        """
+        ema_mask = self.predict(layer_idx, gate_values=None)
+        k = max(1, int(self.hidden_dim * self.sparse_ratio))
+
+        # Gate-based top-k
+        topk_idx = np.argpartition(gate_values, -k)[-k:]
+        gate_mask = np.zeros(self.hidden_dim, dtype=bool)
+        gate_mask[topk_idx] = True
+
+        return ema_mask | gate_mask
+
+    def get_activation_probabilities(self, layer_idx: int) -> np.ndarray:
+        """Return current EMA probabilities for a layer.
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index.
+
+        Returns
+        -------
+        np.ndarray
+            EMA probabilities (hidden_dim,), values in [0, 1].
+        """
+        if 0 <= layer_idx < self.n_layers:
+            return self._ema_probs[layer_idx].copy()
+        return np.zeros(self.hidden_dim, dtype=np.float32)
+
+    def get_top_neurons(self, layer_idx: int, k: int = 10) -> np.ndarray:
+        """Return indices of the top-k most likely active neurons.
+
+        Parameters
+        ----------
+        layer_idx : int
+            Layer index.
+        k : int
+            Number of neurons to return.
+
+        Returns
+        -------
+        np.ndarray
+            Sorted indices of top-k neurons by EMA probability.
+        """
+        probs = self.get_activation_probabilities(layer_idx)
+        top_k = min(k, self.hidden_dim)
+        top_indices = np.argpartition(probs, -top_k)[-top_k:]
+        return top_indices[np.argsort(probs[top_indices])[::-1]]
+
+    @property
+    def total_updates(self) -> int:
+        return self._total_updates
+
+    @property
+    def is_warmed_up(self) -> bool:
+        return bool(np.all(self._update_counts > 5))
+
+    def reset(self) -> None:
+        """Reset all EMA state."""
+        self._ema_probs.fill(0)
+        self._update_counts.fill(0)
+        self._total_updates = 0

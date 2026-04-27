@@ -59,6 +59,36 @@ from .moe_advanced import (
 from .moe_oracle import ExpertOracle, PatternOracle
 from .async_executor import AsyncMoEExecutor, AsyncStats, ColdExpertResult
 from .phase_scheduler import PhaseScheduler, PhaseConfig, InferencePhase
+
+# v1.4: Whitepaper algorithm implementations
+from .rotatekv import (
+    hadamard_rotation_matrix,
+    rotate_kv,
+    inverse_rotate_kv,
+    RotateKVCache,
+)
+from .confu import (
+    ContemplateTokenLayer,
+    ConFuDraftModel,
+    ConFuSpeculator,
+    ConFuStats,
+)
+from .sarathi import (
+    SarathiConfig,
+    SarathiRequest,
+    SarathiScheduler,
+)
+from .sagesched import (
+    SageConfig,
+    SageRequest,
+    SageSched,
+    entropy_from_logits,
+    entropy_from_probs,
+)
+from .sparse import (
+    drelu_gate,
+    EMANeuronPredictor,
+)
 # ONNX Runtime / TensorRT accelerated inference (lazy imports — requires onnxruntime)
 # Loaded via __getattr__ at bottom of file to avoid import errors when packages aren't installed.
 
@@ -121,6 +151,17 @@ __all__ = [
     "ExpertOracle", "PatternOracle",
     "AsyncMoEExecutor", "AsyncStats", "ColdExpertResult",
     "PhaseScheduler", "PhaseConfig", "InferencePhase",
+    # v1.4: Whitepaper algorithm implementations
+    # RotateKV — outlier-aware 2-bit KV quantization (§3)
+    "hadamard_rotation_matrix", "rotate_kv", "inverse_rotate_kv", "RotateKVCache",
+    # ConFu — contemplate-token speculative decoding (§2)
+    "ContemplateTokenLayer", "ConFuDraftModel", "ConFuSpeculator", "ConFuStats",
+    # SARATHI — chunked prefill scheduler (§4)
+    "SarathiConfig", "SarathiRequest", "SarathiScheduler",
+    # SageSched — uncertainty-aware scheduler (§4)
+    "SageConfig", "SageRequest", "SageSched", "entropy_from_logits", "entropy_from_probs",
+    # TurboSparse — EMA neuron prediction + dReLU gating (§1)
+    "drelu_gate", "EMANeuronPredictor",
 ]
 
 
