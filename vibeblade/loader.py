@@ -221,167 +221,135 @@ def _dequant_q2_k(block: bytes) -> np.ndarray:
 
 
 
-def _dequant_q3_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q3_K block (256 elements, 110 bytes).
+def _unpack_6bit(packed: np.ndarray, n_values: int) -> np.ndarray:
+    """Unpack *n_values* 6-bit integers from a packed byte array."""
+    bits = np.unpackbits(packed)           # flat bit array
+    needed = n_values * 6
+    if len(bits) < needed:
+        bits = np.pad(bits, (0, needed - len(bits)))
+    rows = bits[:needed].reshape(n_values, 6).astype(np.float32)
+    return (rows * np.array([1, 2, 4, 8, 16, 32], dtype=np.float32)).sum(axis=1)
 
-    Layout (from ggml block_q3_K):
-      [0:2]    d (f16 scale)
-      [2:34]   h (32 bytes, extra high bits for 256 values: 1 bit per 8 values = 32 bytes)
-      [34:98]  qs (64 bytes, 2-bit packed quants: 4 values per byte = 256 values)
-      [98:110] scales (12 bytes, 16 packed 6-bit sub-block scales)
-    """
+
+
+def _dequant_q3_k(block: bytes) -> np.ndarray:
+    """Dequantize a Q3_K block (256 elements, 110 bytes) — vectorized."""
     d = np.frombuffer(block[0:2], dtype=np.float16).astype(np.float32)[0]
+    if not np.isfinite(d):
+        d = 0.0
     h = np.frombuffer(block[2:34], dtype=np.uint8)
     qs = np.frombuffer(block[34:98], dtype=np.uint8)
     sc_packed = np.frombuffer(block[98:110], dtype=np.uint8)
 
-    # Unpack 16 6-bit scales from 12 bytes (96 bits)
-    scales = np.zeros(16, dtype=np.float32)
-    for i in range(16):
-        byte_idx = (i * 6) // 8
-        bit_off = (i * 6) % 8
-        val = int(sc_packed[byte_idx]) >> bit_off
-        if byte_idx + 1 < len(sc_packed) and bit_off > 2:
-            val |= int(sc_packed[byte_idx + 1]) << (8 - bit_off)
-        scales[i] = float(val & 0x3F)
+    scales = _unpack_6bit(sc_packed, 16)
 
-    out = np.empty(256, dtype=np.float32)
-    for i in range(256):
-        # 2 bits from qs (4 values packed per byte)
-        qs_byte = int(qs[i // 4])
-        shift = (i % 4) * 2
-        q_low = (qs_byte >> shift) & 0x03
-        # 1 high bit from h
-        h_byte = int(h[i // 8])
-        h_bit = (h_byte >> (i % 8)) & 1
-        q = q_low + h_bit * 4
-        sc_idx = i // 16
-        out[i] = (q - 4) * scales[sc_idx] * d
+    # 4 values per qs byte (2 bits each)
+    qs_exp = np.repeat(qs, 4)                         # 256
+    qs_lo = ((qs_exp >> np.tile([0, 2, 4, 6], 64)) & 0x03).astype(np.float32)
 
-    return out
+    # 8 bits per h byte (1 bit each)
+    h_exp = np.repeat(h.astype(np.uint32), 8)         # 256
+    h_bit = ((h_exp >> np.tile(np.arange(8), 32)) & 1).astype(np.float32)
+
+    q = qs_lo + h_bit * 4.0
+    sc_idx = np.repeat(np.arange(16), 16)
+    return (q - 4.0) * scales[sc_idx] * d
+
 
 
 
 
 def _dequant_q4_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q4_K block (256 elements, 144 bytes)."""
+    """Dequantize a Q4_K block (256 elements, 144 bytes) — vectorized."""
     d = np.frombuffer(block[0:2], dtype=np.float16).astype(np.float32)[0]
+    if not np.isfinite(d):
+        d = 0.0
     dmin = float(block[2])
 
     sc_raw = np.frombuffer(block[4:12], dtype=np.uint8)
-    scales = np.zeros(8, dtype=np.float32)
-    for i in range(8):
-        byte_idx = (i * 6) // 8
-        bit_off = (i * 6) % 8
-        val = int(sc_raw[byte_idx]) >> bit_off
-        if byte_idx + 1 < len(sc_raw) and bit_off > 2:
-            val |= int(sc_raw[byte_idx + 1]) << (8 - bit_off)
-        scales[i] = float(val & 0x3F)
+    scales = _unpack_6bit(sc_raw, 8)
 
-    out = np.empty(256, dtype=np.float32)
-    qs = np.frombuffer(block[16:80], dtype=np.uint8)
-    qs2 = np.frombuffer(block[80:144], dtype=np.uint8)
+    qs = np.frombuffer(block[16:144], dtype=np.uint8)
+    qs_exp = np.empty(256, dtype=np.float32)
+    qs_exp[0::2] = (qs & 0x0F).astype(np.float32)
+    qs_exp[1::2] = ((qs >> 4) & 0x0F).astype(np.float32)
 
-    for half in range(2):
-        src = qs if half == 0 else qs2
-        sc_base = half * 4
-        for i in range(128):
-            byte_idx = i // 2
-            nib = (int(src[byte_idx]) >> (4 * (i % 2))) & 0x0F
-            sc_idx = sc_base + i // 32
-            out[half * 128 + i] = (nib - 8) * scales[sc_idx] * d + dmin
+    sc_idx = np.repeat(np.arange(8), 32)
+    return (qs_exp - 8.0) * scales[sc_idx] * d + dmin
 
-    return out
 
 
 def _dequant_q5_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q5_K block (256 elements, 176 bytes)."""
+    """Dequantize a Q5_K block (256 elements, 176 bytes) — vectorized."""
     d = np.frombuffer(block[0:2], dtype=np.float16).astype(np.float32)[0]
+    if not np.isfinite(d):
+        d = 0.0
     dmin = float(block[2])
 
     sc_raw = np.frombuffer(block[4:12], dtype=np.uint8)
-    scales = np.zeros(8, dtype=np.float32)
-    for i in range(8):
-        byte_idx = (i * 6) // 8
-        bit_off = (i * 6) % 8
-        val = int(sc_raw[byte_idx]) >> bit_off
-        if byte_idx + 1 < len(sc_raw) and bit_off > 2:
-            val |= int(sc_raw[byte_idx + 1]) << (8 - bit_off)
-        scales[i] = float(val & 0x3F)
+    scales = _unpack_6bit(sc_raw, 8)
 
-    qh = np.frombuffer(block[144:176], dtype=np.uint8)
-    qh_bits = np.unpackbits(qh)
-
-    out = np.empty(256, dtype=np.float32)
     qs = np.frombuffer(block[16:80], dtype=np.uint8)
     qs2 = np.frombuffer(block[80:144], dtype=np.uint8)
+    qh = np.frombuffer(block[144:176], dtype=np.uint8)
 
-    for half in range(2):
-        src = qs if half == 0 else qs2
-        sc_base = half * 4
-        for i in range(128):
-            byte_idx = i // 2
-            nib = (int(src[byte_idx]) >> (4 * (i % 2))) & 0x0F
-            high_bit = int(qh_bits[half * 128 + i])
-            val = nib + high_bit * 16
-            sc_idx = sc_base + i // 32
-            out[half * 128 + i] = (val - 16) * scales[sc_idx] * d + dmin
+    qs_all = np.empty(256, dtype=np.float32)
+    qs_all[0::2] = np.concatenate([qs & 0x0F, qs2 & 0x0F]).astype(np.float32)
+    qs_all[1::2] = np.concatenate([(qs >> 4) & 0x0F, (qs2 >> 4) & 0x0F]).astype(np.float32)
 
-    return out
+    qh_bits = np.unpackbits(qh).astype(np.float32)
+    val = qs_all + qh_bits * 16.0
+
+    sc_idx = np.repeat(np.arange(8), 32)
+    return (val - 16.0) * scales[sc_idx] * d + dmin
+
 
 
 def _dequant_q6_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q6_K block (256 elements, 210 bytes).
+    """Dequantize a Q6_K block (256 elements, 210 bytes) — vectorized.
 
-    Layout per super-block of 256:
-      [0:128]   uint8 x128 - ql: 4-bit low quants (2 values per byte)
-      [128:192] uint8 x64  - qh: 2-bit high quants (4 values per byte)
-      [192:208] int8 x16   - sub-block scales (16 sub-blocks of 16 values)
-      [208:210] uint16     - d (super-block scale, f16)
+    Layout:
+      [0:128]   ql: 4-bit low quants (2 per byte)
+      [128:192] qh: 2-bit high quants (4 per byte)
+      [192:208] sc: 16 int8 sub-block scales
+      [208:210] d:  f16 super-block scale
     """
     d = np.frombuffer(block[208:210], dtype=np.float16).astype(np.float32)[0]
+    if not np.isfinite(d):
+        d = 0.0
+
     ql = np.frombuffer(block[0:128], dtype=np.uint8)
     qh = np.frombuffer(block[128:192], dtype=np.uint8)
     sc = np.frombuffer(block[192:208], dtype=np.int8).astype(np.float32)
 
-    out = np.empty(256, dtype=np.float32)
-    for i in range(256):
-        ql_byte = int(ql[i // 2])
-        if i % 2 == 0:
-            ql_low = ql_byte & 0x0F
-        else:
-            ql_low = (ql_byte >> 4) & 0x0F
+    # ql: 2 nibbles per byte → 256 values
+    ql_low = np.empty(256, dtype=np.float32)
+    ql_low[0::2] = (ql & 0x0F).astype(np.float32)
+    ql_low[1::2] = ((ql >> 4) & 0x0F).astype(np.float32)
 
-        qh_byte = int(qh[i // 4])
-        qh_high = (qh_byte >> ((i % 4) * 2)) & 0x03
+    # qh: 4 × 2-bit fields per byte → 256 values
+    qh_exp = np.repeat(qh.astype(np.uint32), 4)  # 256
+    qh_high = ((qh_exp >> np.tile([0, 2, 4, 6], 64)) & 0x03).astype(np.float32)
 
-        q = ql_low | (qh_high << 4)
-        s_idx = i // 16
-        out[i] = (q - 32) * sc[s_idx] * d
+    q = ql_low + qh_high * 16.0
+    scales = np.repeat(sc, 16)   # 16 sub-blocks × 16 values = 256
+    return (q - 32.0) * scales * d
 
-    return out
 
 
 def _dequant_q8_k(block: bytes) -> np.ndarray:
-    """Dequantize a Q8_K block (256 elements, 292 bytes).
-
-    Layout:
-      [0:4]    d (float32, super-block scale)
-      [4:8]    dmin (float32)
-      [8:12]   d_s (float32, scale for sub-block sums)
-      [12:268] qs (256 int8 quantized values)
-      [268:292] bsums (24 bytes, 16 used: sub-block offset sums)
-    """
+    """Dequantize a Q8_K block (256 elements, 292 bytes) — vectorized."""
     d = np.frombuffer(block[0:4], dtype=np.float32)[0]
+    if not np.isfinite(d):
+        d = 0.0
     dmin = np.frombuffer(block[4:8], dtype=np.float32)[0]
     d_s = np.frombuffer(block[8:12], dtype=np.float32)[0]
     qs = np.frombuffer(block[12:268], dtype=np.int8).astype(np.float32)
     bsums = np.frombuffer(block[268:292], dtype=np.int8).astype(np.float32) * d_s
 
-    out = np.empty(256, dtype=np.float32)
-    for i in range(16):
-        out[i * 16:(i + 1) * 16] = qs[i * 16:(i + 1) * 16] * d + dmin + bsums[i]
-    return out
+    sc_idx = np.repeat(np.arange(16), 16)
+    return qs * d + dmin + bsums[sc_idx]
+
 
 
 

@@ -96,16 +96,16 @@ class ChatHistory:
 # ── Chat REPL ────────────────────────────────────────────────────────────────
 
 def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
-              top_k: int = 50, top_p: float = 0.9):
+              top_k: int = 50, top_p: float = 0.9, ctx_size: int = 2048):
     """Launch interactive chat REPL with a loaded model."""
-    history = ChatHistory(max_turns=50)
+    history = ChatHistory(max_turns=max(1, ctx_size // 64))
     response_count = 0
 
     # Print banner
     print()
     print(f"  {_c(_b('VibeBlade Chat'))}")
     print(f"  {_d('Model:')} {model_path}")
-    print(f"  {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens}")
+    print(f"  {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
     print()
     print(f"  {_d('Commands:')} /help  /clear  /reset  /quit  /undo")
     print(f"  {_d('───────────────────────────────────────────')}")

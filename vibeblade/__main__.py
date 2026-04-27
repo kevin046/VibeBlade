@@ -151,6 +151,7 @@ def main():
         parser.add_argument("--model", type=str, default=None, help="Path to .gguf file")
         parser.add_argument("--config", type=str, default="vibeblade.yaml", help="Path to vibeblade.yaml")
         parser.add_argument("--max-tokens", type=int, default=512, help="Max tokens per response")
+        parser.add_argument("--ctx-size", type=int, default=2048, help="Context window size in tokens")
         parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
         parser.add_argument("--top-k", type=int, default=50, help="Top-k filtering")
         parser.add_argument("--top-p", type=float, default=0.9, help="Top-p (nucleus) filtering")
@@ -176,6 +177,7 @@ def main():
         chat_loop(
             model_path=model_path,
             max_tokens=args.max_tokens,
+            ctx_size=args.ctx_size,
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
