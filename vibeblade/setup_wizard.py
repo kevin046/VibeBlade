@@ -1428,7 +1428,10 @@ def main():
     print(json.dumps(cfg, indent=2))
 
     # ── Step 7: Optional Download ───────────────────────────────────────────
-    if inet and model[0] != "custom":
+    if model[2] == "Downloaded":
+        print(f"\n  {_g('STEP 7: Download skipped')} — using your local model:")
+        print(f"  {_d(model[0])}")
+    elif inet and model[0] != "custom":
         clear_screen()
         print("_c(_b(STEP 7: Download Model (Optional)))")
         print()
