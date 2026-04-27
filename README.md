@@ -2,6 +2,10 @@
 
 **Run any LLM on your own hardware — no cloud, no subscription.**
 
+[![Star History](https://api.star-history.com/svg?repos=kevin046/VibeBlade)](https://star-history.com/#kevin046/VibeBlade)
+[![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
+[![Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
+
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
 pip install -e . && python -m vibeblade wizard
