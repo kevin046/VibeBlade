@@ -332,7 +332,11 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
 
     ql = np.frombuffer(block[0:128], dtype=np.uint8)
     qh = np.frombuffer(block[128:192], dtype=np.uint8)
-    sc = np.frombuffer(block[192:208], dtype=np.int8).astype(np.float32)
+    sc_raw = np.frombuffer(block[192:208], dtype=np.int8)
+    if len(sc_raw) != 16:
+        sc = np.ones(16, dtype=np.float32)
+    else:
+        sc = sc_raw.astype(np.float32)
 
     # ql: 2 nibbles per byte → 256 values
     ql_low = np.empty(256, dtype=np.float32)
@@ -347,6 +351,7 @@ def _dequant_q6_k(block: bytes) -> np.ndarray:
     qh_high = qh_high.T.ravel()
 
     q = ql_low + qh_high * 16.0
+    # scales: repeat each of 16 values 16 times = 256
     scales = np.repeat(sc, 16)
     return (q - 32.0) * scales * d
 
