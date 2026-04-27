@@ -6,11 +6,8 @@ Interactive TTY setup wizard for Windows / Linux / macOS
 Developed by VibeDrift Inc.
 https://vibedrift.com | https://github.com/kevin046/VibeBlade
 
-Requirements:
-    pip install prompt_toolkit rich
-
 Usage:
-    python setup_wizard.py
+    python -m vibeblade wizard
 """
 
 from __future__ import annotations
@@ -23,65 +20,76 @@ import shutil
 import json
 from pathlib import Path
 
-# ── Rich for pretty output ────────────────────────────────────────────────────
-try:
-    from rich.console import Console
-    from rich.table import Table
-    from rich.panel import Panel
-    from rich.progress import Progress, SpinnerColumn, TextColumn
-    from rich.syntax import Syntax
-    console = Console()
-except ImportError:
-    console = None
-    def rich_assert(s): pass
 
-def print(msg="", style=None):
-    if console:
-        console.print(msg, style=style or None)
-    else:
-        print(msg)
+# ── Terminal helpers (standard CLI, no external dependencies) ─────────────────
 
-def panel(title, body, style="bold cyan"):
-    if console:
-        console.print(Panel(body, title=title, style=style, expand=False))
-    else:
-        print(f"=== {title} ===\n{body}")
+BOLD = "\033[1m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+RED = "\033[31m"
+RESET = "\033[0m"
 
-def table(headers, rows, title=""):
-    if not console:
+if os.name == "nt":
+    try:
+        os.system("")
+    except Exception:
+        BOLD = DIM = CYAN = GREEN = YELLOW = RED = RESET = ""
+
+
+def _b(s):
+    return f"{BOLD}{s}{RESET}"
+
+def _c(s):
+    return f"{CYAN}{s}{RESET}"
+
+def _g(s):
+    return f"{GREEN}{s}{RESET}"
+
+def _y(s):
+    return f"{YELLOW}{s}{RESET}"
+
+def _r(s):
+    return f"{RED}{s}{RESET}"
+
+def _d(s):
+    return f"{DIM}{s}{RESET}"
+
+
+def panel(title, body):
+    lines = body.split("\n")
+    w = max((len(line) for line in lines), default=0)
+    w = max(w, len(title))
+    b = "+" + "-" * (w + 4) + "+"
+    print(f"\n  {b}")
+    print(f"  | {_b(title):^{w + 2}} |")
+    print(f"  +{'-' * (w + 4)}+")
+    for line in lines:
+        print(f"  | {line:<{w + 2}} |")
+    print(f"  {b}\n")
+
+
+def print_table(headers, rows):
+    if not rows:
         return
-    t = Table(title=title, show_header=True, header_style="bold cyan")
-    for h in headers:
-        t.add_column(h)
+    widths = [len(h) for h in headers]
     for row in rows:
-        t.add_row(*[str(c) for c in row])
-    console.print(t)
+        for i, cell in enumerate(row):
+            if i < len(widths):
+                widths[i] = max(widths[i], len(str(cell)))
+    hdr = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers))
+    sep = "  ".join("-" * widths[i] for i in range(len(headers)))
+    print(f"\n  {_c(hdr)}")
+    print(f"  {sep}")
+    for row in rows:
+        line = "  ".join(str(c).ljust(widths[i]) for i, c in enumerate(row))
+        print(f"  {line}")
+    print()
 
-# ── Prompt_toolkit for interactive input ─────────────────────────────────────
-HAS_PT = False
-try:
-    from prompt_toolkit.shortcuts import (
-        radiolist_dialog, checkboxlist_dialog,
-        input_dialog, message_dialog, confirm as pt_confirm,
-    )
-    from prompt_toolkit.styles import Style
-    HAS_PT = True
-except ImportError:
-    pass
 
-# ── Style ─────────────────────────────────────────────────────────────────────
-STYLE = Style.from_dict({
-    "question":     "fg:cyan bold",
-    "answer":       "fg:yellow",
-    "warning":      "fg:yellow",
-    "error":        "fg:red bold",
-    "success":      "fg:green bold",
-    "panel.border": "fg:cyan",
-    "table.header": "fg:cyan bold",
-}) if HAS_PT else None
-
-PROMPT_SYMBOL = "[?]"
-PROMPT_STYLE  = "class:question"
+def clear_screen():
+    os.system("cls" if platform.system() == "Windows" else "clear")
 
 # ── System Detection ───────────────────────────────────────────────────────────
 def _ensure_psutil():
@@ -533,97 +541,57 @@ def recommend_models(ram_gb, vram_gb):
     filtered.append((custom_idx, MODELS[custom_idx]))
     return filtered
 
-# ── Dialog Helpers (prompt_toolkit) ──────────────────────────────────────────
+# ── Dialog Helpers ───────────────────────────────────────────────────────
+
 def radio(title, options, default=0):
-    """Show a radio-list dialog and return the return_value from the selected option.
-    
-    Options format: [(display_label, return_value), ...]
-    Default is an index into the options list.
-    
-    Returns return_value from the selected option, or None if cancelled.
-    """
-    if HAS_PT:
-        # radiolist_dialog values format: (value, text) — value is returned
-        dialog_values = [(ret, display) for display, ret in options]
-        return radiolist_dialog(
-            title=title,
-            text="Use arrow keys to navigate, Enter to confirm:",
-            values=dialog_values,
-            default=options[default][1] if default < len(options) else None,
-        ).run()
-    else:
-        print(f"\n  {title}")
-        for i, (_ret, label) in enumerate(options):
-            print(f"    {i+1}. {label}")
-        while True:
-            try:
-                ch = int(input("  Choice: ").strip())
-                if 1 <= ch <= len(options):
-                    return options[ch - 1][1]
-            except Exception:
-                pass
+    """Numbered selection menu. Options: [(label, value), ...]. Returns value."""
+    print(f"\n  {_b(title)}")
+    for i, (_ret, label) in enumerate(options):
+        marker = ">" if i == default else " "
+        print(f"    {marker} {i+1}. {label}")
+    while True:
+        try:
+            ch = int(input("  Choice: ").strip())
+            if 1 <= ch <= len(options):
+                return options[ch - 1][1]
+        except (ValueError, IndexError):
+            pass
 
 def checkbox(title, options, defaults=None):
-    """Show a checkbox dialog and return list of selected values.
-    
-    Options format: [(display_label, return_value), ...]
-    Defaults is a list of return_values to pre-check.
-    """
-    if HAS_PT:
-        # checkboxlist_dialog values format: (value, text)
-        dialog_values = [(ret, display) for display, ret in options]
-        return checkboxlist_dialog(
-            title=title,
-            text="Use space to toggle, Enter to confirm:",
-            values=dialog_values,
-            default_values=defaults or [],
-        ).run()
-    else:
-        print(f"\n  {title} (comma-separated numbers)")
-        for i, (_ret, label) in enumerate(options):
-            print(f"    {i+1}. {label} {'[default]' if defaults and _ret in defaults else ''}")
-        while True:
-            try:
-                nums = input("  Choices (e.g. 1,3): ").strip()
-                selected = [options[int(n) - 1][1] for n in nums.split(",") if n.strip().isdigit()]
-                return selected
-            except Exception:
-                pass
+    """Checkbox list. Returns list of selected values."""
+    print(f"\n  {_b(title)} (comma-separated numbers)")
+    for i, (_ret, label) in enumerate(options):
+        checked = "[x]" if defaults and _ret in defaults else "[ ]"
+        print(f"    {checked} {i+1}. {label}")
+    while True:
+        try:
+            nums = input("  Choices (e.g. 1,3): ").strip()
+            return [options[int(n) - 1][1] for n in nums.split(",") if n.strip().isdigit()]
+        except (ValueError, IndexError):
+            pass
 
 def confirm(title, text="", default=True):
-    if HAS_PT:
-        msg = title if not text else f"{title}\n{text}"
-        return pt_confirm(msg)
+    prompt = "[Y/n]" if default else "[y/N]"
+    if text:
+        print(f"\n  {_b(title)}")
+        print(f"  {text}")
+        ch = input(f"  {prompt}: ").strip()
     else:
-        ch = input(f"\n  {title} {'[Y/n]: ' if default else '[y/N]: '}")
-        return ch.lower() in ("y","yes") if ch else default
+        ch = input(f"\n  {title} {prompt}: ").strip()
+    return ch.lower() in ("y", "yes") if ch else default
 
-def text_input(title, text="", default=""):
-    if HAS_PT:
-        return input_dialog(title=title, text=text, default=default).run() or default
-    else:
-        v = input(f"\n  {title} [{default}]: ").strip()
-        return v if v else default
+def text_input(title, default=""):
+    v = input(f"\n  {title} [{default}]: ").strip()
+    return v if v else default
 
 def message(title, text="", style="info"):
-    if HAS_PT:
-        message_dialog(title=title, text=text,).run()
-    else:
-        print(f"\n  [{style.upper()}] {title}: {text}")
+    print(f"\n  [{style.upper()}] {title}: {text}")
 
 def spinner(text, coro_fn, *args, **kwargs):
-    """Run a coroutine with a spinner."""
-    if console:
-        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console) as p:
-            task = p.add_task(text, total=None)
-            result = coro_fn(*args, **kwargs)
-            p.update(task, completed=True)
-            return result
-    else:
-        print(f"\n  {text}...")
-        result = coro_fn(*args, **kwargs)
-        print("  Done.")
-        return result
+    print(f"\n  {text}...")
+    result = coro_fn(*args, **kwargs)
+    print("  Done.")
+    return result
 
 # ── Offload Strategy Recommendation ─────────────────────────────────────────
 def recommend_offload(ram_gb, vram_gb, model_type, model_size_gb=0):
@@ -701,7 +669,7 @@ def interactive_offload(ram_gb, vram_gb, model_type, model_size_gb=0):
 
     print()
     panel("Recommended Offload Configuration",
-          describe_offload(recommended), "bold green")
+          describe_offload(recommended))
 
     if model_fits:
         print(f"  💡 Model fits in VRAM+RAM ({total_mem}GB). SSD not needed.")
@@ -810,7 +778,7 @@ def search_huggingface(query: str, limit: int = 10) -> list[tuple[str, str, str]
             models.append((repo_id, name, size_hint or "?GB"))
         return models
     except Exception as e:
-        print(f"  [dim]Search error: {e}[/dim]")
+        print(f"  _d(Search error: {e})")
         return []
 
 def interactive_model_select(ram_gb, vram_gb):
@@ -820,34 +788,14 @@ def interactive_model_select(ram_gb, vram_gb):
     while True:
         print()
         panel("Model Selection",
-              f"Showing {len(candidates) - 1} models your hardware can run.\\n"
+              f"Showing {len(candidates) - 1} models your hardware can run.\n"
               f"RAM: {ram_gb}GB | VRAM: {vram_gb or 0}GB",
               "bold cyan")
 
-        # Show categorized table
-        if console:
-            tbl = Table(title="Recommended Models", show_header=True)
-            tbl.add_column("#", style="dim", width=3)
-            tbl.add_column("Model", style="cyan")
-            tbl.add_column("Type", style="magenta")
-            tbl.add_column("Size", style="yellow")
-            tbl.add_column("RAM", style="green")
-            tbl.add_column("VRAM", style="green")
-            tbl.add_column("Description")
-            for i, (_, m) in enumerate(candidates):
-                tbl.add_row(
-                    str(i + 1),
-                    m[0].split("/")[-1][:30],
-                    f"[{m[2]}]",
-                    m[3],
-                    f"≥{m[4]}GB",
-                    f"≥{m[5]}GB",
-                    m[7][:50],
-                )
-            console.print(tbl)
-        else:
-            for i, (_, m) in enumerate(candidates):
-                print(f"  {i+1}. [{m[2]}] {m[1]} — {m[3]}, RAM≥{m[4]}GB, VRAM≥{m[5]}GB")
+        rows = [(str(i+1), m[0].split("/")[-1][:30], m[2], m[3],
+                   f"≥{m[4]}GB", f"≥{m[5]}GB", m[7][:50])
+                  for i, (_, m) in enumerate(candidates)]
+        print_table(["#", "Model", "Type", "Size", "RAM", "VRAM", "Description"], rows)
 
         print()
         choice = radio(
@@ -895,21 +843,12 @@ def interactive_model_select(ram_gb, vram_gb):
             print(f"\n  Searching HuggingFace for '{query}'...")
             hf_results = search_huggingface(query, limit=10)
             if not hf_results:
-                print("  [yellow]No results found. Try a different query.[/yellow]")
+                msg = _y("No results found. Try a different query.")
+                print(f"  {msg}")
                 continue
-            # Show results
-            if console:
-                tbl2 = Table(title=f"HuggingFace Results for '{query}'", show_header=True)
-                tbl2.add_column("#", style="dim", width=3)
-                tbl2.add_column("Model", style="cyan")
-                tbl2.add_column("Repo ID", style="dim")
-                tbl2.add_column("Size", style="yellow")
-                for i, (repo_id, name, size) in enumerate(hf_results):
-                    tbl2.add_row(str(i + 1), name, repo_id, size)
-                console.print(tbl2)
-            else:
-                for i, (repo_id, name, size) in enumerate(hf_results):
-                    print(f"  {i+1}. {name} ({size}) — {repo_id}")
+            rows = [(str(i+1), name, repo_id, size)
+                    for i, (repo_id, name, size) in enumerate(hf_results)]
+            print_table(["#", "Model", "Repo ID", "Size"], rows)
             print()
             hf_idx = radio("Select a model",
                            [(f"{i+1}. {name} ({size}) — {repo_id}", i)
@@ -1083,11 +1022,7 @@ WIZARD_HELP = """
 
 def show_help():
     """Display the help screen."""
-    if console:
-        from rich.panel import Panel as RichPanel
-        console.print(RichPanel(WIZARD_HELP, border_style="cyan", padding=(1, 2)))
-    else:
-        print(WIZARD_HELP)
+    print(WIZARD_HELP)
 
 
 def pause(msg="Press [Enter] to continue..."):
@@ -1102,52 +1037,39 @@ def pause(msg="Press [Enter] to continue..."):
             show_help()
             continue
         if response == "q":
-            print("\n  [dim]Wizard cancelled. Run 'python -m vibeblade wizard' to restart.[/dim]")
+            print("\n  _d(Wizard cancelled. Run 'python -m vibeblade wizard' to restart.)")
             sys.exit(0)
         return
 
 
 # ── Main Wizard ────────────────────────────────────────────────────────────────
 def main():
-    os.system("cls" if platform.system()=="Windows" else "clear")
+    clear_screen()
 
     print()
-    print("[bold cyan]" + "="*60 + "[/bold cyan]")
-    print("[bold cyan]     VIBEBlade SETUP WIZARD[/bold cyan]")
-    print("[bold cyan]     Interactive Guided Setup[/bold cyan]")
-    print("[bold cyan]" + "="*60 + "[/bold cyan]")
+    print("_c(_b(" + "="*60 + "))")
+    print("_c(_b(     VIBEBlade SETUP WIZARD))")
+    print("_c(_b(     Interactive Guided Setup))")
+    print("_c(_b(" + "="*60 + "))")
     print()
-
-    if not HAS_PT:
-        print("[yellow]NOTE: pip install prompt_toolkit rich for full TTY experience[/yellow]")
-        print()
 
     # ── Welcome ──────────────────────────────────────────────────────────────
-    if console:
-        console.print(Panel(
-            "[bold]Welcome to VibeBlade![/bold]\n\n"
-            "This wizard will:\n"
-            "  1. Detect your hardware (RAM, VRAM, GPU)\n"
-            "  2. Recommend the best model for your system\n"
-            "  3. Configure memory offloading (VRAM / RAM / SSD)\n"
-            "  4. Set up and verify your installation\n"
-            "  5. Generate a ready-to-run [cyan]vibeblade.yaml[/cyan] config\n\n"
-            "[dim]Works on Windows, Linux, and macOS[/dim]\n"
-            "[dim]Developed by [bold]VibeDrift Inc.[/bold] — vibedrift.com[/dim]",
-            title="[bold green]Let's get started[/bold green]",
-            style="bold cyan",
-        ))
-    else:
-        print("=== VIBEBlade SETUP WIZARD ===")
-        print("This wizard will detect hardware, configure memory offloading,")
-        print("and generate a vibeblade.yaml config file.\n")
-        print("Developed by VibeDrift Inc. — vibedrift.com\n")
+    panel("Welcome to VibeBlade!",
+          "This wizard will:\n"
+          "  1. Detect your hardware (RAM, VRAM, GPU)\n"
+          "  2. Recommend the best model for your system\n"
+          "  3. Configure memory offloading (VRAM / RAM / SSD)\n"
+          "  4. Set up and verify your installation\n"
+          "  5. Generate a ready-to-run vibeblade.yaml config\n\n"
+          "Works on Windows, Linux, and macOS\n"
+          "Developed by VibeDrift Inc. — vibedrift.com")
+
 
     pause("Press [Enter] to begin")
 
     # ── Step 1: Detect Hardware ───────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 1: Hardware Detection[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 1: Hardware Detection))")
     print()
 
     ram  = get_ram_gb()
@@ -1160,7 +1082,7 @@ def main():
 
     # If RAM/SSD detection failed, ask user manually
     if ram is None:
-        print("[yellow]⚠ Automatic RAM detection failed.[/yellow]")
+        print("_y(⚠ Automatic RAM detection failed.)")
         try:
             ans = input("  Enter your total RAM in GB (e.g. 32): ").strip()
             if ans and ans.isdigit():
@@ -1168,7 +1090,7 @@ def main():
         except (EOFError, KeyboardInterrupt):
             pass
     if not ssd:
-        print("[yellow]⚠ Automatic SSD detection failed.[/yellow]")
+        print("_y(⚠ Automatic SSD detection failed.)")
         try:
             ans = input("  Do you have an SSD? (Y/n): ").strip().lower()
             if ans != "n":
@@ -1176,48 +1098,38 @@ def main():
         except (EOFError, KeyboardInterrupt):
             pass
 
-    if console:
-        tbl = Table(title="System Summary", show_header=False, box=None)
-        tbl.add_column("Property", style="cyan", width=22)
-        tbl.add_column("Value",   style="white")
-        tbl.add_row("OS",           f"{platform.system()} {platform.release()}")
-        tbl.add_row("Python",       f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-                                     + (" ✓" if py_ok else " ✗ NEED ≥3.10"))
-        tbl.add_row("RAM",          f"{ram}GB" + (" ✓" if ram and ram>=16 else " LOW") if ram else "Unknown")
-        if vram_total:
-            tbl.add_row("VRAM", f"{vram_total}GB")
-        else:
-            tbl.add_row("VRAM", "None detected")
-        if gpu:
-            tbl.add_row("GPU", gpu)
-        tbl.add_row("SSD", "Available ✓" if ssd else "Not detected")
-        tbl.add_row("Disk (free)",  f"{disk}GB" if disk else "Unknown")
-        tbl.add_row("Internet",     "✓ Connected" if inet else "✗ Offline")
-        console.print(tbl)
+    rows = [
+        ("OS", f"{platform.system()} {platform.release()}"),
+        ("Python", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+                   + (" OK" if py_ok else " NEED 3.10+")),
+        ("RAM", f"{ram}GB" if ram else "Unknown"),
+    ]
+    if vram_total:
+        rows.append(("VRAM", f"{vram_total}GB"))
     else:
-        print(f"  OS:       {platform.system()} {platform.release()}")
-        print(f"  Python:   {sys.version_info.major}.{sys.version_info.minor} {'OK' if py_ok else 'NEED 3.10+'}")
-        print(f"  RAM:      {ram}GB" if ram else "  RAM:      Unknown")
-        print(f"  VRAM:     {vram_total}GB" if vram_total else "  VRAM:     None")
-        if gpu:
-            print(f"  GPU:      {gpu}")
-        print(f"  SSD:      {'Available' if ssd else 'Not detected'}")
-        print(f"  Disk:     {disk}GB free" if disk else "  Disk:     Unknown")
-        print(f"  Internet: {'Connected' if inet else 'Offline'}")
+        rows.append(("VRAM", "None detected"))
+    if gpu:
+        rows.append(("GPU", gpu))
+    rows.append(("SSD", "Available" if ssd else "Not detected"))
+    rows.append(("Disk (free)", f"{disk}GB" if disk else "Unknown"))
+    rows.append(("Internet", "Connected" if inet else "Offline"))
+    print_table(["Property", "Value"], rows)
+
+
 
     if not py_ok:
-        print("\n[red]ERROR: Python 3.10+ required. Please upgrade Python.[/red]")
+        print("\n_r(ERROR: Python 3.10+ required. Please upgrade Python.)")
         sys.exit(1)
 
     pause("Press [Enter] to continue")
 
     # ── Step 2: Model Selection ──────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 2: Choose Model[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 2: Choose Model))")
     print()
 
     model = interactive_model_select(ram, vram_total or 0)
-    print(f"\n  [green]Selected:[/green] {model[1]} ({model[0]})")
+    print(f"\n  _g(Selected:) {model[1]} ({model[0]})")
     print(f"             Type: {model[2]} | Size: {model[3]} | Min RAM: {model[4]}GB")
 
     custom_id = None
@@ -1225,14 +1137,14 @@ def main():
         custom_id = text_input("Enter HuggingFace model ID or local GGUF path",
                                 default="")
         if not custom_id:
-            print("[red]No model specified — exiting.[/red]")
+            print("_r(No model specified — exiting.)")
             sys.exit(1)
 
     pause("Press [Enter] to continue")
 
     # ── Step 3: Offload Config ───────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 3: Memory Offloading[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 3: Memory Offloading))")
     print()
 
     model_type = model[2]
@@ -1243,23 +1155,23 @@ def main():
     offload = interactive_offload(ram, vram_total or 0, model_type, model_size_gb)
 
     print()
-    panel("Final Offload Configuration", describe_offload(offload), "bold green")
+    panel("Final Offload Configuration", describe_offload(offload))
     print()
 
     pause("Press [Enter] to continue")
 
     # ── Step 4: Quantization ─────────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 4: Quantization[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 4: Quantization))")
     print()
     quant = interactive_quant_select()
-    print(f"\n  [green]Selected:[/green] {quant}")
+    print(f"\n  _g(Selected:) {quant}")
 
     pause("Press [Enter] to continue")
 
     # ── Step 5: Install & Verify ────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 5: Install VibeBlade[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 5: Install VibeBlade))")
     print()
 
     turbodir = Path.cwd()
@@ -1271,11 +1183,11 @@ def main():
 
     # ── Auto-detect acceleration backend ─────────────────────────────────
     accel_extra, accel_name = detect_accel_backend()
-    print(f"  [bold green]Detected acceleration:[/bold green] {accel_name}")
+    print(f"  _g(_b(Detected acceleration:)) {accel_name}")
     if accel_extra:
-        print(f"  [dim]Installing with extras: pip install -e .{accel_extra}[/dim]")
+        print(f"  _d(Installing with extras: pip install -e .{accel_extra})")
     else:
-        print("  [dim]Installing base package (no GPU extras needed)[/dim]")
+        print("  _d(Installing base package (no GPU extras needed))")
     print()
 
     if not venv_dir.exists():
@@ -1300,9 +1212,7 @@ def main():
         run([str(pip_exe), "install", "-e", ".", "-q"], fatal=False)
         print("    ✓ VibeBlade installed (base, extras skipped)")
 
-    ok, out = run([str(pip_exe), "install", "prompt_toolkit", "rich", "-q"], fatal=False)
-    if ok:
-        print("    ✓ UI libraries installed")
+    # No extra UI dependencies needed
 
     print()
     verify_install()
@@ -1310,29 +1220,20 @@ def main():
     pause("Press [Enter] to continue")
 
     # ── Step 6: Write Config ────────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
-    print("[bold cyan]STEP 6: Generate Config[/bold cyan]")
+    clear_screen()
+    print("_c(_b(STEP 6: Generate Config))")
     print()
 
     model_id = custom_id if custom_id else model[0]
     cfg = write_config(model_id, offload, quant)
 
-    print("  Generated [cyan]vibeblade.yaml:[/cyan]")
-    if console:
-        try:
-            import yaml
-            syn = Syntax(yaml.dump(cfg, default_flow_style=False), "yaml",
-                        theme="monokai", line_numbers=True)
-            console.print(syn)
-        except Exception:
-            print(json.dumps(cfg, indent=2))
-    else:
-        print(json.dumps(cfg, indent=2))
+    print("  Generated _c(vibeblade.yaml:)")
+    print(json.dumps(cfg, indent=2))
 
     # ── Step 7: Optional Download ───────────────────────────────────────────
     if inet and model[0] != "custom":
-        os.system("cls" if platform.system()=="Windows" else "clear")
-        print("[bold cyan]STEP 7: Download Model (Optional)[/bold cyan]")
+        clear_screen()
+        print("_c(_b(STEP 7: Download Model (Optional)))")
         print()
         dl = confirm("Download the model now?",
                       text=f"This will download {model[1]} (~{model[3]}) from HuggingFace.\n"
@@ -1346,54 +1247,52 @@ def main():
             else:
                 print(f"\n  ✗ Download failed: {path}")
     else:
-        print("[dim]STEP 7: Download skipped (offline or custom model)[/dim]")
+        print("_d(STEP 7: Download skipped (offline or custom model))")
 
     # ── Final Summary ────────────────────────────────────────────────────────
-    os.system("cls" if platform.system()=="Windows" else "clear")
+    clear_screen()
     activate = ("venv\\\\Scripts\\\\activate" if platform.system()=="Windows"
                  else "source venv/bin/activate")
-    print("[bold green]" + "="*60 + "[/bold green]")
-    print("[bold green]       SETUP COMPLETE![/bold green]")
-    print("[bold green]" + "="*60 + "[/bold green]")
+    print("_g(_b(" + "="*60 + "))")
+    print("_g(_b(       SETUP COMPLETE!))")
+    print("_g(_b(" + "="*60 + "))")
 
-    if console:
-        tbl = Table(title="Your Configuration", show_header=False, box=None)
-        tbl.add_column("Setting", style="cyan", width=24)
-        tbl.add_column("Value",   style="white")
-        tbl.add_row("Model",      model_id)
-        tbl.add_row("Type",       model[2])
-        tbl.add_row("Quantization", quant)
-        tbl.add_row("VRAM",       f"{offload['vram_gb']}GB")
-        tbl.add_row("RAM",        f"{offload['ram_gb']}GB")
-        tbl.add_row("SSD tier",   "Enabled" if offload["ssd_enabled"] else "Disabled")
-        tbl.add_row("Hot experts", f"{offload['hot_frac']:.0%}")
-        tbl.add_row("Config file", "vibeblade.yaml")
-        console.print(tbl)
+    print_table(["Setting", "Value"], [
+        ("Model", model_id),
+        ("Type", model[2]),
+        ("Quantization", quant),
+        ("VRAM", f"{offload['vram_gb']}GB"),
+        ("RAM", f"{offload['ram_gb']}GB"),
+        ("SSD tier", "Enabled" if offload["ssd_enabled"] else "Disabled"),
+        ("Hot experts", f"{offload['hot_frac']:.0%}"),
+        ("Config file", "vibeblade.yaml"),
+    ])
+
 
     print()
-    print("  [bold green]NEXT STEPS:[/bold green]")
+    print("  _g(_b(NEXT STEPS:))")
     print("  1. Activate environment:")
-    print(f"       [yellow]{activate}[/yellow]")
+    print(f"       _y({activate})")
     print()
     print("  2. Run benchmark:")
-    print("       [yellow]python -m vibeblade bench --quick[/yellow]")
+    print("       _y(python -m vibeblade bench --quick)")
     print()
     print("  3. Run inference:")
-    print("       [yellow]python -m vibeblade run --config vibeblade.yaml[/yellow]")
-    print("       [yellow]python -m vibeblade run --prompt \"Hello world\"[/yellow]")
+    print("       _y(python -m vibeblade run --config vibeblade.yaml)")
+    print("       _y(python -m vibeblade run --prompt \"Hello world\")")
     print()
     print("  4. Start API server:")
-    print(f"       [yellow]python -m vibeblade serve --model {model_id} --port 8000[/yellow]")
+    print(f"       _y(python -m vibeblade serve --model {model_id} --port 8000)")
     print()
-    print("[bold green]" + "="*60 + "[/bold green]")
+    print("_g(_b(" + "="*60 + "))")
     print()
-    print("  [dim]VibeBlade by [bold]VibeDrift Inc.[/bold] — vibedrift.com | github.com/kevin046/VibeBlade[/dim]")
+    print("  _d(VibeBlade by _b(VibeDrift Inc.) — vibedrift.com | github.com/kevin046/VibeBlade)")
     print()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n  [yellow]Setup interrupted. Re-run anytime:[/yellow]")
-        print("  [cyan]  python setup_wizard.py[/cyan]")
+        print("\n\n  _y(Setup interrupted. Re-run anytime:)")
+        print("  _c(  python setup_wizard.py)")
         sys.exit(0)
