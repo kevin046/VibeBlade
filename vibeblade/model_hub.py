@@ -226,10 +226,13 @@ def find_in_lm_studio(
         local_app = os.environ.get("LOCALAPPDATA", "")
         if local_app:
             candidates.append(Path(local_app) / "LM Studio" / "models")
+        candidates.append(Path.home() / ".lmstudio" / "models")
     elif sys.platform == "darwin":
         candidates.append(Path.home() / "Library" / "Application Support" / "LM Studio" / "models")
+        candidates.append(Path.home() / ".lmstudio" / "models")
     else:
         candidates.append(Path.home() / ".cache" / "lm-studio" / "models")
+        candidates.append(Path.home() / ".lmstudio" / "models")
 
     results: list[Path] = []
     for d in candidates:

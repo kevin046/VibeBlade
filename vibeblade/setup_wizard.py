@@ -800,14 +800,51 @@ def interactive_model_select(ram_gb, vram_gb):
         ], default=0)
 
         if has_existing == "manual_path":
-            # Let user paste a direct path to a .gguf file
+            # Let user paste a direct path to a .gguf file or folder
             custom_path = text_input(
-                "Enter the full path to your .gguf model file",
+                "Enter the full path to your .gguf model file (or folder containing models)",
                 default="",
             )
             if custom_path:
                 custom_path = Path(custom_path.strip('"').strip("'"))
-                if custom_path.is_file() and custom_path.suffix.lower() == ".gguf":
+
+                # If it's a directory, scan it for .gguf files
+                if custom_path.is_dir():
+                    from .model_hub import find_gguf_files
+                    gguf_files = find_gguf_files(custom_path, recursive=True)
+                    if gguf_files:
+                        print(f"\n  Found {len(gguf_files)} .gguf file(s) in that folder:")
+                        rows = []
+                        for i, f in enumerate(gguf_files):
+                            size_gb = round(f.stat().st_size / (1024**3), 1)
+                            rows.append((str(i+1), f.name[:40], f"{size_gb}GB"))
+                        print_table(["#", "Model File", "Size"], rows)
+                        choice = radio(
+                            "Which model would you like to use?",
+                            [(f"{f.name[:40]} ({round(f.stat().st_size / (1024**3), 1)}GB)", i)
+                             for i, f in enumerate(gguf_files)],
+                            default=0,
+                        )
+                        chosen = gguf_files[choice]
+                        size_gb = round(chosen.stat().st_size / (1024**3), 1)
+                        from .model_hub import _detect_gguf_quant
+                        quant = _detect_gguf_quant(chosen.name)
+                        return (
+                            str(chosen.resolve()),
+                            chosen.name[:30],
+                            "Downloaded",
+                            f"~{size_gb}GB",
+                            ram_gb or 8,
+                            0,
+                            quant if quant != "unknown" else "Q4_K_M",
+                            f"Local file: {chosen.parent}",
+                        )
+                    else:
+                        print(f"\n  {_y('No .gguf files found in that folder.')}")
+                        pause("Press [Enter] to continue")
+                        continue
+
+                elif custom_path.is_file() and custom_path.suffix.lower() == ".gguf":
                     size_gb = round(custom_path.stat().st_size / (1024**3), 1)
                     from .model_hub import _detect_gguf_quant
                     quant = _detect_gguf_quant(custom_path.name)
@@ -822,8 +859,8 @@ def interactive_model_select(ram_gb, vram_gb):
                         f"Local file: {custom_path.parent}",
                     )
                 else:
-                    print(f"\n  {_r('File not found or not a .gguf file.')}")
-                    print(f"  {_d('Check the path and try again.')}")
+                    print(f"\n  {_r('Path not found. Check the path and try again.')}")
+                    print(f"  {_d('Tip: You can paste a path to a .gguf file OR a folder containing .gguf files.')}")
                     pause("Press [Enter] to continue")
                     continue
             continue
