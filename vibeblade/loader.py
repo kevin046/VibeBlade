@@ -613,7 +613,7 @@ class GGUFLoader:
             end = start + block_bytes
             if tid in (GGUF_TYPE_Q2_K, GGUF_TYPE_Q3_K, GGUF_TYPE_Q4_K,
                        GGUF_TYPE_Q5_K, GGUF_TYPE_Q6_K, GGUF_TYPE_Q8_K):
-                out[i * block_size:(i + 1) * block_size] = fn(raw[start:end])
+                out[i * block_size:(i + 1) * block_size] = fn(bytes(raw[start:end]))
             else:
                 out[i * block_size:(i + 1) * block_size] = fn(
                     raw[start:end], block_size
