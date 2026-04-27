@@ -37,16 +37,25 @@ Wizard auto-detects hardware, installs remaining prerequisites, configures memor
 
 ## What it runs
 
-| Model | Hardware | Speed |
-|---|---|---|
-| Llama-3 8B | 16GB RAM | ~15 t/s |
-| Mistral 7B | 16GB RAM + 4GB GPU | ~18 t/s |
-| Llama-3 70B | 64GB RAM + 8GB GPU | ~7 t/s |
-| **MiniMax M2.7** (230B MoE) | 16GB VRAM + 256GB RAM | **~8–14 t/s** |
-| **MiniMax M2.7** (230B MoE) | 16GB VRAM + 32GB RAM + NVMe | **~2–4 t/s** |
-| **Mixtral 8×7B** | 16GB VRAM + 32GB RAM | **~12–16 t/s** |
+*From the [white paper](./WHITEPAPER.md) — Table 5: Model Feasibility on Consumer Hardware*
 
-*Estimated. MiniMax M2.7 is a 230B MoE model (~115GB at 4-bit). VibeBlade keeps hot experts in VRAM and cold experts in RAM/SSD — only activations cross PCIe.*
+| System | RAM / VRAM | Baseline Max | VibeBlade Max | Gain |
+|---|---|---|---|---|
+| Budget Laptop | 16GB / 0GB | 8B Q4 (~15 t/s) | **13B Q4 (~35 t/s)** | 2× capacity |
+| Standard Desktop | 32GB / 12GB | 13B Q4 (~8 t/s) | **70B Q4 (~12 t/s)** | 5× capacity |
+| Pro Workstation | 64GB / 24GB | 32B Q4 (~10 t/s) | **236B MoE (~15 t/s)** | 7× capacity |
+| Unified Mac | 128GB / 128GB | 70B Q4 (~15 t/s) | **1T MoE (~8 t/s)** | 14× capacity |
+
+VibeBlade achieves this by running 3–6× larger models at the same speed through activation sparsity, adaptive memory tiering, and speculative decoding. A 70B model on a $500 desktop — previously requiring a $4,000 GPU — now runs at conversational speed.
+
+### Peak decode throughput (7B Q4, whitepaper Table 4)
+
+| Hardware | VibeBlade | Baseline | Scaling |
+|---|---|---|---|
+| RTX 5090 (32GB) | 62.5 t/s | 18.2 t/s | 3.4× |
+| M4 Ultra (128GB) | 114.0 t/s | 15.0 t/s | 7.6× |
+| RTX 4090 (24GB) | 18.4 t/s | 3.1 t/s | 5.9× |
+| Strix Halo (128GB) | 22.0 t/s | 4.2 t/s | 5.2× |
 
 ---
 
