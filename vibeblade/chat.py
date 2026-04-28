@@ -131,15 +131,15 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             filled = int(bar_len * pct)
             bar = _g("█" * filled) + _d("░" * (bar_len - filled))
             short_name = name.split(".")[-1][:24] if name else ""
-            sys.stdout.write(
+            sys.stderr.write(
                 f"\r {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')} {short_name:<24}"
             )
-            sys.stdout.flush()
+            sys.stderr.flush()
             last_tensor[0] = name
 
     # Show immediate feedback that we're loading
-    sys.stdout.write(f"\r {_d('░' * 20)} {_b('  0.0%')} {_d('   0.0s')} {'parsing header...':<24}")
-    sys.stdout.flush()
+    sys.stderr.write(f"\r {_d('░' * 20)} {_b('  0.0%')} {_d('   0.0s')} {'parsing header...':<24}")
+    sys.stderr.flush()
 
     try:
         from . import VibeBladeModel
@@ -149,7 +149,8 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     model = VibeBladeModel(model_path, progress_cb=_progress)
 
     elapsed = time.time() - load_start
-    print(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<24} ")
+    sys.stderr.write(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<24} \n")
+    sys.stderr.flush()
 
     # MoE hot/cold split requires a pre-computed HotColdMap from profiling
     # Skip in chat mode — runs all experts on CPU by default

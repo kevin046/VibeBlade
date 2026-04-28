@@ -900,10 +900,17 @@ class _LazyWeights:
             return self._cache[key]
 
         if key not in self._name_map:
-            avail = list(self._name_map.keys())[:5]
+            # Show helpful context: all names matching the same block prefix
+            parts = key.split(".", 2)
+            if len(parts) >= 2:
+                prefix = parts[0] + "." + parts[1]
+                matches = sorted(n for n in self._name_map if n.startswith(prefix + "."))
+                hint = f"\n  Names matching '{prefix}.*': {matches[:20]}"
+            else:
+                avail = sorted(self._name_map.keys())[:20]
+                hint = f"\n  First 20: {avail}"
             raise KeyError(
-                f"Tensor '{key}' not found. "
-                f"Have (first 5): {avail}..."
+                f"Tensor '{key}' not found.{hint}"
             )
 
         info = self._name_map[key]

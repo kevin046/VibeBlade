@@ -225,6 +225,10 @@ class VibeBladeModel:
             gpu = " + GPU" if mi.get("gpu_offload") else ""
             print(f"   Weights: {mode} ({mi['total_tensors']} tensors, "
                   f"cache {mi['cached_mb']:.0f}/{mi['max_mb']:.0f} MB{gpu})")
+            # Debug: show blk.0 tensor names so we can verify naming convention
+            if isinstance(self.weights, _LazyWeights):
+                blk0 = sorted(k for k in self.weights._name_map if k.startswith("blk.0."))
+                print(f"   blk.0 tensors: {blk0}")
     
     def _extract_config(self):
         """Extract model config from GGUF metadata."""
