@@ -536,7 +536,7 @@ class GGUFLoader:
         for t in self.tensor_infos:
             if t["name"] == name:
                 return t
-            raise KeyError(f"Tensor not found: {name}")
+        raise KeyError(f"Tensor not found: {name}")
 
     def load_tensor(self, name: str, dtype: np.dtype = np.dtype("float32"),
                     progress_cb=None) -> np.ndarray:
@@ -618,11 +618,11 @@ class GGUFLoader:
                 out[i * block_size:(i + 1) * block_size] = fn(
                     raw[start:end], block_size
                 )
-            if progress_cb and (i + 1) % 50 == 0:
-                progress_cb(tensor_name, i + 1, n_blocks)
+            if progress_cb and (i + 1) % 10 == 0:
+                progress_cb(tensor_name, i + 1, n_blocks, loading=True)
 
         if progress_cb:
-            progress_cb(tensor_name, n_blocks, n_blocks)
+            progress_cb(tensor_name, n_blocks, n_blocks, loading=True)
         return out[:n_elements]
 
     def load_all_tensors(self, dtype: np.dtype = np.dtype("float32"),
@@ -631,10 +631,18 @@ class GGUFLoader:
         total = len(self.tensor_infos)
         tensors = {}
         for idx, info in enumerate(self.tensor_infos):
+            # Wrap callback to report overall progress (tensor + block level)
             if progress_cb:
-                progress_cb(info["name"], idx, total, loading=True)
+                _tensor_idx = idx
+                _tensor_total = total
+                def _wrapped(name, done, sub_total, loading=False):
+                    overall = _tensor_idx + (done / max(sub_total, 1))
+                    progress_cb(name, overall, _tensor_total, loading=True)
+            else:
+                _wrapped = None
+
             tensors[info["name"]] = self.load_tensor(info["name"], dtype,
-                                                     progress_cb=progress_cb)
+                                                     progress_cb=_wrapped)
             if progress_cb:
                 progress_cb(info["name"], idx + 1, total, loading=True)
         return tensors
