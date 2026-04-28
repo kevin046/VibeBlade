@@ -502,15 +502,18 @@ class GGUFLoader:
 
     MMAP_THRESHOLD = 2 * 1024**3  # 2 GB — mmap above this
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, progress_cb=None) -> None:
         self._path = path
         self._file_size = os.path.getsize(path)
         self._use_mmap = self._file_size > self.MMAP_THRESHOLD
         self._mmap: mmap.mmap | None = None
+        self._progress_cb = progress_cb
 
         self._f = open(path, "rb")
         self._parse_header()
         self._parse_metadata()
+        if progress_cb:
+            progress_cb("parsing tensor info", 0, self.n_tensors, loading=True)
         self._parse_tensor_infos()
         self._data_start = self._f.tell()
 
@@ -533,14 +536,16 @@ class GGUFLoader:
 
     def _parse_metadata(self) -> None:
         self.metadata: dict[str, Any] = {}
-        for _ in range(self.n_kv):
+        for i in range(self.n_kv):
             key = self._read_string()
             (vtype,) = struct.unpack("<I", self._read(4))
             self.metadata[key] = self._read_value(vtype)
+            if self._progress_cb and (i + 1) % 100 == 0:
+                self._progress_cb("reading metadata", i + 1, self.n_kv, loading=True)
 
     def _parse_tensor_infos(self) -> None:
         self.tensor_infos: list[dict] = []
-        for _ in range(self.n_tensors):
+        for i in range(self.n_tensors):
             name = self._read_string()
             (n_dims,) = struct.unpack("<I", self._read(4))
             shape: list[int] = []
@@ -556,6 +561,8 @@ class GGUFLoader:
                 "dtype": dtype_id,
                 "offset": offset,
             })
+            if self._progress_cb and (i + 1) % 50 == 0:
+                self._progress_cb("parsing tensor info", i + 1, self.n_tensors, loading=True)
 
     # ── Low-level readers ──
 
@@ -827,7 +834,7 @@ def load_model(path: str, progress_cb=None, lazy: bool = True,
     Returns:
         dict with metadata, tensors, config.
     """
-    loader = GGUFLoader(path)
+    loader = GGUFLoader(path, progress_cb=progress_cb)
     metadata = dict(loader.metadata)
     arch = metadata.get("general.architecture", "")
     config = _extract_config(metadata)

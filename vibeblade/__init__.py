@@ -235,9 +235,11 @@ class VibeBladeModel:
         self.config.update({
             "hidden_dim": get("embedding_length", 512),
             "num_heads": get("attention.head_count", 8),
+            "num_kv_heads": get("attention.head_count_kv", get("attention.head_count", 8)),
             "num_layers": get("block_count", 6),
             "intermediate_dim": get("feed_forward_length", 1024),
             "vocab_size": get("vocab_size", 1000),
+            "context_length": get("context_length", 2048),
         })
     
     def _setup_components(self):
@@ -255,6 +257,11 @@ class VibeBladeModel:
             quantize=True,
         )
         self.generator = TextGenerator(temperature=1.0, top_k=50, top_p=0.9)
+
+        # Build RoPE cache (cos/sin tables for rotary positional embeddings)
+        head_dim = self.config["hidden_dim"] // self.config["num_heads"]
+        max_ctx = self.config.get("context_length", 2048)
+        self.cos_cache, self.sin_cache = build_rope_cache(max_ctx, head_dim)
 
         # Auto-detect MoE architecture
         self.moe_config = detect_moe_config(self.weights)
@@ -296,41 +303,80 @@ class VibeBladeModel:
         self.generator.top_k = top_k
         self.generator.top_p = top_p
         
+        import time
+        n_layers = self.config["num_layers"]
+        n_heads = self.config["num_heads"]
+        n_kv_heads = self.config.get("num_kv_heads", n_heads)
+        
         if token_ids is None:
             if prompt is None:
                 token_ids = np.array([1])  # BOS token
             else:
-                # Simple tokenization placeholder
+                # Simple byte tokenization (placeholder — real tokenizer later)
                 token_ids = np.array(list(prompt.encode("utf-8")) + [1])
         
-        def model_fn(ids):
-            return forward_token(
-                ids, self.weights,
-                num_layers=self.config["num_layers"],
-                hidden_dim=self.config["hidden_dim"],
-                num_heads=self.config["num_heads"],
-                head_dim=self.config["hidden_dim"] // self.config["num_heads"],
-                intermediate_dim=self.config["intermediate_dim"],
-                cache=self.cache,
-            )
+        # Get shared weights
+        token_emb = self.weights["token_embd.weight"]
+        output_norm_w = self.weights["output_norm.weight"]
+        output_w = self.weights["output.weight"]
         
+        # Step 1: Prefill — process all prompt tokens at once
+        logits, kv_caches_k, kv_caches_v = forward_prefill(
+            token_ids=token_ids,
+            token_emb=token_emb,
+            output_norm_w=output_norm_w,
+            output_w=output_w,
+            weights=self.weights,
+            n_layers=n_layers,
+            cos_cache=self.cos_cache,
+            sin_cache=self.sin_cache,
+            n_heads=n_heads,
+            n_kv_heads=n_kv_heads,
+        )
+        
+        prompt_len = len(token_ids)
+        position = prompt_len
+        
+        # Step 2: Decode — generate one token at a time using KV cache
         output_tokens = []
-        def _default_on_token(token_id, pos):
-            output_tokens.append(token_id)
-            if stream:
-                # Simple byte-to-char decode
+        gen_start = time.time()
+        
+        for i in range(max_tokens):
+            # Sample from logits
+            next_token = self.generator.sample(logits[-1])
+            output_tokens.append(next_token)
+            
+            if on_token is not None:
+                on_token(next_token, i)
+            elif stream:
                 try:
-                    print(chr(token_id), end="", flush=True)
+                    print(chr(next_token), end="", flush=True)
                 except (ValueError, OverflowError):
                     pass
+            
+            if next_token == 2:  # EOS
+                break
+            
+            # Forward single token through all layers with KV cache
+            logits, kv_caches_k, kv_caches_v, _ = forward_decode_single(
+                token_id=next_token,
+                position=position,
+                token_emb=token_emb,
+                output_norm_w=output_norm_w,
+                output_w=output_w,
+                weights=self.weights,
+                n_layers=n_layers,
+                kv_caches_k=kv_caches_k,
+                kv_caches_v=kv_caches_v,
+                cos_cache=self.cos_cache,
+                sin_cache=self.sin_cache,
+                n_heads=n_heads,
+                n_kv_heads=n_kv_heads,
+            )
+            position += 1
         
-        def _external_on_token(token_id, pos):
-            output_tokens.append(token_id)
-            if on_token is not None:
-                on_token(token_id, pos)
-        
-        cb = _external_on_token if on_token is not None else _default_on_token
-        result, tps = self.generator.generate(model_fn, token_ids, max_tokens, cb)
+        gen_elapsed = time.time() - gen_start
+        tps = len(output_tokens) / max(gen_elapsed, 1e-6)
         
         if stream and on_token is None:
             print()
