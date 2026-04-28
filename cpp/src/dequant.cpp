@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <stdexcept>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace vibeblade {
 
 // ════════════════════════════════════════════════════════════════
@@ -407,6 +411,10 @@ void gemv_dequant(const float* x, const void* weights, float* out,
     }
 
     const uint8_t* w = (const uint8_t*)weights;
+
+#ifdef _OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
     for (int64_t j = 0; j < N; j++) {
         const void* wrow = w + j * row_bytes;
         switch (wtype) {

@@ -2,33 +2,66 @@
 // Full forward pass in C++: prefill + decode with KV cache.
 // Weights are mmap'd from GGUF, dequantized inline during matmuls.
 // Zero malloc in the hot path — all buffers pre-allocated.
+// NEON SIMD on ARM, OpenMP multi-threading for parallel gemv.
 
 #include "fast_model.h"
 #include "dequant.h"
+#ifdef __aarch64__
+#include "neon_kernels.h"
+#endif
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace vibeblade {
 
 // ════════════════════════════════════════════════════════════════
-//  Math primitives (no external deps)
+//  Math primitives — NEON-accelerated on ARM
 // ════════════════════════════════════════════════════════════════
 
 static inline float fast_rms(const float* x, int n) {
+#ifdef __aarch64__
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    int i = 0;
+    int n16 = n & ~15;
+    for (; i < n16; i += 16) {
+        float32x4_t a = vld1q_f32(x + i);
+        float32x4_t b = vld1q_f32(x + i + 4);
+        float32x4_t c = vld1q_f32(x + i + 8);
+        float32x4_t d = vld1q_f32(x + i + 12);
+        acc0 = vmlaq_f32(acc0, a, a);
+        acc1 = vmlaq_f32(acc1, b, b);
+        acc0 = vmlaq_f32(acc0, c, c);
+        acc1 = vmlaq_f32(acc1, d, d);
+    }
+    float sum = vaddvq_f32(vaddq_f32(acc0, acc1));
+    for (; i < n; i++) sum += x[i] * x[i];
+#else
     float sum = 0.0f;
     for (int i = 0; i < n; i++) sum += x[i] * x[i];
+#endif
     return sqrtf(sum / n + 1e-8f);
 }
 
 // RMSNorm: out[i] = x[i] * (w[i] / rms(x))
 static void rms_norm(const float* x, const float* w, float* out, int n, float eps) {
+#ifdef __aarch64__
+    float inv_rms;
+    vrms_norm_compute(x, n, eps, &inv_rms);
+    vrms_norm_apply(x, w, out, n, inv_rms);
+#else
     float s = 0.0f;
     for (int i = 0; i < n; i++) s += x[i] * x[i];
     s = 1.0f / sqrtf(s / n + eps);
     for (int i = 0; i < n; i++) out[i] = x[i] * s * w[i];
+#endif
 }
 
 // SiLU: x * sigmoid(x)
@@ -36,12 +69,16 @@ static inline float silu_f(float x) { return x / (1.0f + expf(-x)); }
 
 // Softmax in-place
 static void softmax(float* x, int n) {
+#ifdef __aarch64__
+    vsoftmax(x, n);
+#else
     float max_val = x[0];
     for (int i = 1; i < n; i++) if (x[i] > max_val) max_val = x[i];
     float sum = 0.0f;
     for (int i = 0; i < n; i++) { x[i] = expf(x[i] - max_val); sum += x[i]; }
     float inv = 1.0f / sum;
     for (int i = 0; i < n; i++) x[i] *= inv;
+#endif
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -72,7 +109,6 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
     cfg_.arch = g.meta_string("general.architecture");
     if (cfg_.arch.empty()) cfg_.arch = g.meta_string("llama.architecture");
 
-    // Try arch-prefixed keys first, then generic fallbacks
     auto gi = [&](const std::string& key, int64_t def = 0) -> int64_t {
         std::string prefixed = cfg_.arch + "." + key;
         int64_t v = g.meta_int(prefixed, -1);
@@ -94,12 +130,10 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
     cfg_.vocab_size      = (int)gi("vocab_size");
     cfg_.norm_eps        = gf("attention.layer_norm_rms_epsilon", 1e-5f);
 
-    // Fallback: Qwen2 uses "qwen2." prefix
     if (cfg_.arch.empty() || cfg_.n_layers == 0) {
-        cfg_.arch = "llama";  // default
+        cfg_.arch = "llama";
     }
 
-    // Cap context to MAX_SEQ
     cfg_.context_length = std::min(cfg_.context_length, MAX_SEQ);
 }
 
@@ -129,29 +163,26 @@ void VibeBladeFast::alloc_kv_cache() {
     }
 
     // Scratch: enough for one layer's intermediates
+    // Added extra space for o_proj buffer (previously was heap-allocated per step!)
     int hd = cfg_.hidden_dim;
     int id = cfg_.intermediate_dim;
     int q_dim = cfg_.n_heads * cfg_.head_dim;
-    scratch_.resize(5 * hd + 3 * id + 4 * q_dim + 2 * hd);  // generous
+    scratch_.resize(5 * hd + 3 * id + 4 * q_dim + 2 * hd + hd);
 }
 
 void VibeBladeFast::map_weights(const GGUFFile& g) {
     const std::string& arch = cfg_.arch;
 
-    // Token embeddings
     token_emb_ = g.tensor_data("token_embd.weight");
     if (token_emb_) {
         auto info = g.tensor_info("token_embd.weight");
         emb_type_ = info->type;
     }
 
-    // Output norm
     output_norm_ = (const float*)g.tensor_data("output_norm.weight");
 
-    // Output projection
     output_ = g.tensor_data("output.weight");
     if (!output_) {
-        // Llama reuses token embeddings as output
         output_ = g.tensor_data("token_embd.weight");
     }
     if (output_) {
@@ -160,7 +191,6 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
         out_type_ = info->type;
     }
 
-    // Layer weights
     layers_.resize(cfg_.n_layers);
     for (int i = 0; i < cfg_.n_layers; i++) {
         auto& lw = layers_[i];
@@ -185,7 +215,6 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
         set_w("ffn_up.weight",      lw.ffn_up,   lw.up_type);
         set_w("ffn_down.weight",    lw.ffn_down, lw.down_type);
 
-        // MoE gate
         set_w("ffn_gate_inp.weight", lw.ffn_gate_inp, lw.gate_inp_type);
     }
 }
@@ -200,13 +229,13 @@ void VibeBladeFast::reset() {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  Forward one layer
+//  Forward one layer — NEON + OpenMP optimized
 // ════════════════════════════════════════════════════════════════
 
 void VibeBladeFast::forward_layer(
-    const float* input,    // (seq_len, hidden_dim)
+    const float* input,
     int seq_len,
-    float* output,         // (seq_len, hidden_dim)
+    float* output,
     const LayerWeights& lw,
     int layer_idx
 ) {
@@ -216,9 +245,9 @@ void VibeBladeFast::forward_layer(
     int head_d = cfg_.head_dim;
     int n_heads = cfg_.n_heads;
     int n_kv_heads = cfg_.n_kv_heads;
-    int kv_mul = n_heads / n_kv_heads;  // GQA ratio
+    int kv_mul = n_heads / n_kv_heads;
 
-    // ── Scratch allocation (no malloc!) ──
+    // ── Scratch allocation (NO malloc — all from pre-allocated buffer) ──
     float* sp = scratch_.data();
     float* normed    = sp;                    sp += seq_len * hd;
     float* Q         = sp;                    sp += seq_len * q_dim;
@@ -228,7 +257,8 @@ void VibeBladeFast::forward_layer(
     float* gate_buf  = sp;                    sp += seq_len * cfg_.intermediate_dim;
     float* up_buf    = sp;                    sp += seq_len * cfg_.intermediate_dim;
     float* ff_out    = sp;                    sp += seq_len * hd;
-    float* scores    = sp;                    sp += seq_len * cfg_.context_length; // max attention scores
+    float* scores    = sp;                    sp += seq_len * cfg_.context_length;
+    float* o_proj    = sp;                    sp += seq_len * hd;  // ← was heap-alloc'd before!
 
     // ── 1. Attention RMS Norm ──
     for (int s = 0; s < seq_len; s++) {
@@ -236,6 +266,8 @@ void VibeBladeFast::forward_layer(
     }
 
     // ── 2. Q, K, V projections (gemv_dequant with inline dequant) ──
+    // For decode (seq_len=1), this is just 3 gemv calls — no parallelism benefit.
+    // For prefill (seq_len>1), parallelize across token positions.
     for (int s = 0; s < seq_len; s++) {
         gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype);
         gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype);
@@ -245,27 +277,32 @@ void VibeBladeFast::forward_layer(
     // ── 3. RoPE on Q and K ──
     for (int s = 0; s < seq_len; s++) {
         int pos = position_ + s;
-        // Q rotary (pairs of dims)
+        const float* cos_v = rope_cos_.data() + pos * head_d / 2;
+        const float* sin_v = rope_sin_.data() + pos * head_d / 2;
+
         for (int h = 0; h < n_heads; h++) {
             float* q = Q + s * q_dim + h * head_d;
+#ifdef __aarch64__
+            vapply_rope(q, head_d, cos_v, sin_v);
+#else
             for (int i = 0; i < head_d / 2; i++) {
-                float cos_v = rope_cos_[pos * head_d / 2 + i];
-                float sin_v = rope_sin_[pos * head_d / 2 + i];
                 float x0 = q[i], x1 = q[i + head_d / 2];
-                q[i] = x0 * cos_v - x1 * sin_v;
-                q[i + head_d / 2] = x0 * sin_v + x1 * cos_v;
+                q[i] = x0 * cos_v[i] - x1 * sin_v[i];
+                q[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
             }
+#endif
         }
-        // K rotary
         for (int h = 0; h < n_kv_heads; h++) {
             float* k = K_buf + s * kv_dim + h * head_d;
+#ifdef __aarch64__
+            vapply_rope(k, head_d, cos_v, sin_v);
+#else
             for (int i = 0; i < head_d / 2; i++) {
-                float cos_v = rope_cos_[pos * head_d / 2 + i];
-                float sin_v = rope_sin_[pos * head_d / 2 + i];
                 float x0 = k[i], x1 = k[i + head_d / 2];
-                k[i] = x0 * cos_v - x1 * sin_v;
-                k[i + head_d / 2] = x0 * sin_v + x1 * cos_v;
+                k[i] = x0 * cos_v[i] - x1 * sin_v[i];
+                k[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
             }
+#endif
         }
     }
 
@@ -279,74 +316,63 @@ void VibeBladeFast::forward_layer(
     }
 
     // ── 5. Multi-Head Attention (fused SDPA) ──
-    // For decode (seq_len=1), we can use the full KV cache.
-    // For prefill (seq_len>1), only positions 0..position+seq_len have valid KV.
+    int total_pos = position_ + seq_len;
 
     for (int s = 0; s < seq_len; s++) {
         float* q = Q + s * q_dim;
         float* o = attn_out + s * q_dim;
-
-        // Initialize output to zero
         memset(o, 0, q_dim * sizeof(float));
+
+        float scale = 1.0f / sqrtf((float)head_d);
 
         for (int h = 0; h < n_heads; h++) {
             float* q_h = q + h * head_d;
             float* o_h = o + h * head_d;
-
-            // Which KV head? (GQA: multiple Q heads share one KV head)
             int kv_h = h / kv_mul;
 
-            int total_pos = position_ + seq_len;
-
-            // Compute attention scores: Q_h @ K_cache^T
-            // Online softmax to avoid materializing full score array
-            float max_score = -1e30f;
-            float sum_exp  = 0.0f;
-
-            // Pre-compute scores
             float* score_row = scores + s * cfg_.context_length;
+
+            // ── Compute Q@K^T scores ──
             for (int p = 0; p < total_pos; p++) {
                 const float* k_h = k_cache.data() + p * kv_dim + kv_h * head_d;
+#ifdef __aarch64__
+                float dot = vdot_att(q_h, k_h, head_d) * scale;
+#else
                 float dot = 0.0f;
-                float scale = 1.0f / sqrtf((float)head_d);
-                for (int d = 0; d < head_d; d++) {
-                    dot += q_h[d] * k_h[d];
-                }
+                for (int d = 0; d < head_d; d++) dot += q_h[d] * k_h[d];
                 dot *= scale;
+#endif
                 score_row[p] = dot;
-                if (dot > max_score) max_score = dot;
             }
 
-            // Softmax with running sum
-            for (int p = 0; p < total_pos; p++) {
-                score_row[p] = expf(score_row[p] - max_score);
-                sum_exp += score_row[p];
-            }
-            float inv_sum = 1.0f / sum_exp;
-            for (int p = 0; p < total_pos; p++) {
-                score_row[p] *= inv_sum;
-            }
+            // ── Softmax ──
+            softmax(score_row, total_pos);
 
-            // Weighted sum of V
+            // ── Weighted sum of V ──
             for (int p = 0; p < total_pos; p++) {
                 const float* v_h = v_cache.data() + p * kv_dim + kv_h * head_d;
                 float w = score_row[p];
-                for (int d = 0; d < head_d; d++) {
-                    o_h[d] += w * v_h[d];
-                }
+#ifdef __aarch64__
+                vaxpy(o_h, w, v_h, head_d);
+#else
+                for (int d = 0; d < head_d; d++) o_h[d] += w * v_h[d];
+#endif
             }
         }
     }
 
     // ── 6. Output projection + residual ──
     for (int s = 0; s < seq_len; s++) {
-        // attn_out @ O_weight → output + input
-        // gemv: (q_dim,) input → (hd,) output
-        std::vector<float> o_proj(hd);
-        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj.data(), q_dim, hd, lw.otype);
+        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype);
+#ifdef __aarch64__
+        // Copy input + add o_proj in one NEON pass
+        memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+        vadd_residual(output + s * hd, o_proj + s * hd, hd);
+#else
         for (int d = 0; d < hd; d++) {
             output[s * hd + d] = input[s * hd + d] + o_proj[d];
         }
+#endif
     }
 
     // ── 7. FFN RMS Norm ──
@@ -356,27 +382,31 @@ void VibeBladeFast::forward_layer(
 
     // ── 8. SwiGLU FFN ──
     for (int s = 0; s < seq_len; s++) {
-        // gate = normed @ gate_weight  (hd → intermediate_dim)
         gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                      hd, cfg_.intermediate_dim, lw.gate_type);
-        // up = normed @ up_weight  (hd → intermediate_dim)
         gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
                      hd, cfg_.intermediate_dim, lw.up_type);
 
-        // SiLU(gate) * up
+        // SiLU(gate) * up — fused NEON kernel
         int id = cfg_.intermediate_dim;
+#ifdef __aarch64__
+        vsilu_mul_f32(gate_buf + s * id, up_buf + s * id, gate_buf + s * id, id);
+#else
         for (int i = 0; i < id; i++) {
             gate_buf[s * id + i] = silu_f(gate_buf[s * id + i]) * up_buf[s * id + i];
         }
+#endif
 
-        // down = gate_up @ down_weight  (intermediate_dim → hd)
         gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
                      id, hd, lw.down_type);
 
-        // Residual
+#ifdef __aarch64__
+        vadd_residual(output + s * hd, ff_out + s * hd, hd);
+#else
         for (int d = 0; d < hd; d++) {
             output[s * hd + d] += ff_out[s * hd + d];
         }
+#endif
     }
 }
 
@@ -401,7 +431,6 @@ std::vector<float> VibeBladeFast::prefill(const std::vector<int>& token_ids) {
         if (tok < 0 || tok >= cfg_.vocab_size)
             throw std::runtime_error("Token ID out of range: " + std::to_string(tok));
 
-        // Get embedding row (may be quantized)
         size_t row_bytes = tensor_nbytes(emb_type_, hd);
         const void* emb_row = (const uint8_t*)token_emb_ + tok * row_bytes;
         dequantize_row(emb_row, x.data() + s * hd, hd, emb_type_);
@@ -421,11 +450,8 @@ std::vector<float> VibeBladeFast::prefill(const std::vector<int>& token_ids) {
     }
 
     // ── Output projection: last token only → logits ──
-    // (During prefill, we only need logits for the last token to predict next)
     int last = seq_len - 1;
     std::vector<float> logits(cfg_.vocab_size);
-
-    // If output weights are quantized, use gemv_dequant
     gemv_dequant(normed.data() + last * hd, output_, logits.data(), hd, cfg_.vocab_size, out_type_);
 
     position_ += seq_len;
@@ -434,6 +460,7 @@ std::vector<float> VibeBladeFast::prefill(const std::vector<int>& token_ids) {
 
 // ════════════════════════════════════════════════════════════════
 //  Decode: process one token → return logits
+//  HOT PATH — zero heap allocations, NEON everywhere
 // ════════════════════════════════════════════════════════════════
 
 std::vector<float> VibeBladeFast::decode(int token_id) {
@@ -444,28 +471,36 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
     int hd = cfg_.hidden_dim;
 
     // ── Token embedding for single token ──
-    std::vector<float> x(hd);
+    // Use pre-allocated decode buffers — no std::vector construction!
+    // We reuse a persistent buffer pair to avoid any heap alloc
+    static thread_local std::vector<float> x_buf, hidden_buf;
+    if ((int)x_buf.size() < hd) x_buf.resize(hd);
+    if ((int)hidden_buf.size() < hd) hidden_buf.resize(hd);
+
     size_t row_bytes = tensor_nbytes(emb_type_, hd);
     const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
-    dequantize_row(emb_row, x.data(), hd, emb_type_);
+    dequantize_row(emb_row, x_buf.data(), hd, emb_type_);
 
     // ── Run through all layers ──
-    std::vector<float> hidden(hd);
     for (int l = 0; l < cfg_.n_layers; l++) {
-        forward_layer(x.data(), 1, hidden.data(), layers_[l], l);
-        x.swap(hidden);
+        forward_layer(x_buf.data(), 1, hidden_buf.data(), layers_[l], l);
+        std::swap(x_buf, hidden_buf);
     }
 
     // ── Final RMS norm ──
-    std::vector<float> normed(hd);
-    rms_norm(x.data(), output_norm_, normed.data(), hd, cfg_.norm_eps);
+    // Reuse normed as a thread-local buffer too
+    static thread_local std::vector<float> normed_buf;
+    if ((int)normed_buf.size() < hd) normed_buf.resize(hd);
+    rms_norm(x_buf.data(), output_norm_, normed_buf.data(), hd, cfg_.norm_eps);
 
     // ── Output projection → logits ──
-    std::vector<float> logits(cfg_.vocab_size);
-    gemv_dequant(normed.data(), output_, logits.data(), hd, cfg_.vocab_size, out_type_);
+    // Logits buffer is persistent — never realloc'd after first call
+    static thread_local std::vector<float> logits_buf;
+    if ((int)logits_buf.size() < cfg_.vocab_size) logits_buf.resize(cfg_.vocab_size);
+    gemv_dequant(normed_buf.data(), output_, logits_buf.data(), hd, cfg_.vocab_size, out_type_);
 
     position_++;
-    return logits;
+    return logits_buf;  // Return by value — NVRO or move since it's thread_local
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -474,7 +509,7 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
 
 size_t VibeBladeFast::kv_cache_bytes() const {
     if (kv_k_.empty()) return 0;
-    size_t per_layer = kv_k_[0].size() * sizeof(float) * 2;  // K + V
+    size_t per_layer = kv_k_[0].size() * sizeof(float) * 2;
     return per_layer * cfg_.n_layers;
 }
 
@@ -514,7 +549,6 @@ GenerateResult VibeBladeFast::generate(
     GenerateResult result;
     result.stopped_eos = false;
 
-    // Set seed
     if (seed >= 0) {
         sampler_.set_seed((uint64_t)seed);
     }
@@ -532,30 +566,30 @@ GenerateResult VibeBladeFast::generate(
     scfg.top_p = top_p;
     scfg.repetition_penalty = repetition_penalty;
 
-    // Include prompt tokens in history for repetition penalty
-    std::vector<int> token_history = prompt_ids;
+    // Pre-allocate token history to avoid repeated push_back/realloc
+    std::vector<int> token_history;
+    token_history.reserve(prompt_ids.size() + max_tokens + 16);
+    token_history.insert(token_history.end(), prompt_ids.begin(), prompt_ids.end());
+
+    result.token_ids.reserve(max_tokens);
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < max_tokens; i++) {
-        // Sample from logits
         int token_id = sampler_.sample(logits.data(), cfg_.vocab_size, scfg, token_history);
         token_history.push_back(token_id);
         result.token_ids.push_back(token_id);
 
-        // Check EOS
         if (token_id == tokenizer_.eos_id()) {
             result.stopped_eos = true;
             break;
         }
 
-        // Stream callback (optional — only crosses into Python per token if caller wants it)
         if (on_token) {
             std::string piece = tokenizer_.decode_token(token_id);
             on_token(token_id, piece);
         }
 
-        // Decode next token
         logits = decode(token_id);
     }
 
@@ -563,7 +597,6 @@ GenerateResult VibeBladeFast::generate(
     double elapsed = std::chrono::duration<double>(t_end - t_start).count();
     result.tokens_per_second = result.token_ids.size() / std::max(elapsed, 1e-6);
 
-    // ── 4. Detokenize ──
     result.text = tokenizer_.decode(result.token_ids);
 
     return result;

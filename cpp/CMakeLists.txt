@@ -6,6 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ── OpenMP for multi-threaded gemv / attention ──
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    message(STATUS "OpenMP:          YES (${OpenMP_CXX_VERSION})")
+else()
+    message(STATUS "OpenMP:          NO (single-threaded fallback)")
+endif()
+
 # ── Find dependencies ──
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
 
@@ -124,11 +132,24 @@ target_include_directories(_vibeblade_native PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Set optimization flags
+# Set optimization flags — Release uses -O3 + LTO + OpenMP
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(_vibeblade_native PRIVATE -g -O0)
 else()
     target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG)
+    # LTO for cross-compilation-unit inlining
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT IPO_SUPPORTED)
+    if(IPO_SUPPORTED)
+        set_property(TARGET _vibeblade_native PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        message(STATUS "LTO:             YES")
+    endif()
+endif()
+
+# Link OpenMP if available
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(_vibeblade_native PRIVATE OpenMP::OpenMP_CXX)
+    target_compile_definitions(_vibeblade_native PRIVATE TS_OPENMP)
 endif()
 
 # Add SIMD flags
