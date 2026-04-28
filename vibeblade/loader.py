@@ -1074,7 +1074,7 @@ class _LazyWeights:
         head_dim_candidates = [hd for hd in head_dim_candidates
                                if 16 <= hd <= hidden_dim and qkv_rows % hd == 0]
 
-        total_head_slots = qkv_rows  # will be divided by head_dim below
+        
 
         for hd in sorted(head_dim_candidates):
             total_heads = qkv_rows // hd
