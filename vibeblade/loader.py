@@ -833,6 +833,10 @@ def load_model(path: str, progress_cb=None, lazy: bool = True,
     config = _extract_config(metadata)
 
     if lazy:
+        n_total = len(loader.tensor_infos)
+        if progress_cb:
+            progress_cb("header", n_total, n_total, loading=True)
+
         weights = _LazyWeights(loader, arch, max_cached_mb=max_cached_mb,
                                gpu_offload=gpu_offload)
         # Preload shared tensors used every forward pass

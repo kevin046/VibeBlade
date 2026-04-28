@@ -275,7 +275,8 @@ class VibeBladeModel:
         top_k: int = 50,
         top_p: float = 0.9,
         stream: bool = True,
-    ) -> str:
+        on_token=None,
+    ) -> tuple[str, float]:
         """Generate text from a prompt.
         
         Args:
@@ -286,9 +287,10 @@ class VibeBladeModel:
             top_k: top-k filtering
             top_p: nucleus (top-p) filtering
             stream: print tokens as they generate
+            on_token: optional callback(token_id, pos) for streaming
         
         Returns:
-            generated text string
+            (generated_text, tokens_per_second) tuple
         """
         self.generator.temperature = temperature
         self.generator.top_k = top_k
@@ -313,7 +315,7 @@ class VibeBladeModel:
             )
         
         output_tokens = []
-        def on_token(token_id, pos):
+        def _default_on_token(token_id, pos):
             output_tokens.append(token_id)
             if stream:
                 # Simple byte-to-char decode
@@ -322,9 +324,15 @@ class VibeBladeModel:
                 except (ValueError, OverflowError):
                     pass
         
-        result, tps = self.generator.generate(model_fn, token_ids, max_tokens, on_token)
+        def _external_on_token(token_id, pos):
+            output_tokens.append(token_id)
+            if on_token is not None:
+                on_token(token_id, pos)
         
-        if stream:
+        cb = _external_on_token if on_token is not None else _default_on_token
+        result, tps = self.generator.generate(model_fn, token_ids, max_tokens, cb)
+        
+        if stream and on_token is None:
             print()
         
         # Decode output tokens to text
@@ -333,7 +341,7 @@ class VibeBladeModel:
         except (ValueError, OverflowError):
             text = f"[{len(output_tokens)} tokens generated at {tps:.1f} t/s]"
         
-        return text
+        return text, tps
 
     @property
     def is_moe(self) -> bool:

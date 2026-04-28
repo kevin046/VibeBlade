@@ -137,6 +137,10 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             sys.stdout.flush()
             last_tensor[0] = name
 
+    # Show immediate feedback that we're loading
+    sys.stdout.write(f"\r {_d('░' * 20)} {_b('  0.0%')} {_d('   0.0s')} {'parsing header...':<24}")
+    sys.stdout.flush()
+
     try:
         from . import VibeBladeModel
     except ImportError:
