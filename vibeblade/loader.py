@@ -666,13 +666,45 @@ def estimate_model_size_gb(n_params: int, quant_type: int) -> float:
     return n_params * bpp / (1024**3)
 
 
+def _map_tensor_name(name: str, arch: str) -> str:
+    """Map GGUF tensor name to canonical internal name.
+    
+    GGUF: {arch}.{component}.{layer}.{part}.weight
+    Internal: {component}.{layer}.{part}.weight or {prefix}.{component}.{layer}.{part}.weight
+    
+    Examples for Qwen3:
+      qwen3.token_embd.weight         → token_embd.weight
+      qwen3.block.31.output_norm.weight → output_norm.weight
+      qwen3.block.0.attn.q.weight     → blk.0.attn.q.weight
+      qwen3.block.0.ffn.gate.weight   → blk.0.ffn.gate_proj.weight
+    """
+    import re
+    
+    # Strip architecture prefix
+    if arch and name.startswith(arch + "."):
+        name = name[len(arch) + 1:]
+    
+    # block.N → blk.N
+    name = re.sub(r"^block\.(\d+)", r"blk.\1", name)
+    
+    # ffn.gate → ffn.gate_proj, ffn.up → ffn.up_proj, ffn.down → ffn.down_proj
+    name = name.replace(".ffn.gate.", ".ffn.gate_proj.")
+    name = name.replace(".ffn.up.", ".ffn.up_proj.")
+    name = name.replace(".ffn.down.", ".ffn.down_proj.")
+    
+    return name
+
+
 def load_model(path: str, progress_cb=None) -> dict:
     """Load a GGUF model and return metadata, tensors, and config."""
     with GGUFLoader(path) as loader:
         metadata = dict(loader.metadata)
-        tensors = loader.load_all_tensors(progress_cb=progress_cb)
+        arch = metadata.get("general.architecture", "")
+        tensors_raw = loader.load_all_tensors(progress_cb=progress_cb)
+        # Map tensor names to canonical names
+        tensors = {_map_tensor_name(k, arch): v for k, v in tensors_raw.items()}
         config = _extract_config(metadata)
-    return {"metadata": metadata, "tensors": tensors, "config": config}
+        return {"metadata": metadata, "tensors": tensors, "config": config}
 
 
 def _extract_config(metadata: dict[str, Any]) -> dict[str, Any]:
