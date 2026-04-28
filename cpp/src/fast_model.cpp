@@ -588,16 +588,52 @@ void VibeBladeFast::forward_layer(
         rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
     }
 
-    // ── 9. FFN (SwiGLU or GeGLU) ──
-    for (int s = 0; s < seq_len; s++) {
-        gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
-                     hd, cfg_.intermediate_dim, lw.gate_type);
-        gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
-                     hd, cfg_.intermediate_dim, lw.up_type);
+// ── 9. FFN (SwiGLU or GeGLU) with TurboSparse ──
+        for (int s = 0; s < seq_len; s++) {
+            gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
+                         hd, cfg_.intermediate_dim, lw.gate_type);
+            gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
+                         hd, cfg_.intermediate_dim, lw.up_type);
 
-        int id = cfg_.intermediate_dim;
+            int id = cfg_.intermediate_dim;
 
-        if (cfg_.use_geglu) {
+            if (cfg_.use_turbo_sparse) {
+                // TurboSparse FFN: skip down projection for zero-activated neurons
+                // SiLU(x) = x / (1 + exp(-x)) → when x < -5, SiLU ≈ 0
+                // We compute SiLU * up, then identify non-zero outputs to skip down gemv
+                for (int i = 0; i < id; i++) {
+                    float g = gate_buf[s * id + i];
+                    float u = up_buf[s * id + i];
+                    // SiLU: x * sigmoid(x) — when x < -5, outputs ~0
+                    float sig = 1.0f / (1.0f + expf(-g));
+                    gate_buf[s * id + i] = g * sig * u;  // fused SiLU * up
+                }
+
+                // Count non-zero activations (sparsity checkpoint)
+                int n_nonzero = 0;
+                for (int i = 0; i < id; i++) {
+                    if (fabsf(gate_buf[s * id + i]) > 1e-5f) n_nonzero++;
+                }
+
+                // If all zeros, skip entirely
+                if (n_nonzero == 0) {
+                    memset(ff_out + s * hd, 0, hd * sizeof(float));
+                } else if (n_nonzero < id / 5) {
+                    // Sparse path: <20% active — create sparse buffer
+                    std::vector<float> sparse_gate(id, 0.0f);
+                    for (int i = 0; i < id; i++) {
+                        if (fabsf(gate_buf[s * id + i]) > 1e-5f) {
+                            sparse_gate[i] = gate_buf[s * id + i];
+                        }
+                    }
+                    gemv_dequant(sparse_gate.data(), lw.ffn_down, ff_out + s * hd,
+                                 id, hd, GGML_TYPE_F32);
+                } else {
+                    // Dense path: >=20% active
+                    gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
+                                 id, hd, lw.down_type);
+                }
+            } else if (cfg_.use_geglu) {
             // GeGLU: GELU(gate) * up — used by Gemma
             // Approximate GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 #ifdef __aarch64__

@@ -42,6 +42,7 @@ struct FastConfig {
     bool use_parallel_attn = false;    // Falcon: attention + FFN in parallel
     bool use_fused_qkv = false;        // Many models fuse Q/K/V projections
     bool use_neox_rope = false;        // NeoX-style interleaved RoPE (GPT-NeoX, Falcon)
+    bool use_turbo_sparse = false;     // VibeBlade: skip FFN for zero activations
     int n_experts = 0;                 // MoE: number of experts (0 = dense)
     int n_experts_used = 0;            // MoE: active experts per token
     int sliding_window = 0;            // Mistral-style sliding window attention
