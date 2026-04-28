@@ -458,6 +458,9 @@ class VibeBladeModel:
         n_layers = self.config["num_layers"]
         n_heads = self.config["num_heads"]
         n_kv_heads = self.config.get("num_kv_heads", n_heads)
+        head_dim = self.config.get(
+            "head_dim", self.config["hidden_dim"] // max(n_heads, 1)
+        )
         
         if token_ids is None:
             if prompt is None:
@@ -483,6 +486,7 @@ class VibeBladeModel:
             sin_cache=self.sin_cache,
             n_heads=n_heads,
             n_kv_heads=n_kv_heads,
+            head_dim=head_dim,
         )
         
         prompt_len = len(token_ids)
@@ -523,6 +527,7 @@ class VibeBladeModel:
                 sin_cache=self.sin_cache,
                 n_heads=n_heads,
                 n_kv_heads=n_kv_heads,
+                head_dim=head_dim,
             )
             position += 1
         

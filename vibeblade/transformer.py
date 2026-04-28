@@ -401,6 +401,7 @@ def forward_prefill(
     sin_cache: np.ndarray,
     n_heads: int = 32,
     n_kv_heads: int = 32,
+    head_dim: int = 0,
     eps: float = 1e-5,
     minicache=None,
     paged_attn=None,
@@ -439,6 +440,11 @@ def forward_prefill(
     seq_len = len(token_ids)
     x = token_emb[token_ids]  # (seq, hidden_dim)
 
+    # Infer head_dim from Q tensor if not explicitly provided
+    # (hybrid models like Qwen3.6 may have head_dim != hidden_dim / n_heads)
+    if head_dim <= 0:
+        head_dim = token_emb.shape[-1] // n_heads
+
     kv_caches_k: list[np.ndarray] = []
     kv_caches_v: list[np.ndarray] = []
     moe_cache: dict = {}  # caches parsed MoE routers/experts per layer
@@ -454,15 +460,28 @@ def forward_prefill(
         k = h @ weights[f"{prefix}.attn_k.weight"].T
         v = h @ weights[f"{prefix}.attn_v.weight"].T
 
+        # Validate Q shape matches expected (n_heads * head_dim)
+        expected_q_dim = n_heads * head_dim
+        if q.shape[-1] != expected_q_dim:
+            import sys as _sys
+            _sys.stderr.write(
+                f"\n[WARN] blk.{layer_idx} Q shape {q.shape} != "
+                f"expected (seq, {expected_q_dim}). "
+                f"head_dim={head_dim}, n_heads={n_heads}, n_kv={n_kv_heads}\n"
+            )
+            # Re-infer head_dim from actual Q tensor
+            head_dim = q.shape[-1] // n_heads
+            _sys.stderr.write(f"[WARN] Auto-corrected head_dim to {head_dim}\n")
+
         # Apply RoPE
         cos_slice = cos_cache[:seq_len]
         sin_slice = sin_cache[:seq_len]
-        q_r = rope(q.reshape(seq_len, n_heads, -1), cos_slice, sin_slice).reshape(seq_len, -1)
-        k_r = rope(k.reshape(seq_len, n_kv_heads, -1), cos_slice, sin_slice).reshape(seq_len, -1)
+        q_r = rope(q.reshape(seq_len, n_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+        k_r = rope(k.reshape(seq_len, n_kv_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
 
         # Store in KV cache
-        kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, -1))
-        kv_caches_v.append(v.reshape(n_kv_heads, seq_len, -1))
+        kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, head_dim))
+        kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
 
         # Attention with causal mask
         attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
@@ -517,6 +536,7 @@ def forward_decode_single(
     sin_cache: np.ndarray,
     n_heads: int = 32,
     n_kv_heads: int = 32,
+    head_dim: int = 0,
     eps: float = 1e-5,
     sparse_ratio: float = 1.0,
     minicache=None,
@@ -574,7 +594,9 @@ def forward_decode_single(
 
     for layer_idx in range(n_layers):
         prefix = f"blk.{layer_idx}"
-        head_dim = token_emb.shape[-1] // n_heads
+        # Use explicit head_dim (hybrid models: head_dim != hidden_dim / n_heads)
+        if head_dim <= 0:
+            head_dim = token_emb.shape[-1] // n_heads
 
         # Pre-attention RMSNorm
         h = rms_norm(x, weights[f"{prefix}.attn_norm.weight"], eps)

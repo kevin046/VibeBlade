@@ -863,7 +863,7 @@ def load_model(path: str, progress_cb=None, lazy: bool = True,
         # Preload shared tensors used every forward pass
         if progress_cb:
             progress_cb("preload", 0, 1, loading=True)
-        weights.preload_shared()
+        weights.preload_shared(progress_cb=progress_cb)
         if progress_cb:
             progress_cb("preload", 1, 1, loading=True)
     else:
@@ -1144,6 +1144,7 @@ class _LazyWeights:
 
         # Use corrected dimensions from QKV probe if available
         # (set by _probe_qkv_dimensions in __init__.py)
+        import sys as _sys
         if (getattr(self, "_qkv_head_dim", None) is not None
                 and getattr(self, "_qkv_n_heads", None) is not None):
             n_heads = self._qkv_n_heads
@@ -1152,14 +1153,15 @@ class _LazyWeights:
             # Validate the corrected dims against actual tensor shape
             expected_rows = (n_heads + 2 * n_kv_heads) * head_dim
             if expected_rows == qkv_rows:
-                logger.info(
-                    "QKV split using probe-corrected dims: n_heads=%d, n_kv_heads=%d, head_dim=%d",
-                    n_heads, n_kv_heads, head_dim,
+                _sys.stderr.write(
+                    f"[QKV] split with probe dims: heads={n_heads}, "
+                    f"kv={n_kv_heads}, hd={head_dim}, qkv=({qkv_rows},{hidden_dim})\n"
                 )
             else:
-                logger.warning(
-                    "QKV probe dims (n_h=%d, n_kv=%d, hd=%d) don't match tensor rows=%d, falling back",
-                    n_heads, n_kv_heads, head_dim, qkv_rows,
+                _sys.stderr.write(
+                    f"[QKV] probe dims mismatch: heads={n_heads}, kv={n_kv_heads}, "
+                    f"hd={head_dim} → expected {expected_rows} rows != {qkv_rows}, "
+                    f"falling back\n"
                 )
                 # Fall back to independent inference
                 n_heads = n_kv_heads = head_dim = None
@@ -1287,16 +1289,20 @@ class _LazyWeights:
             evicted_arr = self._cache.pop(evicted_key)
             self._cached_bytes -= evicted_arr.nbytes
 
-    def preload_shared(self) -> None:
+    def preload_shared(self, progress_cb=None) -> None:
         """Dequantize and pin shared tensors (used every forward pass)."""
-        for name in list(_SHARED_TENSORS):
+        shared = list(_SHARED_TENSORS) + (
+            ["output.weight"] if "output.weight" in self._name_map else []
+        )
+        total = len(shared)
+        for idx, name in enumerate(shared):
             if name in self._name_map:
+                if progress_cb:
+                    progress_cb(name, idx, total, loading=True)
                 self[name]  # triggers dequant + cache
                 self._pinned.add(name)
-        # Also pin output.weight (not in _SHARED_TENSORS but used every pass)
-        if "output.weight" in self._name_map:
-            self["output.weight"]
-            self._pinned.add("output.weight")
+        if progress_cb:
+            progress_cb("preload", total, total, loading=True)
 
     def memory_info(self) -> dict:
         """Return cache memory usage stats."""
