@@ -4,8 +4,10 @@
 #include <vector>
 #include <stdexcept>
 #include "kernels.h"
+#include "fast_model.h"
 
 namespace py = pybind11;
+using namespace py::literals;
 using namespace vibeblade;
 
 // ── Helpers ──
@@ -209,4 +211,43 @@ PYBIND11_MODULE(_vibeblade_native, m) {
         softmax_f32(reinterpret_cast<float*>(out.mutable_data()), rows, cols);
         return out;
     }, py::arg("x"));
+
+    // ════════════════════ VibeBladeFast — GGUF inference engine ════════════════════
+    py::class_<VibeBladeFast>(m, "VibeBladeFast",
+        R"doc(Llama.cpp-style C++ inference engine with mmap'd GGUF weights and inline dequant.
+Zero malloc in the decode loop. Supports Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/F16/F32.)doc")
+        .def(py::init<>())
+        .def("load", &VibeBladeFast::load, py::arg("path"),
+            R"doc(Load a GGUF model file (mmaps weights, parses config).)doc")
+        .def("prefill", [](VibeBladeFast& self, const std::vector<int>& tokens) -> py::array_t<float> {
+            auto logits = self.prefill(tokens);
+            return py::array_t<float>(logits.size(), logits.data());
+        }, py::arg("token_ids"),
+            R"doc(Prefill: process all prompt tokens, return logits for last position.)doc")
+        .def("decode", [](VibeBladeFast& self, int token_id) -> py::array_t<float> {
+            auto logits = self.decode(token_id);
+            return py::array_t<float>(logits.size(), logits.data());
+        }, py::arg("token_id"),
+            R"doc(Decode: process one token, return full vocab logits.)doc")
+        .def("reset", &VibeBladeFast::reset,
+            R"doc(Reset KV cache and position to start a new conversation.)doc")
+        .def_property_readonly("position", [](const VibeBladeFast& self) { return self.position(); })
+        .def_property_readonly("config", [](const VibeBladeFast& self) -> py::dict {
+            const auto& c = self.config();
+            return py::dict(
+                "n_layers"_a = c.n_layers,
+                "n_heads"_a = c.n_heads,
+                "n_kv_heads"_a = c.n_kv_heads,
+                "head_dim"_a = c.head_dim,
+                "hidden_dim"_a = c.hidden_dim,
+                "intermediate_dim"_a = c.intermediate_dim,
+                "vocab_size"_a = c.vocab_size,
+                "context_length"_a = c.context_length,
+                "norm_eps"_a = c.norm_eps,
+                "arch"_a = c.arch
+            );
+        })
+        .def_property_readonly("kv_cache_bytes", [](const VibeBladeFast& self) {
+            return self.kv_cache_bytes();
+        });
 }

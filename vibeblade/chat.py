@@ -102,7 +102,8 @@ def _approx_tokens(text: str) -> int:
 # ── Chat REPL ────────────────────────────────────────────────────────────────
 
 def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
-              top_k: int = 50, top_p: float = 0.9, ctx_size: int = 2048):
+              top_k: int = 50, top_p: float = 0.9, ctx_size: int = 2048,
+              backend: str = "auto"):
     """Launch interactive chat REPL with a loaded model."""
     history = ChatHistory(max_turns=max(1, ctx_size // 64))
     response_count = 0
@@ -111,6 +112,7 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     print()
     print(f" {_c(_b('VibeBlade Chat'))}")
     print(f" {_d('Model:')} {model_path}")
+    print(f" {_d('Backend:')} {'C++ fast' if use_fast else 'NumPy (pure Python)'}")
     print(f" {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
     print()
     print(f" {_d('Commands:')} /help /clear /reset /quit /undo")
@@ -141,16 +143,32 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     sys.stderr.write(f"\r {_d('░' * 20)} {_b('  0.0%')} {_d('   0.0s')} {'parsing header...':<24}")
     sys.stderr.flush()
 
-    try:
-        from . import VibeBladeModel
-    except ImportError:
-        from vibeblade import VibeBladeModel
+    use_fast = backend == "fast"
+    if backend == "auto" and model_path.endswith(".gguf"):
+        try:
+            # Try fast backend first
+            from .fast_backend import FastModelWrapper
+            model = FastModelWrapper(model_path)
+            use_fast = True
+            elapsed = time.time() - load_start
+            cfg = model.config
+            sys.stderr.write(
+                f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} "
+                f"{'C++ fast backend':<28}\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            use_fast = False
 
-    model = VibeBladeModel(model_path, progress_cb=_progress)
-
-    elapsed = time.time() - load_start
-    sys.stderr.write(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<28}\n")
-    sys.stderr.flush()
+    if not use_fast:
+        try:
+            from . import VibeBladeModel
+        except ImportError:
+            from vibeblade import VibeBladeModel
+        model = VibeBladeModel(model_path, progress_cb=_progress)
+        elapsed = time.time() - load_start
+        sys.stderr.write(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<28}\n")
+        sys.stderr.flush()
 
     # MoE hot/cold split requires a pre-computed HotColdMap from profiling
     # Skip in chat mode — runs all experts on CPU by default
@@ -188,6 +206,8 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
 
             elif cmd0 == "/reset":
                 history.clear()
+                if hasattr(model, 'reset'):
+                    model.reset()
                 print(f" {_d('Chat history and KV cache reset.')}")
                 continue
 

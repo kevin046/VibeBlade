@@ -113,6 +113,9 @@ pybind11_add_module(_vibeblade_native
     src/attention.cpp
     src/rope.cpp
     src/softmax.cpp
+    src/gguf.cpp
+    src/dequant.cpp
+    src/fast_model.cpp
 )
 
 target_include_directories(_vibeblade_native PRIVATE

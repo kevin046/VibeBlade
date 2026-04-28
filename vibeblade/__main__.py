@@ -180,6 +180,9 @@ def main():
         parser.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
         parser.add_argument("--top-k", type=int, default=50, help="Top-k filtering")
         parser.add_argument("--top-p", type=float, default=0.9, help="Top-p (nucleus) filtering")
+        parser.add_argument("--backend", type=str, default="auto",
+                            choices=["auto", "fast", "numpy"],
+                            help="Inference backend: 'fast' = C++ GGUF (fastest), 'numpy' = pure Python, 'auto' = try fast first")
         args = parser.parse_args(sys.argv[2:])
 
         # Resolve model path
@@ -206,6 +209,7 @@ def main():
             temperature=args.temperature,
             top_k=args.top_k,
             top_p=args.top_p,
+            backend=args.backend,
         )
     else:
         print(f"Unknown command: {cmd}")
