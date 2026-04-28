@@ -539,17 +539,23 @@ class GGUFLoader:
 
     def _parse_metadata(self) -> None:
         self.metadata: dict[str, Any] = {}
-        report_interval = max(1, self.n_kv // 100)  # report ~100 times
+        # Time-based throttling: report every ~100ms (not count-based).
+        # With 151K tokenizer entries, count-based (n//100) means the first
+        # update fires after ~15s of silence. Time-based gives smooth updates.
+        import time as _time
+        _last_t = _time.monotonic()
         for i in range(self.n_kv):
             key = self._read_string()
             (vtype,) = struct.unpack("<I", self._read(4))
             self.metadata[key] = self._read_value(vtype)
-            if self._progress_cb and (i + 1) % report_interval == 0:
-                self._progress_cb("metadata", i + 1, self.n_kv, loading=True)
+            if self._progress_cb:
+                now = _time.monotonic()
+                if now - _last_t >= 0.1 or i == self.n_kv - 1:
+                    _last_t = now
+                    self._progress_cb("metadata", i + 1, self.n_kv, loading=True)
 
     def _parse_tensor_infos(self) -> None:
         self.tensor_infos: list[dict] = []
-        report_interval = max(1, self.n_tensors // 50)  # report ~50 times
         for i in range(self.n_tensors):
             name = self._read_string()
             (n_dims,) = struct.unpack("<I", self._read(4))
@@ -566,8 +572,11 @@ class GGUFLoader:
                 "dtype": dtype_id,
                 "offset": offset,
             })
-            if self._progress_cb and (i + 1) % report_interval == 0:
-                self._progress_cb("tensor info", i + 1, self.n_tensors, loading=True)
+            # Tensor info is fast (733 entries), report every 10%
+            if self._progress_cb and self.n_tensors > 0:
+                report_every = max(1, self.n_tensors // 10)
+                if (i + 1) % report_every == 0 or i == self.n_tensors - 1:
+                    self._progress_cb("tensor info", i + 1, self.n_tensors, loading=True)
 
     # ── Low-level readers ──
 
@@ -1130,33 +1139,55 @@ class _LazyWeights:
         if self._gpu_offload:
             qkv = cp.asarray(qkv)  # type: ignore[assignment]
 
-        # Infer split sizes from the config metadata.
-        # Try the architecture-specific prefix first, then general.
-        arch = self._loader.metadata.get("general.architecture", "")
-        meta = self._loader.metadata
-        n_heads = (meta.get(f"{arch}.attention.head_count") or
-                   meta.get("general.attention.head_count"))
-        n_kv_heads = (meta.get(f"{arch}.attention.head_count_kv") or
-                      meta.get("general.attention.head_count_kv"))
-
-        if n_heads is None:
-            raise ValueError(
-                f"Cannot split fused QKV: missing head_count in metadata. "
-                f"arch={arch!r}, QKV shape={qkv.shape}"
-            )
-        n_heads = int(n_heads)
-
         hidden_dim = qkv.shape[1]
         qkv_rows = qkv.shape[0]
 
-        # Determine head_dim: prefer explicit key_length, else hidden_dim // n_heads
-        explicit_head_dim = (meta.get(f"{arch}.attention.key_length") or
-                             meta.get("general.attention.key_length"))
-        head_dim = int(explicit_head_dim) if explicit_head_dim else hidden_dim // n_heads
+        # Use corrected dimensions from QKV probe if available
+        # (set by _probe_qkv_dimensions in __init__.py)
+        if (getattr(self, "_qkv_head_dim", None) is not None
+                and getattr(self, "_qkv_n_heads", None) is not None):
+            n_heads = self._qkv_n_heads
+            n_kv_heads = self._qkv_n_kv_heads
+            head_dim = self._qkv_head_dim
+            # Validate the corrected dims against actual tensor shape
+            expected_rows = (n_heads + 2 * n_kv_heads) * head_dim
+            if expected_rows == qkv_rows:
+                logger.info(
+                    "QKV split using probe-corrected dims: n_heads=%d, n_kv_heads=%d, head_dim=%d",
+                    n_heads, n_kv_heads, head_dim,
+                )
+            else:
+                logger.warning(
+                    "QKV probe dims (n_h=%d, n_kv=%d, hd=%d) don't match tensor rows=%d, falling back",
+                    n_heads, n_kv_heads, head_dim, qkv_rows,
+                )
+                # Fall back to independent inference
+                n_heads = n_kv_heads = head_dim = None
 
-        # Try to find a valid (n_q, n_kv, head_dim) that matches qkv_rows
-        split = self._infer_qkv_split(qkv_rows, hidden_dim, n_heads, n_kv_heads, head_dim, meta, arch)
-        n_heads, n_kv_heads, head_dim = split
+        if getattr(self, "_qkv_head_dim", None) is None or head_dim is None:
+            # No corrected dims — infer from metadata (original behavior)
+            arch = self._loader.metadata.get("general.architecture", "")
+            meta = self._loader.metadata
+            n_heads = (meta.get(f"{arch}.attention.head_count") or
+                       meta.get("general.attention.head_count"))
+            n_kv_heads = (meta.get(f"{arch}.attention.head_count_kv") or
+                          meta.get("general.attention.head_count_kv"))
+
+            if n_heads is None:
+                raise ValueError(
+                    f"Cannot split fused QKV: missing head_count in metadata. "
+                    f"arch={arch!r}, QKV shape={qkv.shape}"
+                )
+            n_heads = int(n_heads)
+
+            # Determine head_dim: prefer explicit key_length, else hidden_dim // n_heads
+            explicit_head_dim = (meta.get(f"{arch}.attention.key_length") or
+                                 meta.get("general.attention.key_length"))
+            head_dim = int(explicit_head_dim) if explicit_head_dim else hidden_dim // n_heads
+
+            # Try to find a valid (n_q, n_kv, head_dim) that matches qkv_rows
+            split = self._infer_qkv_split(qkv_rows, hidden_dim, n_heads, n_kv_heads, head_dim, meta, arch)
+            n_heads, n_kv_heads, head_dim = split
 
         q_size = n_heads * head_dim
         k_size = n_kv_heads * head_dim

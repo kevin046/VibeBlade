@@ -194,10 +194,11 @@ class VibeBladeModel:
         self.path = str(path)
         self.use_sparse = use_sparse
         self.hot_budget = hot_budget
+        self._progress_cb = progress_cb
         
         # Load model
         if path.suffix == ".gguf":
-            data = load_model(model_path, progress_cb=progress_cb)
+            data = load_model(model_path, progress_cb=self._progress_tick)
             self.metadata = data["metadata"]
             self.config = data["config"]
             self.weights = data["tensors"]
@@ -245,14 +246,30 @@ class VibeBladeModel:
             "vocab_size": get("vocab_size", 1000),
             "context_length": get("context_length", 2048),
         })
+
+    def _progress_tick(self, name: str, done: int, total: int, **_kw) -> None:
+        """Forward progress to the external callback (if any)."""
+        if self._progress_cb is not None:
+            self._progress_cb(name, done, total, loading=True)
     
     def _setup_components(self):
         """Initialize scheduler, cache, generator, and MoE components."""
+        self._progress_tick("probe", 0, 1)
+
         # If lazy weights with fused QKV, probe the actual tensor to get
         # correct attention dimensions (metadata may be wrong for hybrid models)
         if isinstance(self.weights, _LazyWeights) and self.weights._has_fused_qkv:
             self._probe_qkv_dimensions()
+            # Propagate corrected dims to _LazyWeights so _load_split_qkv
+            # uses the SAME dimensions (no independent re-inference)
+            if "head_dim" in self.config:
+                self.weights._qkv_head_dim = self.config["head_dim"]
+                self.weights._qkv_n_heads = self.config["num_heads"]
+                self.weights._qkv_n_kv_heads = self.config.get(
+                    "num_kv_heads", self.config["num_heads"]
+                )
 
+        self._progress_tick("scheduler", 0, 1)
         self.scheduler = PowerInferScheduler(
             hidden_size=self.config["hidden_dim"],
             num_layers=self.config["num_layers"],
@@ -270,9 +287,11 @@ class VibeBladeModel:
         # Build RoPE cache (cos/sin tables for rotary positional embeddings)
         head_dim = self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"])
         max_ctx = self.config.get("context_length", 2048)
+        self._progress_tick("rope cache", 0, 1)
         self.cos_cache, self.sin_cache = build_rope_cache(max_ctx, head_dim)
 
         # Auto-detect MoE architecture
+        self._progress_tick("moe detect", 0, 1)
         self.moe_config = detect_moe_config(self.weights)
         self._moe_executor = None
         if self.moe_config is not None:

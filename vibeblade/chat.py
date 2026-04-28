@@ -123,16 +123,16 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     last_tensor = [None]
 
     def _progress(name, done, total, loading=False):
-        """Show loading progress — timer + tensor name."""
+        """Show loading progress — timer + phase name."""
         elapsed = time.time() - load_start
         if loading:
             pct = done / max(total, 1)
             bar_len = 20
             filled = int(bar_len * pct)
             bar = _g("█" * filled) + _d("░" * (bar_len - filled))
-            short_name = name.split(".")[-1][:24] if name else ""
+            phase = name[:28] if name else ""
             sys.stderr.write(
-                f"\r {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')} {short_name:<24}"
+                f"\r {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')} {phase:<28}"
             )
             sys.stderr.flush()
             last_tensor[0] = name
@@ -149,7 +149,7 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     model = VibeBladeModel(model_path, progress_cb=_progress)
 
     elapsed = time.time() - load_start
-    sys.stderr.write(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<24} \n")
+    sys.stderr.write(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<28}\n")
     sys.stderr.flush()
 
     # MoE hot/cold split requires a pre-computed HotColdMap from profiling
