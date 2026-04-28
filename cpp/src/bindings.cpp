@@ -279,12 +279,18 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
         // ── Individual steps (for advanced use) ──
         .def("prefill", [](VibeBladeFast& self, const std::vector<int>& tokens) -> py::array_t<float> {
             auto logits = self.prefill(tokens);
-            return py::array_t<float>(logits.size(), logits.data());
+            // Copy into numpy — logits vector is temporary, must not hand out pointer
+            py::array_t<float> out(logits.size());
+            std::memcpy(out.mutable_data(), logits.data(), logits.size() * sizeof(float));
+            return out;
         }, py::arg("token_ids"),
             R"doc(Prefill: process all prompt tokens, return logits for last position.)doc")
         .def("decode", [](VibeBladeFast& self, int token_id) -> py::array_t<float> {
             auto logits = self.decode(token_id);
-            return py::array_t<float>(logits.size(), logits.data());
+            // Copy into numpy — logits vector is temporary, must not hand out pointer
+            py::array_t<float> out(logits.size());
+            std::memcpy(out.mutable_data(), logits.data(), logits.size() * sizeof(float));
+            return out;
         }, py::arg("token_id"),
             R"doc(Decode: process one token, return full vocab logits.)doc")
         .def("reset", &VibeBladeFast::reset,

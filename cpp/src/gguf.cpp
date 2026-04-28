@@ -30,9 +30,13 @@ struct GGUFString {
     const char* ptr;
 };
 
-static GGUFString read_string(const uint8_t* p, size_t& offset) {
+static GGUFString read_string(const uint8_t* p, size_t& offset, size_t max_len) {
     GGUFString s;
+    if (offset + 8 > max_len) throw std::runtime_error("GGUF: string length extends past end of file");
     s.len = read_u64(p + offset); offset += 8;
+    // Sanity check: string length shouldn't exceed remaining file
+    if (s.len > max_len || offset + s.len > max_len)
+        throw std::runtime_error("GGUF: string data extends past end of file (len=" + std::to_string(s.len) + ")");
     s.ptr = (const char*)(p + offset); offset += s.len;
     return s;
 }
@@ -53,6 +57,7 @@ void GGUFFile::map_file(const char* path) {
 }
 
 void GGUFFile::parse_header(const uint8_t* ptr) {
+    if (file_size_ < 24) throw std::runtime_error("GGUF file too small for header");
     uint32_t magic = read_u32(ptr);
     if (magic != GGUF_MAGIC) throw std::runtime_error("Not a GGUF file (bad magic)");
 
@@ -62,30 +67,40 @@ void GGUFFile::parse_header(const uint8_t* ptr) {
 
     n_tensors_ = read_u64(ptr + 8);
     n_kv_      = read_u64(ptr + 16);
+
+    // Sanity: limit to prevent OOM from malicious headers
+    if (n_tensors_ > 1000000 || n_kv_ > 1000000)
+        throw std::runtime_error("GGUF: implausible tensor/kv count");
 }
+
+    // Helper macro for bounds-checked reads
+    #define CHECK_OFFSET(n) do { if (offset + (n) > file_size_) \
+        throw std::runtime_error("GGUF: read past end of file at offset " + std::to_string(offset)); } while(0)
 
 void GGUFFile::parse_metadata(const uint8_t* ptr, size_t& offset) {
     for (uint64_t i = 0; i < n_kv_; i++) {
-        GGUFString key = read_string(ptr, offset);
+        GGUFString key = read_string(ptr, offset, file_size_);
         std::string k(key.ptr, key.len);
 
+        CHECK_OFFSET(4);
         uint32_t vtype = read_u32(ptr + offset); offset += 4;
 
         switch (vtype) {
-            case 0: { auto v = ptr[offset]; offset += 1; meta_ints_[k] = v; break; } // UINT8
-            case 1: { auto v = (int8_t)ptr[offset]; offset += 1; meta_ints_[k] = v; break; } // INT8
-            case 2: offset += 2; break; // UINT16 (skip)
-            case 3: offset += 2; break; // INT16
-            case 4: { auto v = read_u32(ptr + offset); offset += 4; meta_ints_[k] = v; break; }
-            case 5: { auto v = read_i32(ptr + offset); offset += 4; meta_ints_[k] = v; break; }
-            case 6: { auto v = read_f32(ptr + offset); offset += 4; meta_floats_[k] = v; break; }
-            case 7: { auto v = ptr[offset] != 0; offset += 1; meta_bools_[k] = v; break; }
+            case 0: { CHECK_OFFSET(1); auto v = ptr[offset]; offset += 1; meta_ints_[k] = v; break; } // UINT8
+            case 1: { CHECK_OFFSET(1); auto v = (int8_t)ptr[offset]; offset += 1; meta_ints_[k] = v; break; } // INT8
+            case 2: { CHECK_OFFSET(2); offset += 2; break; } // UINT16 (skip)
+            case 3: { CHECK_OFFSET(2); offset += 2; break; } // INT16
+            case 4: { CHECK_OFFSET(4); auto v = read_u32(ptr + offset); offset += 4; meta_ints_[k] = v; break; }
+            case 5: { CHECK_OFFSET(4); auto v = read_i32(ptr + offset); offset += 4; meta_ints_[k] = v; break; }
+            case 6: { CHECK_OFFSET(4); auto v = read_f32(ptr + offset); offset += 4; meta_floats_[k] = v; break; }
+            case 7: { CHECK_OFFSET(1); auto v = ptr[offset] != 0; offset += 1; meta_bools_[k] = v; break; }
             case 8: {
-                GGUFString s = read_string(ptr, offset);
+                GGUFString s = read_string(ptr, offset, file_size_);
                 meta_strings_[k] = std::string(s.ptr, s.len);
                 break;
             }
             case 9: { // ARRAY
+                CHECK_OFFSET(12);
                 uint32_t etype = read_u32(ptr + offset); offset += 4;
                 uint64_t elen  = read_u64(ptr + offset); offset += 8;
                 // Compute element size and skip
@@ -101,7 +116,7 @@ void GGUFFile::parse_metadata(const uint8_t* ptr, size_t& offset) {
                         std::vector<std::string> arr;
                         arr.reserve(elen);
                         for (uint64_t j = 0; j < elen; j++) {
-                            GGUFString s = read_string(ptr, offset);
+                            GGUFString s = read_string(ptr, offset, file_size_);
                             arr.emplace_back(s.ptr, s.len);
                         }
                         meta_string_arrays_[k] = std::move(arr);
@@ -152,9 +167,9 @@ void GGUFFile::parse_metadata(const uint8_t* ptr, size_t& offset) {
                 }
                 break;
             }
-            case 10: { auto v = read_u64(ptr + offset); offset += 8; meta_ints_[k] = (int64_t)v; break; }
-            case 11: { auto v = read_i64(ptr + offset); offset += 8; meta_ints_[k] = v; break; }
-            case 12: { auto v = read_f64(ptr + offset); offset += 8; meta_floats_[k] = (float)v; break; }
+            case 10: { CHECK_OFFSET(8); auto v = read_u64(ptr + offset); offset += 8; meta_ints_[k] = (int64_t)v; break; }
+            case 11: { CHECK_OFFSET(8); auto v = read_i64(ptr + offset); offset += 8; meta_ints_[k] = v; break; }
+            case 12: { CHECK_OFFSET(8); auto v = read_f64(ptr + offset); offset += 8; meta_floats_[k] = (float)v; break; }
             default:
                 throw std::runtime_error("Unknown GGUF metadata type: " + std::to_string(vtype));
         }
@@ -166,16 +181,20 @@ void GGUFFile::parse_tensor_infos(const uint8_t* ptr, size_t& offset) {
 
     for (uint64_t i = 0; i < n_tensors_; i++) {
         TensorInfo ti;
-        GGUFString name = read_string(ptr, offset);
+        GGUFString name = read_string(ptr, offset, file_size_);
         ti.name = std::string(name.ptr, name.len);
 
+        CHECK_OFFSET(4);
         ti.n_dims = read_u32(ptr + offset); offset += 4;
+        if (ti.n_dims > 4) throw std::runtime_error("GGUF: tensor has >4 dimensions");
+        CHECK_OFFSET(ti.n_dims * 8);
         for (int d = 0; d < ti.n_dims && d < 4; d++) {
             ti.dims[d] = (int64_t)read_u64(ptr + offset); offset += 8;
         }
         // Zero remaining dims
         for (int d = ti.n_dims; d < 4; d++) ti.dims[d] = 1;
 
+        CHECK_OFFSET(12);
         ti.type = (ggml_type)read_u32(ptr + offset); offset += 4;
 
         // offset is relative to start of data section (set later)
@@ -192,6 +211,8 @@ void GGUFFile::parse_tensor_infos(const uint8_t* ptr, size_t& offset) {
 
     // Data section starts here, aligned to GGUF_DEFAULT_ALIGNMENT
     data_offset_ = align_up(offset, GGUF_DEFAULT_ALIGNMENT);
+    if (data_offset_ > file_size_)
+        throw std::runtime_error("GGUF: data section starts past end of file");
 }
 
 GGUFFile::GGUFFile(const char* path) {
@@ -213,6 +234,9 @@ GGUFFile::~GGUFFile() {
 const void* GGUFFile::tensor_data(const std::string& name) const {
     auto it = tensor_map_.find(name);
     if (it == tensor_map_.end()) return nullptr;
+    size_t end = data_offset_ + it->second.offset + it->second.size;
+    if (end > file_size_)
+        throw std::runtime_error("GGUF: tensor '" + name + "' data extends past end of file");
     return data_ + data_offset_ + it->second.offset;
 }
 

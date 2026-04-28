@@ -221,6 +221,7 @@ static inline void vsilu_mul_f32(const float* x, const float* y, float* out, int
 
 // NEON softmax in-place
 static inline void vsoftmax(float* x, int n) {
+    if (n <= 0) return;
     // Find max
     float32x4_t vmax = vld1q_f32(x);
     int i = 4;
@@ -232,7 +233,7 @@ static inline void vsoftmax(float* x, int n) {
     float max_val = vmaxvq_f32(vmax);
     for (; i < n; i++) if (x[i] > max_val) max_val = x[i];
 
-    // Exp and sum using polynomial approx
+    // Exp and sum
     float32x4_t v_max = vdupq_n_f32(max_val);
     float32x4_t vsum = vdupq_n_f32(0.0f);
     i = 0;
@@ -248,13 +249,20 @@ static inline void vsoftmax(float* x, int n) {
         sum += x[i];
     }
 
-    // Normalize
-    float32x4_t v_inv = vfast_inv_f32(vdupq_n_f32(sum));
-    i = 0;
-    for (; i < n4; i += 4) {
-        vst1q_f32(x + i, vmulq_f32(vld1q_f32(x + i), v_inv));
+    // Normalize — guard against zero sum (all -inf after top-k)
+    if (sum > 1e-30f) {
+        float32x4_t v_inv = vfast_inv_f32(vdupq_n_f32(sum));
+        i = 0;
+        for (; i < n4; i += 4) {
+            vst1q_f32(x + i, vmulq_f32(vld1q_f32(x + i), v_inv));
+        }
+        float inv = 1.0f / sum;
+        for (; i < n; i++) x[i] *= inv;
+    } else {
+        // Degenerate case: uniform distribution
+        float inv = 1.0f / n;
+        for (i = 0; i < n; i++) x[i] = inv;
     }
-    for (; i < n; i++) x[i] /= sum;
 }
 
 // NEON attention Q@K^T dot + V weighted sum — fused inner loop

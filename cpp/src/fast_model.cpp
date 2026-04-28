@@ -162,12 +162,25 @@ void VibeBladeFast::alloc_kv_cache() {
         kv_v_[l].resize(cfg_.context_length * kv_dim, 0.0f);
     }
 
-    // Scratch: enough for one layer's intermediates
-    // Added extra space for o_proj buffer (previously was heap-allocated per step!)
+    // Scratch: must handle worst-case seq_len = context_length for prefill.
+    // forward_layer scratch: normed(seq*hd) + Q(seq*q_dim) + K(seq*kv_dim) + V(seq*kv_dim)
+    //   + attn_out(seq*q_dim) + gate(seq*id) + up(seq*id) + ff_out(seq*hd)
+    //   + scores(seq*context_length) + o_proj(seq*hd)
+    // Worst case: seq_len = context_length
+    int max_seq = cfg_.context_length;
     int hd = cfg_.hidden_dim;
     int id = cfg_.intermediate_dim;
     int q_dim = cfg_.n_heads * cfg_.head_dim;
-    scratch_.resize(5 * hd + 3 * id + 4 * q_dim + 2 * hd + hd);
+    int kv_dim_scratch = cfg_.n_kv_heads * cfg_.head_dim;
+    int64_t scratch_per_seq = (int64_t)hd + q_dim + 2 * kv_dim_scratch + q_dim +
+                              2 * id + hd + cfg_.context_length + hd;
+    scratch_.resize(max_seq * scratch_per_seq);
+
+    // Instance-owned decode buffers (sized once, zero realloc during hot loop)
+    x_buf_.resize(hd);
+    hidden_buf_.resize(hd);
+    normed_buf_.resize(hd);
+    logits_buf_.resize(cfg_.vocab_size);
 }
 
 void VibeBladeFast::map_weights(const GGUFFile& g) {
@@ -467,40 +480,31 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
     if (!loaded_) throw std::runtime_error("Model not loaded");
     if (position_ >= cfg_.context_length)
         throw std::runtime_error("Context length exceeded");
+    if (token_id < 0 || token_id >= cfg_.vocab_size)
+        throw std::runtime_error("Token ID out of range: " + std::to_string(token_id));
 
     int hd = cfg_.hidden_dim;
 
     // ── Token embedding for single token ──
-    // Use pre-allocated decode buffers — no std::vector construction!
-    // We reuse a persistent buffer pair to avoid any heap alloc
-    static thread_local std::vector<float> x_buf, hidden_buf;
-    if ((int)x_buf.size() < hd) x_buf.resize(hd);
-    if ((int)hidden_buf.size() < hd) hidden_buf.resize(hd);
-
+    // Instance-owned buffers — no heap alloc, no thread_local clobbering
     size_t row_bytes = tensor_nbytes(emb_type_, hd);
     const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
-    dequantize_row(emb_row, x_buf.data(), hd, emb_type_);
+    dequantize_row(emb_row, x_buf_.data(), hd, emb_type_);
 
     // ── Run through all layers ──
     for (int l = 0; l < cfg_.n_layers; l++) {
-        forward_layer(x_buf.data(), 1, hidden_buf.data(), layers_[l], l);
-        std::swap(x_buf, hidden_buf);
+        forward_layer(x_buf_.data(), 1, hidden_buf_.data(), layers_[l], l);
+        std::swap(x_buf_, hidden_buf_);
     }
 
     // ── Final RMS norm ──
-    // Reuse normed as a thread-local buffer too
-    static thread_local std::vector<float> normed_buf;
-    if ((int)normed_buf.size() < hd) normed_buf.resize(hd);
-    rms_norm(x_buf.data(), output_norm_, normed_buf.data(), hd, cfg_.norm_eps);
+    rms_norm(x_buf_.data(), output_norm_, normed_buf_.data(), hd, cfg_.norm_eps);
 
     // ── Output projection → logits ──
-    // Logits buffer is persistent — never realloc'd after first call
-    static thread_local std::vector<float> logits_buf;
-    if ((int)logits_buf.size() < cfg_.vocab_size) logits_buf.resize(cfg_.vocab_size);
-    gemv_dequant(normed_buf.data(), output_, logits_buf.data(), hd, cfg_.vocab_size, out_type_);
+    gemv_dequant(normed_buf_.data(), output_, logits_buf_.data(), hd, cfg_.vocab_size, out_type_);
 
     position_++;
-    return logits_buf;  // Return by value — NVRO or move since it's thread_local
+    return logits_buf_;  // Copy — safe because caller owns it
 }
 
 // ════════════════════════════════════════════════════════════════

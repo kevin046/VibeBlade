@@ -392,6 +392,78 @@ static inline float dot_dequant_f32(const float* x, const float* row, int64_t K)
     return sum;
 }
 
+static inline float dot_dequant_q4_1(const float* x, const block_q4_1* row, int64_t K) {
+    float d = f16_to_f32(row->d);
+    float m = f16_to_f32(row->m);
+    const uint8_t* qs = row->qs;
+    int64_t nb = K / 32;
+    float sum = 0.0f;
+    // Compute sum(m) once
+    float m_sum = 0.0f;
+    for (int64_t i = 0; i < K; i++) m_sum += x[i];
+    m_sum *= m;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* bq = qs + b * 16;
+        const float* bx = x + b * 32;
+        for (int i = 0; i < 16; i++) {
+            int q0 = bq[i] & 0xF;
+            int q1 = bq[i] >> 4;
+            sum += d * (q0 * bx[2 * i] + q1 * bx[2 * i + 1]);
+        }
+    }
+    return sum + m_sum;
+}
+
+static inline float dot_dequant_q5_0(const float* x, const block_q5_0* row, int64_t K) {
+    float d = f16_to_f32(row->d);
+    const uint8_t* qh = row->qh;
+    const uint8_t* qs = row->qs;
+    int64_t nb = K / 32;
+    float sum = 0.0f;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* bq = qs + b * 16;
+        const uint8_t* bh = qh + b * 4;
+        const float* bx = x + b * 32;
+        for (int i = 0; i < 16; i++) {
+            int ql0 = bq[i] & 0xF;
+            int qh0 = (bh[i >> 2] >> (2 * (i & 3))) & 1;
+            int q0 = ql0 | (qh0 << 4);
+            int ql1 = bq[i] >> 4;
+            int qh1 = (bh[(i + 16) >> 2] >> (2 * ((i + 16) & 3))) & 1;
+            int q1 = ql1 | (qh1 << 4);
+            sum += (q0 - 16) * bx[2 * i] + (q1 - 16) * bx[2 * i + 1];
+        }
+    }
+    return sum * d;
+}
+
+static inline float dot_dequant_q5_1(const float* x, const block_q5_1* row, int64_t K) {
+    float d = f16_to_f32(row->d);
+    float m = f16_to_f32(row->m);
+    const uint8_t* qh = row->qh;
+    const uint8_t* qs = row->qs;
+    int64_t nb = K / 32;
+    float sum = 0.0f;
+    float m_sum = 0.0f;
+    for (int64_t i = 0; i < K; i++) m_sum += x[i];
+    m_sum *= m;
+    for (int64_t b = 0; b < nb; b++) {
+        const uint8_t* bq = qs + b * 16;
+        const uint8_t* bh = qh + b * 4;
+        const float* bx = x + b * 32;
+        for (int i = 0; i < 16; i++) {
+            int ql0 = bq[i] & 0xF;
+            int qh0 = (bh[i >> 2] >> (2 * (i & 3))) & 1;
+            int q0 = ql0 | (qh0 << 4);
+            int ql1 = bq[i] >> 4;
+            int qh1 = (bh[(i + 16) >> 2] >> (2 * ((i + 16) & 3))) & 1;
+            int q1 = ql1 | (qh1 << 4);
+            sum += d * (q0 * bx[2 * i] + q1 * bx[2 * i + 1]);
+        }
+    }
+    return sum + m_sum;
+}
+
 void gemv_dequant(const float* x, const void* weights, float* out,
                    int64_t K, int64_t N, ggml_type wtype) {
     // Compute byte stride per weight row
@@ -421,30 +493,13 @@ void gemv_dequant(const float* x, const void* weights, float* out,
             case GGML_TYPE_F32:  out[j] = dot_dequant_f32(x, (const float*)wrow, K); break;
             case GGML_TYPE_F16:  out[j] = dot_dequant_f16(x, (const uint16_t*)wrow, K); break;
             case GGML_TYPE_Q4_0: out[j] = dot_dequant_q4_0(x, (const block_q4_0*)wrow, K); break;
+            case GGML_TYPE_Q4_1: out[j] = dot_dequant_q4_1(x, (const block_q4_1*)wrow, K); break;
+            case GGML_TYPE_Q5_0: out[j] = dot_dequant_q5_0(x, (const block_q5_0*)wrow, K); break;
+            case GGML_TYPE_Q5_1: out[j] = dot_dequant_q5_1(x, (const block_q5_1*)wrow, K); break;
             case GGML_TYPE_Q8_0: out[j] = dot_dequant_q8_0(x, (const block_q8_0*)wrow, K); break;
             case GGML_TYPE_Q4_K: out[j] = dot_dequant_q4_K(x, (const block_q4_K*)wrow, K); break;
             case GGML_TYPE_Q5_K: out[j] = dot_dequant_q5_K(x, (const block_q5_K*)wrow, K); break;
             case GGML_TYPE_Q6_K: out[j] = dot_dequant_q6_K(x, (const block_q6_K*)wrow, K); break;
-            case GGML_TYPE_Q4_1:
-            case GGML_TYPE_Q5_0:
-            case GGML_TYPE_Q5_1:
-                // Fall back to generic dequant + dot for less common types
-                {
-                    int64_t bs = ggml_blck_size(wtype);
-                    int64_t nb = (K + bs - 1) / bs;
-                    int64_t rsz = (int64_t)ggml_type_size(wtype) * nb;
-                    // Use scratch for dequant (caller should provide large enough buffer)
-                    // For now, dequant inline
-                    float dot = 0.0f;
-                    for (int64_t i = 0; i < K; i++) {
-                        // This is slow but correct for rare types
-                        float wval = 0.0f;
-                        dequantize_row(wrow, &wval, 1, wtype); // NOT efficient - fallback
-                        dot += x[i] * wval;
-                    }
-                    out[j] = dot;
-                }
-                break;
             default:
                 throw std::runtime_error("gemv_dequant: unsupported type");
         }

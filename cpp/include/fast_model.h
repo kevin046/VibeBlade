@@ -113,6 +113,10 @@ private:
     // KV cache: per-layer, (n_heads or n_kv_heads, max_seq, head_dim)
     std::vector<std::vector<float>> kv_k_, kv_v_;
 
+    // Instance-owned decode buffers (NOT thread_local — avoids cross-instance clobbering).
+    // Sized once during alloc_kv_cache(), never realloc'd during decode.
+    std::vector<float> x_buf_, hidden_buf_, normed_buf_, logits_buf_;
+
     FastConfig cfg_;
     std::vector<LayerWeights> layers_;
 
