@@ -500,16 +500,18 @@ def load_moe_weights_from_layer(
         up_w     = weights.get(up_key)
         down_w   = weights.get(down_key)
 
-        # Shared expert (DeepSeek-style "shunt")
-        shared_gate_key = f"{pfx}.ffn_gate_shunt.weight"
-        shared_up_key   = f"{pfx}.ffn_up_shunt.weight"
-        shared_down_key = f"{pfx}.ffn_down_shunt.weight"
-        if shared_gate_key in keys:
-            extra["shared_gate"] = weights[shared_gate_key]
-            if shared_up_key in keys:
-                extra["shared_up"] = weights[shared_up_key]
-            if shared_down_key in keys:
-                extra["shared_down"] = weights[shared_down_key]
+        # Shared expert (DeepSeek-style "shunt" or Qwen-style "shexp")
+        for shared_suffix, alias in [("shexp", "shexp"), ("shunt", "shunt")]:
+            shared_gate_key = f"{pfx}.ffn_gate_{shared_suffix}.weight"
+            shared_up_key   = f"{pfx}.ffn_up_{shared_suffix}.weight"
+            shared_down_key = f"{pfx}.ffn_down_{shared_suffix}.weight"
+            if shared_gate_key in keys:
+                extra["shared_gate"] = weights[shared_gate_key]
+                if shared_up_key in keys:
+                    extra["shared_up"] = weights[shared_up_key]
+                if shared_down_key in keys:
+                    extra["shared_down"] = weights[shared_down_key]
+                break
 
     else:
         # ── Try alternate per-expert layout ──

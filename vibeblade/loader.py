@@ -892,6 +892,63 @@ class _LazyWeights:
             canonical = _map_tensor_name(info["name"], arch)
             self._name_map[canonical] = info
 
+        # Detect architecture features and build virtual name aliases
+        # (e.g., Qwen3.6 has fused QKV, attn_gate, post_attention_norm, shexp shared)
+        self._aliases: dict[str, str] = {}
+        self._has_fused_qkv = any("attn_qkv.weight" in k for k in self._name_map)
+        self._build_aliases()
+
+    def _build_aliases(self) -> None:
+        """Build virtual name aliases for architecture compatibility.
+
+        Maps canonical names that transformer.py expects to the actual
+        tensor names in the GGUF file.  For Qwen3.6-style models:
+          - fused attn_qkv → split into attn_q, attn_k, attn_v
+          - attn_gate → attn_output
+          - post_attention_norm → ffn_norm
+          - ffn_gate/up/down_shexp → ffn_gate/up/down (shared expert)
+        """
+        # Collect all unique suffixes across all blocks
+        all_names = list(self._name_map.keys())
+        # Find any block prefix (e.g., "blk.0")
+        block_prefixes = set()
+        for name in all_names:
+            parts = name.split(".", 2)
+            if len(parts) >= 2 and parts[0].startswith("blk"):
+                block_prefixes.add(parts[0] + "." + parts[1])
+
+        if not block_prefixes:
+            return
+
+        # Use first block to detect naming patterns
+        sample_prefix = sorted(block_prefixes)[0]
+        sample_keys = {k[len(sample_prefix) + 1:] for k in all_names
+                       if k.startswith(sample_prefix + ".")}
+
+        # attn_output.weight → attn_gate.weight
+        if "attn_gate.weight" in sample_keys and "attn_output.weight" not in sample_keys:
+            for bp in block_prefixes:
+                self._aliases[f"{bp}.attn_output.weight"] = f"{bp}.attn_gate.weight"
+
+        # ffn_norm.weight → post_attention_norm.weight
+        if "post_attention_norm.weight" in sample_keys and "ffn_norm.weight" not in sample_keys:
+            for bp in block_prefixes:
+                self._aliases[f"{bp}.ffn_norm.weight"] = f"{bp}.post_attention_norm.weight"
+
+        # ffn_gate/up/down.weight → ffn_gate/up/down_shexp.weight (shared expert)
+        if "ffn_gate_shexp.weight" in sample_keys and "ffn_gate.weight" not in sample_keys:
+            for bp in block_prefixes:
+                self._aliases[f"{bp}.ffn_gate.weight"] = f"{bp}.ffn_gate_shexp.weight"
+                self._aliases[f"{bp}.ffn_up.weight"] = f"{bp}.ffn_up_shexp.weight"
+                self._aliases[f"{bp}.ffn_down.weight"] = f"{bp}.ffn_down_shexp.weight"
+
+        # attn_q/k/v.weight → split from attn_qkv.weight
+        if "attn_qkv.weight" in sample_keys:
+            for bp in block_prefixes:
+                self._aliases[f"{bp}.attn_q.weight"] = f"{bp}.attn_qkv.weight"
+                self._aliases[f"{bp}.attn_k.weight"] = f"{bp}.attn_qkv.weight"
+                self._aliases[f"{bp}.attn_v.weight"] = f"{bp}.attn_qkv.weight"
+
     # ── dict interface ──
 
     def __getitem__(self, key: str) -> np.ndarray:
@@ -899,8 +956,32 @@ class _LazyWeights:
             self._touch(key)
             return self._cache[key]
 
-        if key not in self._name_map:
-            # Show helpful context: all names matching the same block prefix
+        # Resolve aliases
+        real_key = self._aliases.get(key, key)
+
+        # Fused QKV split: load once, split into Q/K/V, cache all three
+        if self._has_fused_qkv and key.endswith(".attn_q.weight"):
+            return self._load_split_qkv(key, real_key)
+        if self._has_fused_qkv and key.endswith(".attn_k.weight"):
+            # Q was loaded first; K and V should be cached already
+            k_key = key  # e.g. blk.0.attn_k.weight
+            if k_key in self._cache:
+                self._touch(k_key)
+                return self._cache[k_key]
+            # If not cached, trigger Q load (which caches K and V too)
+            q_key = key.replace(".attn_k.", ".attn_q.")
+            self[q_key]
+            return self._cache[k_key]
+        if self._has_fused_qkv and key.endswith(".attn_v.weight"):
+            v_key = key
+            if v_key in self._cache:
+                self._touch(v_key)
+                return self._cache[v_key]
+            q_key = key.replace(".attn_v.", ".attn_q.")
+            self[q_key]
+            return self._cache[v_key]
+
+        if real_key not in self._name_map:
             parts = key.split(".", 2)
             if len(parts) >= 2:
                 prefix = parts[0] + "." + parts[1]
@@ -913,7 +994,7 @@ class _LazyWeights:
                 f"Tensor '{key}' not found.{hint}"
             )
 
-        info = self._name_map[key]
+        info = self._name_map[real_key]
         arr = self._loader.load_tensor(info["name"], self._dtype)
 
         # Optional GPU offload
@@ -927,8 +1008,50 @@ class _LazyWeights:
 
         return arr
 
+    def _load_split_qkv(self, q_key: str, real_key: str) -> np.ndarray:
+        """Load fused attn_qkv.weight and split into Q, K, V arrays."""
+        if q_key in self._cache:
+            self._touch(q_key)
+            return self._cache[q_key]
+
+        info = self._name_map[real_key]
+        qkv = self._loader.load_tensor(info["name"], self._dtype)
+
+        if self._gpu_offload:
+            qkv = cp.asarray(qkv)  # type: ignore[assignment]
+
+        # Infer split sizes from the config metadata
+        n_heads = self._loader.metadata.get("qwen3.attention.head_count",
+                   self._loader.metadata.get("general.attention.head_count", 32))
+        n_kv_heads = self._loader.metadata.get("qwen3.attention.head_count_kv",
+                        self._loader.metadata.get("general.attention.head_count_kv", n_heads))
+        head_dim = qkv.shape[1] // n_heads  # hidden_dim // num_heads
+
+        q_size = n_heads * head_dim
+        k_size = n_kv_heads * head_dim
+
+        q_arr = qkv[:q_size]
+        k_arr = qkv[q_size:q_size + k_size]
+        v_arr = qkv[q_size + k_size:]
+
+        # Cache all three with their virtual names (keep qkv alive as backing store)
+        prefix = q_key.rsplit(".", 1)[0]  # e.g., "blk.0.attn"
+        qkv_key = f"{prefix}._qkv_full"
+        self._cache[qkv_key] = qkv  # prevent GC of backing array
+        self._access_order.append(qkv_key)
+        for name, arr in [(f"{prefix}.q.weight", q_arr),
+                          (f"{prefix}.k.weight", k_arr),
+                          (f"{prefix}.v.weight", v_arr)]:
+            self._cache[name] = arr
+            self._cached_bytes += arr.nbytes
+            self._access_order.append(name)
+
+        self._evict()
+        self._touch(q_key)
+        return self._cache[q_key]
+
     def __contains__(self, key: str) -> bool:
-        return key in self._name_map
+        return key in self._name_map or key in self._aliases
 
     def __len__(self) -> int:
         return len(self._name_map)
