@@ -34,9 +34,11 @@ The wizard detects your hardware, installs any missing tools, configures memory 
 | Command | What it does |
 |---|---|
 | `python -m vibeblade wizard` | Guided setup — hardware detection, install, config, model download |
+| `python -m vibeblade chat --model model.gguf` | Interactive chat with a GGUF model (C++ fast engine by default) |
+| `python -m vibeblade chat --model model.gguf --backend numpy` | Fallback to pure NumPy inference |
 | `python -m vibeblade serve` | Start local inference API server (OpenAI-compatible) |
 | `python -m vibeblade bench` | Benchmark suite |
-| `python -m vibeblade run <model>` | Run a model directly from terminal |
+| `python -m vibeblade bench --quick` | Quick benchmark (single prompt, ~30s) |
 
 > **Dashboard & Model Browser** are part of VibeBlade Pro (commercial license). Contact [kevin.lin@vibedrift.com](mailto:kevin.lin@vibedrift.com) for access.
 
@@ -105,31 +107,33 @@ Auto-selects best eviction policy: LRU-K, frequency-aware, cost-benefit, or MAB 
 
 ## Acceleration backends
 
-Auto-detected during `python -m vibeblade wizard` — no manual setup needed.
+VibeBlade ships a **native C++ inference engine** — the entire generate pipeline (tokenization, forward pass, sampling, detokenization) runs in C++ with zero Python in the decode hot path. Weights are mmap'd from GGUF files and dequantized inline during matrix multiplication. No numpy, no llama.cpp dependency.
 
-| Hardware detected | Backend installed |
-|---|---|
-| NVIDIA GPU (nvidia-smi) | CUDA extras |
-| Apple Silicon (M1–M4) | Metal / CoreML |
-| AMD GPU (rocm-smi) | ROCm / Vulkan |
-| Intel/AMD CPU with AVX-512 | AVX-512 optimized |
-| Intel/AMD CPU with AVX2 | AVX2 optimized |
-| Apple CPU | NEON optimized |
-| Anything else | Base (NumPy, universal) |
-
-Manual install also supported:
 ```bash
-pip install -e .                        # Base (works everywhere)
-pip install -e ".[gpu-metal]"           # Apple Silicon (CoreML)
-pip install -e ".[gpu-vulkan]"          # AMD Vulkan
-pip install -e ".[grammar]"             # Structured output support
+# Build the C++ engine (requires pybind11)
+cd cpp && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make
+
+# Auto-detected by the chat command for .gguf files
+python -m vibeblade chat --model model.gguf            # uses C++ fast engine
+python -m vibeblade chat --model model.gguf --backend numpy  # force NumPy
 ```
+
+SIMD optimizations are auto-detected at build time:
+
+| Hardware detected | SIMD backend |
+|---|---|
+| AVX-512 + FP16 (Sapphire Rapids+) | AVX-512-FP16 |
+| AVX-512 (Ice Lake+) | AVX-512-F (fp32 path) |
+| AVX2 (Haswell+) | AVX2+FMA |
+| NEON FP16 (ARM) | NEON-FP16 |
+| Apple Silicon (M1–M4) | NEON (Metal/CoreML extras) |
+| Anything else | Scalar fallback |
 
 ---
 
 ## API
 
-### One-line usage
+### One-line usage (C++ fast engine)
 
 ```python
 from vibeblade import VibeBladeModel
@@ -138,7 +142,34 @@ model = VibeBladeModel("model.gguf")
 print(model.generate("Hello world", max_tokens=128))
 ```
 
-All acceleration layers auto-enable based on detected hardware. No configuration needed.
+For GGUF files, VibeBlade auto-detects and uses the native C++ engine — the entire pipeline runs in a single C++ call with zero Python in the decode loop.
+
+### Direct C++ engine access
+
+```python
+from vibeblade.fast_backend import FastModelWrapper
+
+model = FastModelWrapper("model.gguf")
+
+# Full generate — one C++ call, everything native
+text, tps = model.generate("Explain quantum computing", max_tokens=256,
+                            temperature=0.8, top_k=50, top_p=0.9)
+
+# Streaming — C++ calls back per-token
+text, tps = model.generate("Write a poem", max_tokens=64,
+                            stream=True)
+
+# Tokenizer access
+tokens = model._model.tokenize("Hello world")   # C++ BPE tokenizer
+text = model._model.detokenize(tokens)          # C++ decoder
+```
+
+### NumPy fallback
+
+```python
+model = VibeBladeModel("model.safetensors")  # non-GGUF → auto NumPy
+model = VibeBladeModel("model.gguf", backend="numpy")  # force NumPy
+```
 
 ### Advanced: whitepaper components
 
@@ -178,9 +209,11 @@ plan = scheduler.schedule()
 ```
 vibeblade/              # Python package
   ├── __init__.py       # VibeBladeModel + public API
-  ├── transformer.py    # LLaMA forward pass (RMSNorm, RoPE, SwiGLU)
+  ├── fast_backend.py   # C++ fast engine wrapper (single generate() call)
+  ├── transformer.py    # LLaMA forward pass (NumPy fallback)
   ├── loader.py         # GGUF model loader
   ├── generate.py       # Text generation + sampling
+  ├── chat.py           # Interactive CLI chat loop
   ├── benchmark.py      # llama.cpp-style benchmark suite
   ├── sparse.py         # TurboSparse dReLU + EMA NeuronPredictor
   ├── quant.py          # RotorQuant 4-bit weight quantization
@@ -196,15 +229,31 @@ vibeblade/              # Python package
   ├── setup_wizard.py   # Interactive hardware setup (wizard command)
   └── openai_server.py  # OpenAI-compatible API server
 
+cpp/                    # Native C++ inference engine
+  ├── include/
+  │   ├── gguf.h        # GGUF mmap reader (zero-copy weight loading)
+  │   ├── ggml_types.h  # GGML quantization types (Q4_0/Q5/Q8/K-quants/F16)
+  │   ├── dequant.h     # Inline dequantization kernels + gemv_dequant
+  │   ├── fast_model.h  # VibeBladeFast: full forward pass + generate pipeline
+  │   ├── tokenizer.h   # BPE tokenizer (reads GGUF tokenizer metadata)
+  │   ├── sampler.h     # Sampler (temperature/top-k/top-p/repetition/mirostat)
+  │   └── kernels.h     # SIMD math kernels (GEMM, RMSNorm, SDPA, RoPE)
+  └── src/
+      ├── gguf.cpp      # GGUF binary parser + array metadata
+      ├── dequant.cpp   # Dequantization for all GGML types
+      ├── tokenizer.cpp # GPT-2 byte-level BPE implementation
+      ├── sampler.cpp   # Sampling strategies
+      ├── fast_model.cpp # Full inference: prefill, decode, generate
+      └── bindings.cpp  # pybind11 Python bindings
+
 tests/                 # 776 tests covering all modules
-cpp/                   # Optional C++ AVX-512/NEON kernels
 ```
 
 ---
 
 ## Powered by
 
-[llama.cpp](https://github.com/ggml-org/llama.cpp) (GGUF format) · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllm) (PagedAttention) · [SARATHI](https://arxiv.org/abs/2403.07219) (chunked prefill) · [EAGLE](https://arxiv.org/abs/2401.15077) (speculative decoding) · [RotateKV](https://arxiv.org/abs/2408.00784) (KV quantization)
+GGUF format · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllM) (PagedAttention) · [SARATHI](https://arxiv.org/abs/2403.07219) (chunked prefill) · [EAGLE](https://arxiv.org/abs/2401.15077) (speculative decoding) · [RotateKV](https://arxiv.org/abs/2408.00784) (KV quantization)
 
 ---
 
