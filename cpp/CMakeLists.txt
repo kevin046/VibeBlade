@@ -115,6 +115,8 @@ pybind11_add_module(_vibeblade_native
     src/softmax.cpp
     src/gguf.cpp
     src/dequant.cpp
+    src/tokenizer.cpp
+    src/sampler.cpp
     src/fast_model.cpp
 )
 

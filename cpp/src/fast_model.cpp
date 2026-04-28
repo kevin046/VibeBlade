@@ -5,7 +5,7 @@
 
 #include "fast_model.h"
 #include "dequant.h"
-#include <cmath>
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -62,6 +62,7 @@ void VibeBladeFast::load(const char* path) {
     build_rope_cache();
     map_weights(*gguf_);
     alloc_kv_cache();
+    tokenizer_.load(*gguf_);
 
     loaded_ = true;
     position_ = 0;
@@ -475,6 +476,97 @@ size_t VibeBladeFast::kv_cache_bytes() const {
     if (kv_k_.empty()) return 0;
     size_t per_layer = kv_k_[0].size() * sizeof(float) * 2;  // K + V
     return per_layer * cfg_.n_layers;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Tokenizer passthrough
+// ════════════════════════════════════════════════════════════════
+
+std::vector<int> VibeBladeFast::tokenize(const std::string& text) const {
+    return tokenizer_.encode(text);
+}
+
+std::string VibeBladeFast::detokenize(const std::vector<int>& ids) const {
+    return tokenizer_.decode(ids);
+}
+
+std::string VibeBladeFast::detokenize_token(int id) const {
+    return tokenizer_.decode_token(id);
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Full Generate Pipeline — one C++ call, zero Python in hot path
+//  tokenize → prefill → [decode → sample → stream] → detokenize
+// ════════════════════════════════════════════════════════════════
+
+GenerateResult VibeBladeFast::generate(
+    const std::string& prompt,
+    int max_tokens,
+    float temperature,
+    int top_k,
+    float top_p,
+    float repetition_penalty,
+    int seed,
+    std::function<void(int, const std::string&)> on_token
+) {
+    if (!loaded_) throw std::runtime_error("Model not loaded");
+
+    GenerateResult result;
+    result.stopped_eos = false;
+
+    // Set seed
+    if (seed >= 0) {
+        sampler_.set_seed((uint64_t)seed);
+    }
+
+    // ── 1. Tokenize prompt ──
+    std::vector<int> prompt_ids = tokenizer_.encode(prompt);
+
+    // ── 2. Prefill ──
+    std::vector<float> logits = prefill(prompt_ids);
+
+    // ── 3. Decode loop ──
+    SamplerConfig scfg;
+    scfg.temperature = temperature;
+    scfg.top_k = top_k;
+    scfg.top_p = top_p;
+    scfg.repetition_penalty = repetition_penalty;
+
+    // Include prompt tokens in history for repetition penalty
+    std::vector<int> token_history = prompt_ids;
+
+    auto t_start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < max_tokens; i++) {
+        // Sample from logits
+        int token_id = sampler_.sample(logits.data(), cfg_.vocab_size, scfg, token_history);
+        token_history.push_back(token_id);
+        result.token_ids.push_back(token_id);
+
+        // Check EOS
+        if (token_id == tokenizer_.eos_id()) {
+            result.stopped_eos = true;
+            break;
+        }
+
+        // Stream callback (optional — only crosses into Python per token if caller wants it)
+        if (on_token) {
+            std::string piece = tokenizer_.decode_token(token_id);
+            on_token(token_id, piece);
+        }
+
+        // Decode next token
+        logits = decode(token_id);
+    }
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double elapsed = std::chrono::duration<double>(t_end - t_start).count();
+    result.tokens_per_second = result.token_ids.size() / std::max(elapsed, 1e-6);
+
+    // ── 4. Detokenize ──
+    result.text = tokenizer_.decode(result.token_ids);
+
+    return result;
 }
 
 }  // namespace vibeblade

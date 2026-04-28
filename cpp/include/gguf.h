@@ -30,11 +30,16 @@ struct GGUFFile {
     // Tensor info by name
     const TensorInfo* tensor_info(const std::string& name) const;
 
-    // Metadata accessors
+    // Scalar metadata accessors
     std::string meta_string(const std::string& key) const;
     int64_t   meta_int(const std::string& key, int64_t default_val = 0) const;
     float     meta_float(const std::string& key, float default_val = 0.0f) const;
     bool      meta_bool(const std::string& key, bool default_val = false) const;
+
+    // Array metadata accessors
+    std::vector<std::string> meta_string_array(const std::string& key) const;
+    std::vector<int64_t>     meta_int_array(const std::string& key) const;
+    std::vector<float>       meta_float_array(const std::string& key) const;
 
     // All tensor infos
     const std::vector<TensorInfo>& tensors() const { return tensor_infos_; }
@@ -64,6 +69,10 @@ private:
     std::unordered_map<std::string, int64_t>   meta_ints_;
     std::unordered_map<std::string, float>     meta_floats_;
     std::unordered_map<std::string, bool>      meta_bools_;
+    // Array metadata storage
+    std::unordered_map<std::string, std::vector<std::string>> meta_string_arrays_;
+    std::unordered_map<std::string, std::vector<int64_t>>     meta_int_arrays_;
+    std::unordered_map<std::string, std::vector<float>>       meta_float_arrays_;
 };
 
 }  // namespace vibeblade

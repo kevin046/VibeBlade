@@ -97,16 +97,59 @@ void GGUFFile::parse_metadata(const uint8_t* ptr, size_t& offset) {
                     case 10: case 11: esz = 8; break;
                     case 12: esz = 8; break;
                     case 8: {
-                        // Array of strings — skip each string
+                        // Array of strings — store them
+                        std::vector<std::string> arr;
+                        arr.reserve(elen);
                         for (uint64_t j = 0; j < elen; j++) {
-                            uint64_t slen = read_u64(ptr + offset); offset += 8;
-                            offset += slen;
+                            GGUFString s = read_string(ptr, offset);
+                            arr.emplace_back(s.ptr, s.len);
                         }
+                        meta_string_arrays_[k] = std::move(arr);
                         break;
                     }
                     default: esz = 4; break;
                 }
-                if (etype != 8) offset += elen * esz;
+                if (etype != 8) {
+                    // Store typed arrays
+                    if (etype == 5 || etype == 4) {
+                        // INT32 or UINT32 → int64 array
+                        std::vector<int64_t> arr(elen);
+                        for (uint64_t j = 0; j < elen; j++) {
+                            int32_t v = read_i32(ptr + offset); offset += 4;
+                            arr[j] = v;
+                        }
+                        meta_int_arrays_[k] = std::move(arr);
+                    } else if (etype == 10 || etype == 11) {
+                        // UINT64 / INT64
+                        std::vector<int64_t> arr(elen);
+                        for (uint64_t j = 0; j < elen; j++) {
+                            int64_t v = read_i64(ptr + offset); offset += 8;
+                            arr[j] = v;
+                        }
+                        meta_int_arrays_[k] = std::move(arr);
+                    } else if (etype == 6) {
+                        // FLOAT32
+                        std::vector<float> arr(elen);
+                        for (uint64_t j = 0; j < elen; j++) {
+                            float v = read_f32(ptr + offset); offset += 4;
+                            arr[j] = v;
+                        }
+                        meta_float_arrays_[k] = std::move(arr);
+                    } else if (etype == 12) {
+                        // FLOAT64
+                        std::vector<float> arr(elen);
+                        for (uint64_t j = 0; j < elen; j++) {
+                            double v = read_f64(ptr + offset); offset += 8;
+                            arr[j] = (float)v;
+                        }
+                        meta_float_arrays_[k] = std::move(arr);
+                    } else {
+                        // Unknown array type — skip
+                        for (uint64_t j = 0; j < elen; j++) {
+                            offset += esz;
+                        }
+                    }
+                }
                 break;
             }
             case 10: { auto v = read_u64(ptr + offset); offset += 8; meta_ints_[k] = (int64_t)v; break; }
@@ -196,6 +239,21 @@ float GGUFFile::meta_float(const std::string& key, float default_val) const {
 bool GGUFFile::meta_bool(const std::string& key, bool default_val) const {
     auto it = meta_bools_.find(key);
     return (it != meta_bools_.end()) ? it->second : default_val;
+}
+
+std::vector<std::string> GGUFFile::meta_string_array(const std::string& key) const {
+    auto it = meta_string_arrays_.find(key);
+    return (it != meta_string_arrays_.end()) ? it->second : std::vector<std::string>();
+}
+
+std::vector<int64_t> GGUFFile::meta_int_array(const std::string& key) const {
+    auto it = meta_int_arrays_.find(key);
+    return (it != meta_int_arrays_.end()) ? it->second : std::vector<int64_t>();
+}
+
+std::vector<float> GGUFFile::meta_float_array(const std::string& key) const {
+    auto it = meta_float_arrays_.find(key);
+    return (it != meta_float_arrays_.end()) ? it->second : std::vector<float>();
 }
 
 }  // namespace vibeblade

@@ -1,13 +1,16 @@
 #pragma once
 // VibeBlade Fast Model — llama.cpp-style inference engine.
-// Full decode loop in C++ with mmap'd weights and inline dequant.
-// Python calls one function per token; everything else is C++.
+// Full generate loop in C++: tokenize → prefill → decode → sample → detokenize.
+// Python calls generate() once and gets the full output string.
 
 #include "gguf.h"
 #include "ggml_types.h"
+#include "tokenizer.h"
+#include "sampler.h"
 #include <vector>
 #include <string>
 #include <memory>
+#include <functional>
 
 namespace vibeblade {
 
@@ -41,32 +44,52 @@ struct LayerWeights {
     bool has_fused_qkv = false;
 };
 
+struct GenerateResult {
+    std::string text;           // full generated text
+    std::vector<int> token_ids; // generated token IDs
+    double tokens_per_second;   // decode speed
+    bool stopped_eos;           // true if stopped by EOS token
+};
+
 class VibeBladeFast {
 public:
     VibeBladeFast();
     ~VibeBladeFast();
 
-    // Load GGUF model (mmaps the file, parses metadata, maps weights)
+    // Load GGUF model (mmaps the file, parses metadata, maps weights, loads tokenizer)
     void load(const char* path);
 
-    // Prefill: process all prompt tokens at once → returns logits (vocab_size,)
+    // ── Full generate pipeline (one C++ call, zero Python in hot path) ──
+    GenerateResult generate(
+        const std::string& prompt,        // text prompt
+        int max_tokens = 128,             // max new tokens
+        float temperature = 1.0f,
+        int top_k = 50,
+        float top_p = 0.9f,
+        float repetition_penalty = 1.0f,
+        int seed = -1,                    // -1 = random
+        std::function<void(int, const std::string&)> on_token = nullptr  // streaming callback
+    );
+
+    // ── Individual steps (for advanced use / Python loop fallback) ──
     std::vector<float> prefill(const std::vector<int>& token_ids);
-
-    // Decode: process one token → returns logits (vocab_size,)
-    // KV cache is maintained internally across calls.
     std::vector<float> decode(int token_id);
-
-    // Reset KV cache (start new conversation)
     void reset();
 
-    // Current position in the sequence
+    // ── Tokenizer ──
+    std::vector<int> tokenize(const std::string& text) const;
+    std::string detokenize(const std::vector<int>& ids) const;
+    std::string detokenize_token(int id) const;
+
+    // ── State ──
     int position() const { return position_; }
-
-    // Model config
     const FastConfig& config() const { return cfg_; }
-
-    // KV cache stats
     size_t kv_cache_bytes() const;
+    int eos_id() const { return tokenizer_.eos_id(); }
+    int bos_id() const { return tokenizer_.bos_id(); }
+
+    // ── Sampler config ──
+    Sampler& sampler() { return sampler_; }
 
 private:
     void extract_config(const GGUFFile& gguf);
@@ -76,15 +99,15 @@ private:
 
     // Forward one layer (used by both prefill and decode)
     void forward_layer(
-        const float* input,       // (seq, hidden_dim) for prefill, (1, hidden_dim) for decode
-        int seq_len,              // 1 for decode
-        float* output,            // (seq, hidden_dim)
+        const float* input,
+        int seq_len,
+        float* output,
         const LayerWeights& lw,
         int layer_idx
     );
 
     // Scratch buffers (reused every decode step, no malloc)
-    std::vector<float> scratch_;   // general scratch
+    std::vector<float> scratch_;
     std::vector<float> rope_cos_, rope_sin_;
 
     // KV cache: per-layer, (n_heads or n_kv_heads, max_seq, head_dim)
@@ -100,6 +123,10 @@ private:
 
     // GGUF file handle (owns the mmap)
     std::unique_ptr<GGUFFile> gguf_;
+
+    // Tokenizer & Sampler
+    Tokenizer tokenizer_;
+    Sampler sampler_;
 
     int position_ = 0;
     bool loaded_ = false;

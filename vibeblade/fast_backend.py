@@ -1,26 +1,25 @@
 """VibeBlade Fast Backend — C++ inference via VibeBladeFast.
 
-Zero-copy GGUF mmap, inline dequantization, no Python in the decode loop.
-Use this for maximum inference speed on quantized models.
+Entire generate loop runs in C++:
+  tokenize → prefill → [decode → sample] → detokenize
+
+Python only handles CLI I/O and streaming print callbacks.
 """
 
 from __future__ import annotations
 
-import time
 from typing import Callable, Optional
 
 
 def _load_native():
     """Lazily import the C++ native module."""
     import importlib
-    # Try project build first, then installed package
+
     for path in ["cpp/build", "."]:
         try:
-            mod = importlib.import_module("_vibeblade_native")
-            return mod
+            return importlib.import_module("_vibeblade_native")
         except ImportError:
             continue
-    # Try from installed package
     try:
         return importlib.import_module("vibeblade._vibeblade_native")
     except ImportError:
@@ -33,8 +32,8 @@ def _load_native():
 class FastModelWrapper:
     """Drop-in replacement for VibeBladeModel using the C++ fast backend.
 
-    Loads GGUF files via mmap (instant load), runs inference entirely in C++.
-    Supports Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/F16/F32 quantization.
+    Loads GGUF files via mmap (instant load), runs entire generate loop in C++.
+    Tokenization, sampling, and detokenization all happen in native code.
     """
 
     def __init__(self, model_path: str):
@@ -79,6 +78,10 @@ class FastModelWrapper:
     ) -> tuple:
         """Generate text from a prompt.
 
+        The entire loop (tokenize → prefill → decode → sample → detokenize)
+        runs in C++. Python only crosses the FFI boundary for the final result
+        and optional streaming callbacks.
+
         Args:
             prompt: text prompt
             token_ids: pre-tokenized input (alternative to prompt)
@@ -87,93 +90,41 @@ class FastModelWrapper:
             top_k: top-k filtering
             top_p: nucleus (top-p) filtering
             stream: print tokens as they generate
-            on_token: optional callback(token_id, pos)
+            on_token: optional callback(token_id, text_piece)
 
         Returns:
             (generated_text, tokens_per_second) tuple
         """
-        if token_ids is None:
-            if prompt is None:
-                token_ids = [1]  # BOS
-            else:
-                # Simple byte tokenization (placeholder — real tokenizer later)
-                token_ids = list(prompt.encode("utf-8")) + [1]
+        if prompt is None and token_ids is not None:
+            # Pre-tokenized: decode through C++ detokenizer then use generate
+            text = self._model.detokenize(token_ids)
+            prompt = text
 
-        # Prefill
-        logits = self._model.prefill(token_ids)
+        if prompt is None:
+            prompt = ""
 
-        # Generate
-        output_tokens = []
-        gen_start = time.time()
+        # Build streaming callback for C++ → Python
+        cpp_callback = None
+        if stream and on_token is None:
+            # Default: print each piece as it arrives
+            def cpp_callback(token_id, piece):
+                print(piece, end="", flush=True)
 
-        for i in range(max_tokens):
-            token_id = self._sample(logits, temperature, top_k, top_p)
-            output_tokens.append(token_id)
+        elif on_token is not None:
+            def cpp_callback(token_id, piece):
+                on_token(token_id, piece)
 
-            if on_token is not None:
-                on_token(token_id, i)
-            elif stream:
-                try:
-                    print(chr(token_id), end="", flush=True)
-                except (ValueError, OverflowError):
-                    pass
-
-            if token_id == 2:  # EOS
-                break
-
-            # Decode next token
-            logits = self._model.decode(token_id)
-
-        gen_elapsed = time.time() - gen_start
-        tps = len(output_tokens) / max(gen_elapsed, 1e-6)
+        # Single C++ call — everything runs native
+        result = self._model.generate(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            on_token=cpp_callback,
+        )
 
         if stream and on_token is None:
             print()
 
-        # Decode output tokens to text
-        try:
-            text = "".join(chr(t) for t in output_tokens if 32 <= t < 127)
-        except (ValueError, OverflowError):
-            text = f"[{len(output_tokens)} tokens generated at {tps:.1f} t/s]"
-
-        return text, tps
-
-    @staticmethod
-    def _sample(logits, temperature, top_k, top_p):
-        """Sample a token from logits with temperature, top_k, and top_p."""
-        import numpy as np
-
-        logits = np.array(logits, dtype=np.float64)
-
-        # Temperature
-        if temperature > 0 and temperature != 1.0:
-            logits = logits / temperature
-
-        # Greedy
-        if temperature == 0:
-            return int(np.argmax(logits))
-
-        # Top-K
-        if top_k > 0 and top_k < len(logits):
-            top_k_idx = np.argpartition(logits, -top_k)[-top_k:]
-            mask = np.full_like(logits, -1e10)
-            mask[top_k_idx] = logits[top_k_idx]
-            logits = mask
-
-        # Softmax
-        logits_max = np.max(logits)
-        exp_logits = np.exp(logits - logits_max)
-        probs = exp_logits / np.sum(exp_logits)
-
-        # Top-P (nucleus) sampling
-        if top_p < 1.0:
-            sorted_idx = np.argsort(probs)[::-1]
-            sorted_probs = probs[sorted_idx]
-            cumsum = np.cumsum(sorted_probs)
-            cutoff = np.searchsorted(cumsum, top_p) + 1
-            top_idx = sorted_idx[:cutoff]
-            mask = np.zeros_like(probs)
-            mask[top_idx] = probs[top_idx]
-            probs = mask / np.sum(mask)
-
-        return int(np.random.choice(len(probs), p=probs))
+        return result.text, result.tokens_per_second

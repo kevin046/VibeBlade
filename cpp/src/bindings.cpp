@@ -213,12 +213,70 @@ PYBIND11_MODULE(_vibeblade_native, m) {
     }, py::arg("x"));
 
     // ════════════════════ VibeBladeFast — GGUF inference engine ════════════════════
+    py::class_<GenerateResult>(m, "GenerateResult",
+        R"doc(Result from generate(): text, token_ids, tokens_per_second, stopped_eos.)doc")
+        .def_readonly("text", &GenerateResult::text)
+        .def_readonly("token_ids", &GenerateResult::token_ids)
+        .def_readonly("tokens_per_second", &GenerateResult::tokens_per_second)
+        .def_readonly("stopped_eos", &GenerateResult::stopped_eos);
+
     py::class_<VibeBladeFast>(m, "VibeBladeFast",
         R"doc(Llama.cpp-style C++ inference engine with mmap'd GGUF weights and inline dequant.
+Full generate loop in C++: tokenize → prefill → decode → sample → detokenize.
 Zero malloc in the decode loop. Supports Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/F16/F32.)doc")
         .def(py::init<>())
         .def("load", &VibeBladeFast::load, py::arg("path"),
-            R"doc(Load a GGUF model file (mmaps weights, parses config).)doc")
+            R"doc(Load a GGUF model file (mmaps weights, parses config, loads tokenizer).)doc")
+
+        // ── Full generate pipeline (one C++ call, zero Python in hot path) ──
+        .def("generate", [](VibeBladeFast& self,
+                            const std::string& prompt,
+                            int max_tokens,
+                            float temperature,
+                            int top_k,
+                            float top_p,
+                            float repetition_penalty,
+                            int seed,
+                            py::object on_token_py
+                        ) -> GenerateResult {
+            std::function<void(int, const std::string&)> on_token;
+            if (!on_token_py.is_none()) {
+                // Capture the Python callback with GIL management
+                py::function cb = on_token_py.cast<py::function>();
+                on_token = [cb](int token_id, const std::string& piece) {
+                    // Release GIL not needed here — pybind11 manages it
+                    cb(token_id, piece);
+                };
+            }
+            return self.generate(prompt, max_tokens, temperature, top_k, top_p,
+                                 repetition_penalty, seed, on_token);
+        },
+            py::arg("prompt"),
+            py::arg("max_tokens") = 128,
+            py::arg("temperature") = 1.0f,
+            py::arg("top_k") = 50,
+            py::arg("top_p") = 0.9f,
+            py::arg("repetition_penalty") = 1.0f,
+            py::arg("seed") = -1,
+            py::arg("on_token") = py::none(),
+            R"doc(Full generate pipeline in C++: tokenize prompt → prefill → decode loop → sample → detokenize.
+on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc")
+
+        // ── Tokenizer ──
+        .def("tokenize", [](const VibeBladeFast& self, const std::string& text) -> std::vector<int> {
+            return self.tokenize(text);
+        }, py::arg("text"),
+            R"doc(Encode text to token IDs using the GGUF BPE tokenizer.)doc")
+        .def("detokenize", [](const VibeBladeFast& self, const std::vector<int>& ids) -> std::string {
+            return self.detokenize(ids);
+        }, py::arg("token_ids"),
+            R"doc(Decode token IDs to text.)doc")
+        .def("detokenize_token", [](const VibeBladeFast& self, int id) -> std::string {
+            return self.detokenize_token(id);
+        }, py::arg("token_id"),
+            R"doc(Decode a single token ID to its text piece.)doc")
+
+        // ── Individual steps (for advanced use) ──
         .def("prefill", [](VibeBladeFast& self, const std::vector<int>& tokens) -> py::array_t<float> {
             auto logits = self.prefill(tokens);
             return py::array_t<float>(logits.size(), logits.data());
@@ -231,7 +289,11 @@ Zero malloc in the decode loop. Supports Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K
             R"doc(Decode: process one token, return full vocab logits.)doc")
         .def("reset", &VibeBladeFast::reset,
             R"doc(Reset KV cache and position to start a new conversation.)doc")
+
+        // ── Properties ──
         .def_property_readonly("position", [](const VibeBladeFast& self) { return self.position(); })
+        .def_property_readonly("eos_id", [](const VibeBladeFast& self) { return self.eos_id(); })
+        .def_property_readonly("bos_id", [](const VibeBladeFast& self) { return self.bos_id(); })
         .def_property_readonly("config", [](const VibeBladeFast& self) -> py::dict {
             const auto& c = self.config();
             return py::dict(
