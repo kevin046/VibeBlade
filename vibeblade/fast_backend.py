@@ -7,8 +7,6 @@ Use this for maximum inference speed on quantized models.
 from __future__ import annotations
 
 import time
-import sys
-from pathlib import Path
 from typing import Callable, Optional
 
 
@@ -94,8 +92,6 @@ class FastModelWrapper:
         Returns:
             (generated_text, tokens_per_second) tuple
         """
-        import numpy as np
-
         if token_ids is None:
             if prompt is None:
                 token_ids = [1]  # BOS

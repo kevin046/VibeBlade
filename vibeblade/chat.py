@@ -112,7 +112,8 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     print()
     print(f" {_c(_b('VibeBlade Chat'))}")
     print(f" {_d('Model:')} {model_path}")
-    print(f" {_d('Backend:')} {'C++ fast' if use_fast else 'NumPy (pure Python)'}")
+    backend_label = {"fast": "C++ fast (requested)", "numpy": "NumPy (pure Python)", "auto": "auto-detect"}
+    print(f" {_d('Backend:')} {backend_label.get(backend, backend)}")
     print(f" {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
     print()
     print(f" {_d('Commands:')} /help /clear /reset /quit /undo")
@@ -151,7 +152,6 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             model = FastModelWrapper(model_path)
             use_fast = True
             elapsed = time.time() - load_start
-            cfg = model.config
             sys.stderr.write(
                 f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} "
                 f"{'C++ fast backend':<28}\n"
