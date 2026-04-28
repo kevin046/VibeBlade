@@ -1,12 +1,18 @@
 #pragma once
-// VibeBlade GGUF mmap reader — zero-copy weight loading.
-// Mmaps the GGUF file, parses header/metadata/tensor infos,
-// provides direct const void* pointers into the mapped region.
+// VibeBlade GGUF reader — parses GGUF files for model loading.
+//
+// IMPORTANT (ARM64 platform bug workaround):
+// All internal maps use unique_ptr and are initialized in the constructor
+// body AFTER the large file buffer is allocated. On certain ARM64/libstdc++
+// combinations, a large allocation (>128MB) corrupts previously-allocated
+// map sentinel nodes. By creating maps after the buffer, their heap
+// allocations land in non-corrupted address space.
 
 #include "ggml_types.h"
 #include <string>
 #include <vector>
-#include <unordered_map>
+#include <map>
+#include <memory>
 #include <cstdint>
 
 namespace vibeblade {
@@ -24,7 +30,11 @@ struct GGUFFile {
     GGUFFile(const char* path);
     ~GGUFFile();
 
-    // Direct pointer to tensor data (mmap'd, zero-copy)
+    // Non-copyable, non-movable (owns raw buffer + maps)
+    GGUFFile(const GGUFFile&) = delete;
+    GGUFFile& operator=(const GGUFFile&) = delete;
+
+    // Direct pointer to tensor data
     const void* tensor_data(const std::string& name) const;
 
     // Tensor info by name
@@ -52,27 +62,28 @@ private:
     void parse_header(const uint8_t* ptr);
     void parse_metadata(const uint8_t* ptr, size_t& offset);
     void parse_tensor_infos(const uint8_t* ptr, size_t& offset);
-    void map_file(const char* path);
+    void load_file(const char* path);
+    void init_maps();
 
     int fd_ = -1;
-    const uint8_t* data_ = nullptr;
+    uint8_t* data_ = nullptr;
     size_t file_size_ = 0;
-    size_t data_offset_ = 0;  // start of tensor data section
+    size_t data_offset_ = 0;
 
     uint32_t version_ = 0;
     uint64_t n_tensors_ = 0;
     uint64_t n_kv_ = 0;
 
-    std::unordered_map<std::string, TensorInfo> tensor_map_;
+    // Maps initialized via unique_ptr AFTER file buffer is loaded
+    std::unique_ptr<std::map<std::string, TensorInfo>> tensor_map_;
     std::vector<TensorInfo> tensor_infos_;
-    std::unordered_map<std::string, std::string> meta_strings_;
-    std::unordered_map<std::string, int64_t>   meta_ints_;
-    std::unordered_map<std::string, float>     meta_floats_;
-    std::unordered_map<std::string, bool>      meta_bools_;
-    // Array metadata storage
-    std::unordered_map<std::string, std::vector<std::string>> meta_string_arrays_;
-    std::unordered_map<std::string, std::vector<int64_t>>     meta_int_arrays_;
-    std::unordered_map<std::string, std::vector<float>>       meta_float_arrays_;
+    std::unique_ptr<std::map<std::string, std::string>> meta_strings_;
+    std::unique_ptr<std::map<std::string, int64_t>>     meta_ints_;
+    std::unique_ptr<std::map<std::string, float>>       meta_floats_;
+    std::unique_ptr<std::map<std::string, bool>>        meta_bools_;
+    std::unique_ptr<std::map<std::string, std::vector<std::string>>> meta_string_arrays_;
+    std::unique_ptr<std::map<std::string, std::vector<int64_t>>>     meta_int_arrays_;
+    std::unique_ptr<std::map<std::string, std::vector<float>>>       meta_float_arrays_;
 };
 
 }  // namespace vibeblade

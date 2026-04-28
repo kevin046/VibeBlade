@@ -1,22 +1,17 @@
 #pragma once
 // VibeBlade BPE Tokenizer — reads tokenizer metadata from GGUF.
-// Supports GPT-2 style BPE (llama, qwen2, mistral, etc.).
-// Zero-copy: vocab tokens point into GGUF mmap'd memory.
+// Supports GPT-2 style BPE (llama, qwen2, mistral, etc.) and SentencePiece.
+// Uses unique_ptr<map> to avoid ARM64/libstdc++ heap corruption after
+// large allocations.
 
 #include "gguf.h"
 #include <string>
 #include <vector>
-#include <unordered_map>
+#include <map>
+#include <memory>
 #include <utility>
 
 namespace vibeblade {
-
-// Hash for std::pair<int,int> keys (must be before Tokenizer class)
-struct pair_hash {
-    size_t operator()(const std::pair<int, int>& p) const {
-        return (size_t(p.first) << 32) | size_t(p.second);
-    }
-};
 
 class Tokenizer {
 public:
@@ -65,13 +60,13 @@ private:
 
     // Vocab: index → text, text → index
     std::vector<std::string> tokens_;
-    std::unordered_map<std::string, int> token_to_id_;
+    std::unique_ptr<std::map<std::string, int>> token_to_id_;
 
     // BPE merges sorted by priority
     std::vector<Merge> merges_;
 
-    // Hash for pair<int,int> keys
-    std::unordered_map<std::pair<int, int>, int, pair_hash> merge_map_;
+    // Merge lookup: pair<int,int> → result (std::map uses default operator<)
+    std::unique_ptr<std::map<std::pair<int, int>, int>> merge_map_;
 
     // Tokenizer type: "gpt2", "llama", "sentencepiece", "spm", "replit"
     std::string tokenizer_model_;
@@ -90,7 +85,7 @@ private:
     int pad_id_ = -1;
 
     // Added tokens
-    std::unordered_map<std::string, int> added_tokens_;
+    std::unique_ptr<std::map<std::string, int>> added_tokens_;
 };
 
 }  // namespace vibeblade

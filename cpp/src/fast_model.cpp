@@ -94,7 +94,6 @@ VibeBladeFast::~VibeBladeFast() = default;
 
 void VibeBladeFast::load(const char* path) {
     gguf_ = std::make_unique<GGUFFile>(path);
-
     extract_config(*gguf_);
     build_rope_cache();
     map_weights(*gguf_);
@@ -128,11 +127,27 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
     cfg_.n_layers         = (int)gi("block_count");
     cfg_.n_heads          = (int)gi("attention.head_count");
     cfg_.n_kv_heads       = (int)gi("attention.head_count_kv", cfg_.n_heads);
-    cfg_.head_dim         = (int)gi("attention.key_length");
     cfg_.hidden_dim       = (int)gi("embedding_length");
     cfg_.intermediate_dim = (int)gi("feed_forward_length");
     cfg_.context_length   = (int)gi("context_length", 2048);
-    cfg_.vocab_size       = (int)gi("vocab_size");
+
+    // head_dim: explicit key_length, or derive from hidden_dim / n_heads
+    cfg_.head_dim = (int)gi("attention.key_length");
+    if (cfg_.head_dim == 0 && cfg_.n_heads > 0)
+        cfg_.head_dim = cfg_.hidden_dim / cfg_.n_heads;
+
+    // vocab_size: explicit, or derive from token_embd weight rows
+    cfg_.vocab_size = (int)gi("vocab_size");
+    if (cfg_.vocab_size == 0) {
+        auto emb_info = g.tensor_info("token_embd.weight");
+        if (!emb_info) emb_info = g.tensor_info("wte.weight");
+        if (emb_info) {
+            // GGUF stores dims as [n_rows, n_cols]; for embeddings, the larger
+            // dimension is typically vocab_size (other is hidden_dim).
+            cfg_.vocab_size = (int)std::max(emb_info->dims[0], emb_info->dims[1]);
+        }
+    }
+
     cfg_.norm_eps         = gf("attention.layer_norm_rms_epsilon", 1e-5f);
 
     // Sliding window attention (Mistral)
@@ -555,12 +570,25 @@ void VibeBladeFast::forward_layer(
         gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype);
     }
 
-    // ── 7. FFN RMS Norm ──
+    // ── 7. Post-attention residual (must be computed BEFORE FFN norm) ──
+    // LLaMA: residual1 = input + o_proj; then ffn_norm(residual1)
+    for (int s = 0; s < seq_len; s++) {
+#ifdef __aarch64__
+        memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+        vadd_residual(output + s * hd, o_proj + s * hd, hd);
+#else
+        for (int d = 0; d < hd; d++) {
+            output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
+        }
+#endif
+    }
+
+    // ── 8. FFN RMS Norm (on post-attention residual) ──
     for (int s = 0; s < seq_len; s++) {
         rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
     }
 
-    // ── 8. FFN (SwiGLU or GeGLU) ──
+    // ── 9. FFN (SwiGLU or GeGLU) ──
     for (int s = 0; s < seq_len; s++) {
         gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                      hd, cfg_.intermediate_dim, lw.gate_type);
@@ -595,27 +623,33 @@ void VibeBladeFast::forward_layer(
                      id, hd, lw.down_type);
     }
 
-    // ── 9. Residual connections (depends on parallel vs sequential attention) ──
-    for (int s = 0; s < seq_len; s++) {
-        if (cfg_.use_parallel_attn) {
-            // Falcon / GPT-NeoX: parallel attention + FFN
-            // output = input + attn_out + ff_out
-            for (int d = 0; d < hd; d++) {
-                output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d] + ff_out[s * hd + d];
-            }
-        } else {
-            // Standard LLaMA-style: sequential residual
-            // output = input + o_proj + ff_out
+    // ── 10. Final residual: output += ff_out (output already = input + o_proj) ──
+    if (cfg_.use_parallel_attn) {
+        // Falcon / GPT-NeoX: parallel attention + FFN
+        // output already has input + o_proj from step 7, just add ff_out
+        for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
-            memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
-            vadd_residual(output + s * hd, o_proj + s * hd, hd);
             vadd_residual(output + s * hd, ff_out + s * hd, hd);
 #else
             for (int d = 0; d < hd; d++) {
-                output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d] + ff_out[s * hd + d];
+                output[s * hd + d] += ff_out[s * hd + d];
             }
 #endif
         }
+    } else {
+        // Standard LLaMA-style: sequential residual
+        // output already has input + o_proj from step 7, just add ff_out
+#ifdef __aarch64__
+        for (int s = 0; s < seq_len; s++) {
+            vadd_residual(output + s * hd, ff_out + s * hd, hd);
+        }
+#else
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < hd; d++) {
+                output[s * hd + d] += ff_out[s * hd + d];
+            }
+        }
+#endif
     }
 }
 

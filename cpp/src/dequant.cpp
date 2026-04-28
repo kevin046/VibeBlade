@@ -344,18 +344,43 @@ void dequantize_row_q5_K(const void* row, float* out, int64_t n) {
 //  Q6_K dequant: 256 values, 4+2 bit split, 8-bit scales
 // ════════════════════════════════════════════════════════════════
 void dequantize_row_q6_K(const void* row, float* out, int64_t n) {
-    const block_q6_K* blocks = (const block_q6_K*)row;
+    const uint8_t* data = (const uint8_t*)row;
     int64_t nb = (n + 255) / 256;
-
     for (int64_t b = 0; b < nb; b++) {
-        float d = f16_to_f32(blocks[b].d);
-        const uint8_t* ql = blocks[b].ql;
-        const uint8_t* qh = blocks[b].qh;
-        const int8_t*  sc = blocks[b].scales;
+        const uint8_t* block = data + b * 210;
+        float d = f16_to_f32(*(const uint16_t*)(block + 208));
+        const uint8_t* ql = block;       // 128 bytes: 4-bit packed quants
+        const uint8_t* qh = block + 128; // 64 bytes: 2-bit upper quants
+        const int8_t*  sc = (const int8_t*)(block + 192); // 16 bytes: scales
 
         int64_t remaining = std::min((int64_t)256, n - b * 256);
+
+        // ql: 128 bytes store 256 4-bit values in 32-byte groups
+        // Group g (0-3): bytes [g*32..g*32+31], low nibble = vals g*64..g*64+31,
+        //   high nibble = vals g*64+32..g*64+63
+        // qh: 64 bytes, each byte has 4 2-bit values
+        // qh[j] (j=0..31) covers indices j*4..j*4+3 (indices 0-127)
+        // qh[j] (j=32..63) covers indices 128+.. (indices 128-255)
+        // scales: sc[i] for i=0..15, each covers 16 values
+
         for (int64_t i = 0; i < remaining; i++) {
-            int ql_val = ql[i] & 0xF;
+            int ql_idx;
+            int ql_shift;
+            if (i < 64) {
+                ql_idx = (i / 2);
+                ql_shift = (i & 1) * 4;
+            } else if (i < 128) {
+                ql_idx = 32 + (i - 64) / 2;
+                ql_shift = ((i - 64) & 1) * 4;
+            } else if (i < 192) {
+                ql_idx = 64 + (i - 128) / 2;
+                ql_shift = ((i - 128) & 1) * 4;
+            } else {
+                ql_idx = 96 + (i - 192) / 2;
+                ql_shift = ((i - 192) & 1) * 4;
+            }
+            int ql_val = (ql[ql_idx] >> ql_shift) & 0xF;
+
             int qh_val = (qh[i >> 2] >> (2 * (i & 3))) & 3;
             int q = (ql_val | (qh_val << 4)) - 32;
             out[b * 256 + i] = d * sc[i / 16] * q;
@@ -492,17 +517,38 @@ static inline float dot_dequant_q5_K(const float* x, const block_q5_K* row, int6
     return sum;
 }
 
-static inline float dot_dequant_q6_K(const float* x, const block_q6_K* row, int64_t K) {
-    float d = f16_to_f32(row->d);
-    const uint8_t* ql = row->ql;
-    const uint8_t* qh = row->qh;
-    const int8_t*  sc = row->scales;
+static inline float dot_dequant_q6_K(const float* x, const uint8_t* row_data, int64_t K) {
     float sum = 0.0f;
-    for (int i = 0; i < K; i++) {
-        int ql_val = ql[i] & 0xF;
-        int qh_val = (qh[i >> 2] >> (2 * (i & 3))) & 3;
-        int q = (ql_val | (qh_val << 4)) - 32;
-        sum += d * sc[i / 16] * q * x[i];
+    for (int64_t b = 0; b < (K + 255) / 256; b++) {
+        const uint8_t* block = row_data + b * 210;
+        float d = f16_to_f32(*(const uint16_t*)(block + 208));
+        const uint8_t* ql = block;
+        const uint8_t* qh = block + 128;
+        const int8_t*  sc = (const int8_t*)(block + 192);
+        int64_t remaining = std::min((int64_t)256, K - b * 256);
+
+        for (int64_t i = 0; i < remaining; i++) {
+            int ql_idx;
+            int ql_shift;
+            if (i < 64) {
+                ql_idx = (i / 2);
+                ql_shift = (i & 1) * 4;
+            } else if (i < 128) {
+                ql_idx = 32 + (i - 64) / 2;
+                ql_shift = ((i - 64) & 1) * 4;
+            } else if (i < 192) {
+                ql_idx = 64 + (i - 128) / 2;
+                ql_shift = ((i - 128) & 1) * 4;
+            } else {
+                ql_idx = 96 + (i - 192) / 2;
+                ql_shift = ((i - 192) & 1) * 4;
+            }
+            int ql_val = (ql[ql_idx] >> ql_shift) & 0xF;
+
+            int qh_val = (qh[i >> 2] >> (2 * (i & 3))) & 3;
+            int q = (ql_val | (qh_val << 4)) - 32;
+            sum += d * sc[i / 16] * q * x[b * 256 + i];
+        }
     }
     return sum;
 }
@@ -719,7 +765,7 @@ void gemv_dequant(const float* x, const void* weights, float* out,
             case GGML_TYPE_Q3_K: out[j] = dot_dequant_q3_K(x, (const block_q3_K*)wrow, K); break;
             case GGML_TYPE_Q4_K: out[j] = dot_dequant_q4_K(x, (const block_q4_K*)wrow, K); break;
             case GGML_TYPE_Q5_K: out[j] = dot_dequant_q5_K(x, (const block_q5_K*)wrow, K); break;
-            case GGML_TYPE_Q6_K: out[j] = dot_dequant_q6_K(x, (const block_q6_K*)wrow, K); break;
+            case GGML_TYPE_Q6_K: out[j] = dot_dequant_q6_K(x, (const uint8_t*)wrow, K); break;
             case GGML_TYPE_Q8_K: out[j] = dot_dequant_q8_K(x, (const uint8_t*)wrow, K); break;
             default:
                 throw std::runtime_error("gemv_dequant: unsupported type");

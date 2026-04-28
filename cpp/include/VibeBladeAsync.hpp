@@ -16,7 +16,7 @@
 #include <vector>
 #include <future>
 #include <memory>
-#include <unordered_map>
+#include <map>
 #include <deque>
 #include <mutex>
 #include <chrono>
@@ -375,7 +375,7 @@ private:
     std::atomic<size_t> active_futures_;
 
     // Weight cache: expert_id → weight data in RAM
-    std::unordered_map<int, std::vector<float>> ram_cache_;
+    std::map<int, std::vector<float>> ram_cache_;
     std::mutex cache_mutex_;
 
     // Pre-allocated merge buffer (zero-copy)

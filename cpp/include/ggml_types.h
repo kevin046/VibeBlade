@@ -169,6 +169,8 @@ struct block_q8_K {
 // Q8_K on-disk is 292 bytes. Struct above doesn't match layout;
 // use byte-level access with 292-byte stride (ggml_type_size).
 
+#pragma pack(pop)  // Restore default alignment after packed block structs
+
 // ── BF16 ↔ F32 ──
 inline float bf16_to_f32(uint16_t h) {
     uint32_t f = (uint32_t)h << 16;

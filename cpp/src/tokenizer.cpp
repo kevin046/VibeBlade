@@ -77,10 +77,14 @@ void Tokenizer::load(const GGUFFile& gguf) {
     }
     tokens_ = vocab;
 
+    // Create maps (unique_ptr) before populating
+    token_to_id_ = std::make_unique<std::map<std::string, int>>();
+    merge_map_ = std::make_unique<std::map<std::pair<int, int>, int>>();
+    added_tokens_ = std::make_unique<std::map<std::string, int>>();
+
     // Build reverse lookup
-    token_to_id_.clear();
     for (int i = 0; i < (int)tokens_.size(); i++) {
-        token_to_id_[tokens_[i]] = i;
+        (*token_to_id_)[tokens_[i]] = i;
     }
 
     // Determine tokenizer model type
@@ -96,7 +100,6 @@ void Tokenizer::load(const GGUFFile& gguf) {
     // Read BPE merges
     auto merge_strs = gguf.meta_string_array("tokenizer.ggml.merges");
     merges_.clear();
-    merge_map_.clear();
 
     for (int i = 0; i < (int)merge_strs.size(); i++) {
         const std::string& m = merge_strs[i];
@@ -106,9 +109,9 @@ void Tokenizer::load(const GGUFFile& gguf) {
         std::string first = m.substr(0, space);
         std::string second = m.substr(space + 1);
 
-        auto it1 = token_to_id_.find(first);
-        auto it2 = token_to_id_.find(second);
-        if (it1 == token_to_id_.end() || it2 == token_to_id_.end()) continue;
+        auto it1 = token_to_id_->find(first);
+        auto it2 = token_to_id_->find(second);
+        if (it1 == token_to_id_->end() || it2 == token_to_id_->end()) continue;
 
         Merge merge;
         merge.pair = {it1->second, it2->second};
@@ -126,7 +129,7 @@ void Tokenizer::load(const GGUFFile& gguf) {
 
     // Build merge lookup
     for (int i = 0; i < (int)merges_.size(); i++) {
-        merge_map_[merges_[i].pair] = i;
+        (*merge_map_)[merges_[i].pair] = i;
     }
 
     // Special tokens
@@ -135,12 +138,11 @@ void Tokenizer::load(const GGUFFile& gguf) {
     pad_id_ = (int)gguf.meta_int("tokenizer.ggml.padding_token_id", -1);
 
     // Added tokens (special tokens like <|im_start|>, <|im_end|>, etc.)
-    added_tokens_.clear();
     auto added = gguf.meta_string_array("tokenizer.ggml.added_tokens");
     for (int i = 0; i < (int)added.size(); i++) {
-        auto it = token_to_id_.find(added[i]);
-        if (it != token_to_id_.end()) {
-            added_tokens_[added[i]] = it->second;
+        auto it = token_to_id_->find(added[i]);
+        if (it != token_to_id_->end()) {
+            (*added_tokens_)[added[i]] = it->second;
         }
     }
 
@@ -220,7 +222,7 @@ std::vector<std::string> Tokenizer::pre_tokenize(const std::string& text) const 
     std::vector<std::pair<size_t, size_t>> special_ranges;
     while (pos < text.size()) {
         bool found = false;
-        for (auto& [tok, id] : added_tokens_) {
+        for (auto& [tok, id] : *added_tokens_) {
             if (tok.size() > 2 && ((tok[0] == '<' && tok[tok.size()-1] == '>') ||
                 tok == "<s>" || tok == "</s>")) {
                 if (text.compare(pos, tok.size(), tok) == 0) {
@@ -281,8 +283,8 @@ std::vector<int> Tokenizer::bpe(const std::vector<int>& word) const {
         int best_rank = INT_MAX;
 
         for (int i = 0; i < (int)current.size() - 1; i++) {
-            auto it = merge_map_.find({current[i], current[i + 1]});
-            if (it != merge_map_.end()) {
+            auto it = merge_map_->find({current[i], current[i + 1]});
+            if (it != merge_map_->end()) {
                 int rank = merges_[it->second].rank;
                 if (rank < best_rank) {
                     best_rank = rank;
@@ -367,8 +369,8 @@ std::vector<int> Tokenizer::sp_encode_word(const std::string& word) const {
 // ════════════════════════════════════════════════════════════════
 
 int Tokenizer::lookup(const std::string& token) const {
-    auto it = token_to_id_.find(token);
-    return (it != token_to_id_.end()) ? it->second : -1;
+    auto it = token_to_id_->find(token);
+    return (it != token_to_id_->end()) ? it->second : -1;
 }
 
 std::vector<int> Tokenizer::encode(const std::string& text) const {
@@ -388,8 +390,8 @@ std::vector<int> Tokenizer::encode(const std::string& text) const {
 
     for (const auto& piece : pieces) {
         // Check if it's a special/added token
-        auto ait = added_tokens_.find(piece);
-        if (ait != added_tokens_.end()) {
+        auto ait = added_tokens_->find(piece);
+        if (ait != added_tokens_->end()) {
             result.push_back(ait->second);
             continue;
         }
@@ -483,8 +485,8 @@ std::string Tokenizer::decode(const std::vector<int>& ids) const {
         if (piece.empty()) continue;
 
         // Check for special/added token
-        auto ait = added_tokens_.find(piece);
-        if (ait != added_tokens_.end()) continue;
+        auto ait = added_tokens_->find(piece);
+        if (ait != added_tokens_->end()) continue;
 
         if (is_sp) {
             // SentencePiece: ▁ → space

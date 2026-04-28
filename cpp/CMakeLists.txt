@@ -6,13 +6,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# ── OpenMP for multi-threaded gemv / attention ──
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    message(STATUS "OpenMP:          YES (${OpenMP_CXX_VERSION})")
-else()
-    message(STATUS "OpenMP:          NO (single-threaded fallback)")
-endif()
+# ── OpenMP DISABLED ──
+# GCC on ARM64 auto-enables -flto via -fopenmp, which causes ODR violations
+# with pybind11's std::string ABI. VibeBlade uses per-thread parallelism
+# via its Python async layer instead.
+message(STATUS "OpenMP:          NO (disabled — LTO/ODR conflict)")
 
 # ── Find dependencies ──
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development NumPy)
@@ -111,6 +109,9 @@ message(STATUS "AVX2:            ${HAS_AVX2}")
 message(STATUS "NEON FP16:       ${HAS_NEON_FP16}")
 
 # ── Build module ──
+# Disable LTO explicitly so pybind11_add_module does NOT inject pybind11::lto
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+
 pybind11_add_module(_vibeblade_native
     src/bindings.cpp
     src/fp16_compat.cpp
@@ -134,23 +135,20 @@ target_include_directories(_vibeblade_native PRIVATE
 
 # Set optimization flags — Release uses -O3 + LTO + OpenMP
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(_vibeblade_native PRIVATE -g -O0)
+    target_compile_options(_vibeblade_native PRIVATE -g -O0 -fno-lto)
 else()
-    target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG)
-    # LTO for cross-compilation-unit inlining
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT IPO_SUPPORTED)
-    if(IPO_SUPPORTED)
-        set_property(TARGET _vibeblade_native PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
-        message(STATUS "LTO:             YES")
-    endif()
+    target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG -fno-lto)
+    # LTO disabled — causes ODR violations with pybind11's std::string ABI
+    # on ARM64, leading to segfaults in std::map operations.
+    message(STATUS "LTO:             NO (pybind11 ODR)")
 endif()
 
-# Link OpenMP if available
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(_vibeblade_native PRIVATE OpenMP::OpenMP_CXX)
-    target_compile_definitions(_vibeblade_native PRIVATE TS_OPENMP)
-endif()
+# Ensure no LTO at link time (ODR violation with pybind11)
+target_link_options(_vibeblade_native PRIVATE -fno-lto)
+# Also override any LTO in compile flags
+add_compile_options(-fno-lto)
+
+# OpenMP removed — see note above
 
 # Add SIMD flags
 set(SIMD_FLAGS "")

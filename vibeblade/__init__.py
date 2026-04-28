@@ -288,7 +288,7 @@ class VibeBladeModel:
         head_dim = self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"])
         max_ctx = self.config.get("context_length", 2048)
         self._progress_tick("rope cache", 0, 1)
-        self.cos_cache, self.sin_cache = build_rope_cache(max_ctx, head_dim)
+        self.cos_cache, self.sin_cache = build_rope_cache(head_dim, max_ctx)
 
         # Auto-detect MoE architecture
         self._progress_tick("moe detect", 0, 1)
