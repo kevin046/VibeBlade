@@ -539,15 +539,17 @@ class GGUFLoader:
 
     def _parse_metadata(self) -> None:
         self.metadata: dict[str, Any] = {}
+        report_interval = max(1, self.n_kv // 100)  # report ~100 times
         for i in range(self.n_kv):
             key = self._read_string()
             (vtype,) = struct.unpack("<I", self._read(4))
             self.metadata[key] = self._read_value(vtype)
-            if self._progress_cb and (i + 1) % 100 == 0:
-                self._progress_cb("reading metadata", i + 1, self.n_kv, loading=True)
+            if self._progress_cb and (i + 1) % report_interval == 0:
+                self._progress_cb("metadata", i + 1, self.n_kv, loading=True)
 
     def _parse_tensor_infos(self) -> None:
         self.tensor_infos: list[dict] = []
+        report_interval = max(1, self.n_tensors // 50)  # report ~50 times
         for i in range(self.n_tensors):
             name = self._read_string()
             (n_dims,) = struct.unpack("<I", self._read(4))
@@ -564,8 +566,8 @@ class GGUFLoader:
                 "dtype": dtype_id,
                 "offset": offset,
             })
-            if self._progress_cb and (i + 1) % 50 == 0:
-                self._progress_cb("parsing tensor info", i + 1, self.n_tensors, loading=True)
+            if self._progress_cb and (i + 1) % report_interval == 0:
+                self._progress_cb("tensor info", i + 1, self.n_tensors, loading=True)
 
     # ── Low-level readers ──
 
@@ -1011,6 +1013,111 @@ class _LazyWeights:
 
         return arr
 
+    def _infer_qkv_split(self, qkv_rows: int, hidden_dim: int,
+                          meta_n_heads: int, meta_n_kv_heads,
+                          meta_head_dim: int, meta: dict, arch: str
+                          ) -> tuple[int, int, int]:
+        """Infer correct (n_heads, n_kv_heads, head_dim) for QKV split.
+
+        GGUF metadata sometimes reports wrong head counts (especially for
+        hybrid attention+SSM models like Qwen3.6).  This method validates
+        against the actual tensor shape and falls back to brute-force
+        inference when metadata doesn't match.
+
+        Returns: (n_heads, n_kv_heads, head_dim)
+        """
+        # 1. Try metadata values directly
+        expected = (meta_n_heads + 2 * meta_n_kv_heads) * meta_head_dim
+        if expected == qkv_rows:
+            return meta_n_heads, meta_n_kv_heads, meta_head_dim
+
+        # 2. Try with explicit key_length as head_dim
+        explicit_hd = (meta.get(f"{arch}.attention.key_length") or
+                       meta.get("general.attention.key_length"))
+        if explicit_hd:
+            explicit_hd = int(explicit_hd)
+            expected = (meta_n_heads + 2 * meta_n_kv_heads) * explicit_hd
+            if expected == qkv_rows:
+                return meta_n_heads, meta_n_kv_heads, explicit_hd
+
+        # 3. Try transposed tensor
+        if meta_head_dim > 0 and (meta_n_heads + 2 * meta_n_kv_heads) * meta_head_dim == hidden_dim:
+            return meta_n_heads, meta_n_kv_heads, meta_head_dim
+
+        # 4. Brute-force: try all plausible (head_dim, n_kv) combos
+        #    where n_q = meta_n_heads (or multiples), n_kv divides n_q,
+        #    and (n_q + 2*n_kv) * head_dim == qkv_rows
+        candidates = []
+
+        # Candidate head_dims: divisors of hidden_dim up to hidden_dim,
+        # plus divisors of qkv_rows
+        def divisors(n):
+            if n <= 0:
+                return []
+            divs = set()
+            for i in range(1, min(int(n**0.5) + 1, 257)):
+                if n % i == 0:
+                    divs.add(i)
+                    divs.add(n // i)
+            return sorted(divs)
+
+        head_dim_candidates = set(divisors(hidden_dim)) | set(divisors(qkv_rows))
+        head_dim_candidates = [hd for hd in head_dim_candidates
+                               if 16 <= hd <= hidden_dim and qkv_rows % hd == 0]
+
+        total_head_slots = qkv_rows  # will be divided by head_dim below
+
+        for hd in sorted(head_dim_candidates):
+            total_heads = qkv_rows // hd
+            # total_heads = n_q + 2*n_kv, where n_kv divides n_q (GQA constraint)
+            for n_kv in range(1, min(total_heads // 3 + 1, 129)):
+                n_q_from_total = total_heads - 2 * n_kv
+                if n_q_from_total <= 0:
+                    continue
+                if n_q_from_total % n_kv != 0:
+                    continue
+                # n_q should be a multiple of meta_n_heads or close
+                if n_q_from_total == meta_n_heads or meta_n_heads == 0:
+                    candidates.append((n_q_from_total, n_kv, hd))
+                    break  # prefer smallest n_kv for this head_dim
+
+        # 5. Also try without GQA constraint (n_kv can be anything)
+        if not candidates:
+            for hd in sorted(head_dim_candidates):
+                total_heads = qkv_rows // hd
+                # Simple: n_q = 2*n_kv (common 2:1 ratio)
+                if total_heads % 4 == 0:
+                    n_kv = total_heads // 4
+                    n_q = total_heads - 2 * n_kv
+                    if n_q > 0 and n_q >= n_kv:
+                        candidates.append((n_q, n_kv, hd))
+                        break
+                # Equal Q, K, V (no GQA): total = 3*n_q
+                if total_heads % 3 == 0:
+                    n_q = total_heads // 3
+                    candidates.append((n_q, n_q, hd))
+                    break
+
+        if candidates:
+            best = candidates[0]
+            logger.info(
+                "QKV split inferred from shape: n_heads=%d, n_kv_heads=%d, head_dim=%d "
+                "(metadata said n_heads=%d, n_kv_heads=%s, head_dim=%d, QKV shape=(%d,%d))",
+                best[0], best[1], best[2],
+                meta_n_heads, meta_n_kv_heads, meta_head_dim, qkv_rows, hidden_dim
+            )
+            return best
+
+        # 6. Last resort: equal 3-way split
+        logger.warning(
+            "QKV split: cannot infer clean dimensions from shape=(%d,%d). "
+            "Falling back to equal 3-way split. Metadata: n_heads=%d, n_kv_heads=%s, head_dim=%d",
+            qkv_rows, hidden_dim, meta_n_heads, meta_n_kv_heads, meta_head_dim
+        )
+        third = qkv_rows // 3
+        hd = third // max(meta_n_heads, 1)
+        return meta_n_heads, meta_n_heads, hd
+
     def _load_split_qkv(self, q_key: str, real_key: str) -> np.ndarray:
         """Load fused attn_qkv.weight and split into Q, K, V arrays."""
         if q_key in self._cache:
@@ -1032,56 +1139,35 @@ class _LazyWeights:
         n_kv_heads = (meta.get(f"{arch}.attention.head_count_kv") or
                       meta.get("general.attention.head_count_kv"))
 
-        if n_heads is None or n_kv_heads is None:
+        if n_heads is None:
             raise ValueError(
                 f"Cannot split fused QKV: missing head_count in metadata. "
-                f"arch={arch!r}, have n_heads={n_heads}, n_kv_heads={n_kv_heads}. "
-                f"QKV shape={qkv.shape}"
+                f"arch={arch!r}, QKV shape={qkv.shape}"
             )
         n_heads = int(n_heads)
-        n_kv_heads = int(n_kv_heads)
 
         hidden_dim = qkv.shape[1]
-        head_dim = hidden_dim // n_heads
+        qkv_rows = qkv.shape[0]
 
-        # Validate dimensions
-        expected_rows = (n_heads + 2 * n_kv_heads) * head_dim
-        if expected_rows != qkv.shape[0]:
-            # Try alternative: maybe rows = hidden_dim and cols = QKV dim (transposed)
-            # Or maybe head_dim is stored separately
-            alt_head_dim = meta.get(f"{arch}.attention.key_length") or \
-                           meta.get("general.attention.key_length")
-            if alt_head_dim:
-                alt_head_dim = int(alt_head_dim)
-                alt_rows = (n_heads + 2 * n_kv_heads) * alt_head_dim
-                if alt_rows == qkv.shape[0]:
-                    head_dim = alt_head_dim
-                    expected_rows = alt_rows
-                elif alt_rows == qkv.shape[1]:
-                    # Tensor is transposed
-                    qkv = qkv.T
-                    hidden_dim = qkv.shape[1]
-                    head_dim = alt_head_dim
-                    expected_rows = alt_rows
+        # Determine head_dim: prefer explicit key_length, else hidden_dim // n_heads
+        explicit_head_dim = (meta.get(f"{arch}.attention.key_length") or
+                             meta.get("general.attention.key_length"))
+        head_dim = int(explicit_head_dim) if explicit_head_dim else hidden_dim // n_heads
 
-        if expected_rows != qkv.shape[0]:
-            logger.warning(
-                "QKV split dimension mismatch: tensor shape=%s, "
-                "expected rows=%d (n_heads=%d, n_kv_heads=%d, head_dim=%d). "
-                "Falling back to equal 3-way split.",
-                qkv.shape, expected_rows, n_heads, n_kv_heads, head_dim
-            )
-            # Fallback: split QKV into 3 equal parts
-            third = qkv.shape[0] // 3
-            q_arr = qkv[:third]
-            k_arr = qkv[third:2*third]
-            v_arr = qkv[2*third:]
-        else:
-            q_size = n_heads * head_dim
-            k_size = n_kv_heads * head_dim
-            q_arr = qkv[:q_size]
-            k_arr = qkv[q_size:q_size + k_size]
-            v_arr = qkv[q_size + k_size:]
+        # Try to find a valid (n_q, n_kv, head_dim) that matches qkv_rows
+        split = self._infer_qkv_split(qkv_rows, hidden_dim, n_heads, n_kv_heads, head_dim, meta, arch)
+        n_heads, n_kv_heads, head_dim = split
+
+        q_size = n_heads * head_dim
+        k_size = n_kv_heads * head_dim
+        q_arr = qkv[:q_size]
+        k_arr = qkv[q_size:q_size + k_size]
+        v_arr = qkv[q_size + k_size:]
+
+        # Store inferred dimensions for downstream use
+        self._qkv_head_dim = head_dim
+        self._qkv_n_heads = n_heads
+        self._qkv_n_kv_heads = n_kv_heads
 
         # Derive K/V canonical key names from Q key
         # e.g., "blk.0.attn_q.weight" → "blk.0.attn_k.weight", "blk.0.attn_v.weight"

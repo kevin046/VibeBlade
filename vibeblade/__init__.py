@@ -248,6 +248,11 @@ class VibeBladeModel:
     
     def _setup_components(self):
         """Initialize scheduler, cache, generator, and MoE components."""
+        # If lazy weights with fused QKV, probe the actual tensor to get
+        # correct attention dimensions (metadata may be wrong for hybrid models)
+        if isinstance(self.weights, _LazyWeights) and self.weights._has_fused_qkv:
+            self._probe_qkv_dimensions()
+
         self.scheduler = PowerInferScheduler(
             hidden_size=self.config["hidden_dim"],
             num_layers=self.config["num_layers"],
@@ -256,14 +261,14 @@ class VibeBladeModel:
         self.cache = KVCache(
             num_layers=self.config["num_layers"],
             num_heads=self.config["num_heads"],
-            head_dim=self.config["hidden_dim"] // self.config["num_heads"],
+            head_dim=self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"]),
             max_seq_len=self.config.get("context_length", 2048),
             quantize=True,
         )
         self.generator = TextGenerator(temperature=1.0, top_k=50, top_p=0.9)
 
         # Build RoPE cache (cos/sin tables for rotary positional embeddings)
-        head_dim = self.config["hidden_dim"] // self.config["num_heads"]
+        head_dim = self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"])
         max_ctx = self.config.get("context_length", 2048)
         self.cos_cache, self.sin_cache = build_rope_cache(max_ctx, head_dim)
 
@@ -276,6 +281,129 @@ class VibeBladeModel:
             self.config["expert_dim"] = self.moe_config.expert_dim
             print(f"   MoE: {self.moe_config.num_experts} experts "
                   f"(top-{self.moe_config.num_active} per token)")
+
+    def _probe_qkv_dimensions(self):
+        """Probe the fused QKV tensor to infer actual attention dimensions.
+
+        For hybrid attention+SSM models (e.g. Qwen3.6), GGUF metadata may
+        report wrong head counts.  Reading just the tensor *shape* from
+        the GGUF header (no dequant) lets us correct the config.
+        """
+        arch = self.metadata.get("general.architecture", "")
+        meta = self.metadata
+
+        # Find the QKV and attn_gate tensor shapes (no dequant needed)
+        qkv_shape = None
+        gate_shape = None
+        for ti in self.weights._loader.tensor_infos:
+            name = ti["name"]
+            if "attn_qkv" in name and len(ti["shape"]) == 2 and ".0." in name:
+                qkv_shape = ti["shape"]
+            if "attn_gate" in name and len(ti["shape"]) == 2 and ".0." in name:
+                gate_shape = ti["shape"]
+
+        if qkv_shape is None:
+            return
+
+        qkv_rows, hidden_dim = qkv_shape
+
+        n_heads_meta = int(meta.get(f"{arch}.attention.head_count", 0) or 0)
+        n_kv_meta = int(meta.get(f"{arch}.attention.head_count_kv", 0) or 0)
+        head_dim_meta = hidden_dim // max(n_heads_meta, 1)
+
+        # Get all valid candidates from _infer_qkv_split
+        candidates = self._collect_qkv_candidates(
+            qkv_rows, hidden_dim, n_heads_meta, n_kv_meta, head_dim_meta, meta, arch
+        )
+
+        # Cross-validate with attn_gate (output projection) shape if available
+        # attn_gate.weight is (hidden_dim, n_heads * head_dim) — the cols tell us
+        # the attention output dimension, which must equal n_heads * head_dim
+        if gate_shape is not None and len(gate_shape) == 2:
+            attn_out_dim = gate_shape[1]  # n_heads * head_dim
+            validated = []
+            for n_h, n_kv, hd in candidates:
+                if n_h * hd == attn_out_dim:
+                    validated.append((n_h, n_kv, hd))
+            if validated:
+                candidates = validated
+
+        if not candidates:
+            return
+
+        n_heads, n_kv_heads, head_dim = candidates[0]
+
+        old_heads = self.config["num_heads"]
+        old_kv = self.config.get("num_kv_heads", old_heads)
+        old_hd = self.config["hidden_dim"] // max(old_heads, 1)
+
+        if n_heads != old_heads or n_kv_heads != old_kv:
+            print(f"   Attention: QKV probe corrected heads "
+                  f"{old_heads}→{n_heads}, "
+                  f"kv_heads {old_kv}→{n_kv_heads}, "
+                  f"head_dim {old_hd}→{head_dim}")
+            self.config["num_heads"] = n_heads
+            self.config["num_kv_heads"] = n_kv_heads
+            self.config["head_dim"] = head_dim
+
+    def _collect_qkv_candidates(self, qkv_rows, hidden_dim,
+                                 n_heads_meta, n_kv_meta, head_dim_meta,
+                                 meta, arch):
+        """Collect all valid (n_heads, n_kv_heads, head_dim) candidates."""
+        candidates = []
+
+        # 1. Metadata values directly
+        hd = head_dim_meta
+        if (n_heads_meta + 2 * n_kv_meta) * hd == qkv_rows and n_heads_meta > 0 and n_kv_meta > 0:
+            candidates.append((n_heads_meta, n_kv_meta, hd))
+
+        # 2. With explicit key_length as head_dim
+        explicit_hd = meta.get(f"{arch}.attention.key_length")
+        if explicit_hd:
+            explicit_hd = int(explicit_hd)
+            if (n_heads_meta + 2 * n_kv_meta) * explicit_hd == qkv_rows:
+                candidates.append((n_heads_meta, n_kv_meta, explicit_hd))
+
+        # 3. Brute-force: enumerate plausible splits
+        def divisors(n):
+            if n <= 0:
+                return []
+            divs = set()
+            for i in range(1, min(int(n**0.5) + 1, 257)):
+                if n % i == 0:
+                    divs.add(i)
+                    divs.add(n // i)
+            return sorted(divs)
+
+        head_dim_candidates = [hd for hd in set(divisors(hidden_dim)) | set(divisors(qkv_rows))
+                               if 16 <= hd <= hidden_dim and qkv_rows % hd == 0]
+
+        for hd in sorted(head_dim_candidates):
+            total_heads = qkv_rows // hd
+            for n_kv in range(1, min(total_heads // 3 + 1, 129)):
+                n_q = total_heads - 2 * n_kv
+                if n_q <= 0:
+                    continue
+                # Prefer configs where n_q matches metadata or n_kv divides n_q (GQA)
+                if n_q % n_kv == 0:
+                    if n_q == n_heads_meta or n_heads_meta == 0:
+                        candidates.append((n_q, n_kv, hd))
+                        break
+
+        # 4. Without GQA constraint
+        if not candidates or (len(candidates) == 1 and candidates[0] == (n_heads_meta, n_kv_meta, head_dim_meta)):
+            for hd in sorted(head_dim_candidates):
+                total_heads = qkv_rows // hd
+                if total_heads % 4 == 0:
+                    n_kv = total_heads // 4
+                    n_q = total_heads - 2 * n_kv
+                    if n_q > 0:
+                        candidates.append((n_q, n_kv, hd))
+                if total_heads % 3 == 0:
+                    n_q = total_heads // 3
+                    candidates.append((n_q, n_q, hd))
+
+        return candidates
     
     def generate(
         self,
