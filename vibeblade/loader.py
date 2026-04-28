@@ -192,17 +192,25 @@ def _dequant_q5_1(block: bytes, block_size: int = 32) -> np.ndarray:
 # Placeholder — actual wrapper after _BATCH_DEQUANT dict
 
 
-def _unpack_6bit(packed: np.ndarray, n_values: int) -> np.ndarray:
-    """Unpack *n_values* 6-bit integers from a packed byte array."""
-    bits = np.unpackbits(packed)           # flat bit array
+def _unpack_6bit_batch(packed: np.ndarray, n_values: int) -> np.ndarray:
+    """Unpack n_values 6-bit integers from (n_blocks, nbytes) packed array.
+
+    Fully vectorized — no Python loops over blocks.
+    """
+    n_blocks = packed.shape[0]
+    bits = np.unpackbits(packed.reshape(-1)).reshape(n_blocks, -1)
     needed = n_values * 6
-    if len(bits) < needed:
-        bits = np.pad(bits, (0, needed - len(bits)))
-    # Extract 6-bit values by shifting and masking
-    values = np.zeros(n_values, dtype=np.float32)
+    if bits.shape[1] < needed:
+        bits = np.pad(bits, ((0, 0), (0, needed - bits.shape[1])))
+    values = np.zeros((n_blocks, n_values), dtype=np.float32)
     for j in range(6):
-        values += bits[j::6][:n_values].astype(np.float32) * (1 << j)
+        values += bits[:, j::6][:, :n_values].astype(np.float32) * (1 << j)
     return values
+
+
+def _unpack_6bit(packed: np.ndarray, n_values: int) -> np.ndarray:
+    """Unpack n_values 6-bit integers from a single packed byte array."""
+    return _unpack_6bit_batch(packed.reshape(1, -1), n_values)[0]
 
 
 # ── Batch K-quant dequantization (processes ALL blocks at once) ──────────────
@@ -216,43 +224,31 @@ def _batch_dequant_q2_k(raw: bytes, n_blocks: int) -> np.ndarray:
     d = np.where(np.isfinite(d), d, 0.0)
     dmin = blocks[:, 2].astype(np.float32)
 
-    # 16 × 4-bit scales from bytes 3-11 (32 nibbles, take first 16)
-    sc_packed = blocks[:, 3:11]
-    scales = np.zeros((n_blocks, 16), dtype=np.float32)
-    for b in range(n_blocks):
-        lo = (sc_packed[b] & 0x0F).astype(np.float32)
-        hi = ((sc_packed[b] >> 4) & 0x0F).astype(np.float32)
-        scales[b, 0::2] = lo[:8]
-        scales[b, 1::2] = hi[:8]
+    # 16 × 4-bit scales from bytes 3-10 (8 bytes → 16 nibbles)
+    sc_packed = blocks[:, 3:11]  # (n_blocks, 8)
+    lo = (sc_packed & 0x0F).astype(np.float32)
+    hi = ((sc_packed >> 4) & 0x0F).astype(np.float32)
+    scales = np.empty((n_blocks, 16), dtype=np.float32)
+    scales[:, 0::2] = lo
+    scales[:, 1::2] = hi
 
-    # quants: bytes 12-83 → 32 groups of 2+1 bits
-    qs_packed = blocks[:, 12:44]  # 32 bytes → 32 groups of 2 low bits
+    # 32 groups of 2-bit quants from bytes 12-43
+    qs_packed = blocks[:, 12:44]  # (n_blocks, 32)
+    qs_lo = np.empty((n_blocks, 32), dtype=np.float32)
+    qs_lo[:, 0::4] = (qs_packed & 0x03).astype(np.float32)
+    qs_lo[:, 1::4] = ((qs_packed >> 2) & 0x03).astype(np.float32)
+    qs_lo[:, 2::4] = ((qs_packed >> 4) & 0x03).astype(np.float32)
+    qs_lo[:, 3::4] = ((qs_packed >> 6) & 0x03).astype(np.float32)
 
-    # Extract 2-bit pairs from qs
-    qs_lo = np.zeros((n_blocks, 32), dtype=np.float32)
-    for b in range(n_blocks):
-        pk = qs_packed[b]
-        qs_lo[b, 0::4] = (pk & 0x03).astype(np.float32)
-        qs_lo[b, 1::4] = ((pk >> 2) & 0x03).astype(np.float32)
-        qs_lo[b, 2::4] = ((pk >> 4) & 0x03).astype(np.float32)
-        qs_lo[b, 3::4] = ((pk >> 6) & 0x03).astype(np.float32)
+    # 1-bit signs from bytes 76-83
+    signs = np.unpackbits(blocks[:, 76:84].reshape(-1)).reshape(
+        n_blocks, 64).astype(np.float32)[:, :64]
 
-    # Extract 1-bit signs from remaining bytes
-    signs_packed = blocks[:, 76:84]
-    signs = np.zeros((n_blocks, 64), dtype=np.float32)
-    for b in range(n_blocks):
-        signs[b] = np.unpackbits(signs_packed[b])[:64].astype(np.float32)
+    # 32 groups × 8 = 256 values: out = (qs_lo + signs) * 4
+    qs_expanded = np.repeat(qs_lo, 8, axis=1)  # (n_blocks, 256)
+    out = (qs_expanded + signs[:, :256]) * 4.0
 
-    # 32 groups × 8 = 256 values
-    out = np.zeros((n_blocks, 256), dtype=np.float32)
-    for g in range(32):
-        base = qs_lo[:, g:g+1] * 4.0
-        for bit in range(8):
-            idx = g * 8 + bit
-            if idx < 256:
-                out[:, idx] = base[:, 0] + signs[:, idx] * 4.0
-
-    # Apply scales
+    # Apply scales (each of 16 scales repeated 16 times)
     sc_expanded = np.repeat(scales, 16, axis=1)
     return (out * sc_expanded * d[:, np.newaxis]) + dmin[:, np.newaxis]
 
@@ -265,31 +261,26 @@ def _batch_dequant_q3_k(raw: bytes, n_blocks: int) -> np.ndarray:
     d = np.frombuffer(blocks[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32)
     d = np.where(np.isfinite(d), d, 0.0)
 
-    # scales: 16 bytes → 16 6-bit values
-    scales = np.zeros((n_blocks, 16), dtype=np.float32)
-    for b in range(n_blocks):
-        scales[b] = _unpack_6bit(blocks[b, 34:50], 16)
+    # scales: 16 bytes → 16 6-bit values (vectorized across all blocks)
+    scales = _unpack_6bit_batch(blocks[:, 34:50], 16)  # (n_blocks, 16)
 
-    # h bits: 32 bytes
-    h_bits = np.zeros((n_blocks, 256), dtype=np.float32)
-    for b in range(n_blocks):
-        h = blocks[b, 50:82]
-        for i in range(8):
-            h_bits[b, i::8] = ((h >> (7 - i)) & 1).astype(np.float32)
+    # h bits: 32 bytes → 256 bits (bit 7→pos 0, bit 0→pos 7, etc.)
+    h = blocks[:, 50:82]  # (n_blocks, 32)
+    h_shifts = np.arange(7, -1, -1, dtype=np.uint32)  # [7,6,5,...,0]
+    h_bits = ((h.astype(np.uint32)[:, :, np.newaxis] >> h_shifts) & 1
+              ).astype(np.float32).transpose(0, 2, 1).reshape(n_blocks, 256)
 
-    # qs_hi: 64 bytes → upper 2 bits
-    qs_hi = np.zeros((n_blocks, 256), dtype=np.float32)
-    shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
-    for b in range(n_blocks):
-        hi_bytes = blocks[b, 82:146].astype(np.uint32)
-        qs_hi[b] = ((hi_bytes[:, np.newaxis] >> shifts) & 3).astype(np.float32).ravel()
+    # qs_hi: 64 bytes → upper 2 bits (4 values per byte)
+    hi_bytes = blocks[:, 82:146].astype(np.uint32)  # (n_blocks, 64)
+    hi_shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
+    qs_hi = ((hi_bytes[:, :, np.newaxis] >> hi_shifts) & 3
+             ).astype(np.float32).reshape(n_blocks, 256)
 
     qs = qs_hi * 2.0 + h_bits
 
-    sc_idx = np.tile(np.repeat(np.arange(16), 16), (n_blocks, 1))
-    sc_vals = scales[:, sc_idx[0]].reshape(n_blocks, 256)
-    for b in range(n_blocks):
-        sc_vals[b] = scales[b][np.repeat(np.arange(16), 16)]
+    # Each of 16 scales repeats 16 times
+    sc_idx = np.repeat(np.arange(16), 16)
+    sc_vals = scales[:, sc_idx]  # (n_blocks, 256)
 
     return (qs - 4.0) * sc_vals * d[:, np.newaxis]
 
@@ -308,10 +299,8 @@ def _batch_dequant_q4_k(raw: bytes, n_blocks: int) -> np.ndarray:
     d = np.where(np.isfinite(d), d, 0.0)
     dmin = blocks[:, 2].astype(np.float32)
 
-    # scales: 8 bytes → 8 6-bit values
-    scales = np.zeros((n_blocks, 8), dtype=np.float32)
-    for b in range(n_blocks):
-        scales[b] = _unpack_6bit(blocks[b, 4:12], 8)
+    # scales: 8 bytes → 8 6-bit values (vectorized across all blocks)
+    scales = _unpack_6bit_batch(blocks[:, 4:12], 8)  # (n_blocks, 8)
 
     # quants: 128 bytes → 256 nibbles (interleaved)
     qs = blocks[:, 16:144]  # (n_blocks, 128)
@@ -335,10 +324,8 @@ def _batch_dequant_q5_k(raw: bytes, n_blocks: int) -> np.ndarray:
     d = np.where(np.isfinite(d), d, 0.0)
     dmin = blocks[:, 2].astype(np.float32)
 
-    # scales: 8 bytes → 8 6-bit values
-    scales = np.zeros((n_blocks, 8), dtype=np.float32)
-    for b in range(n_blocks):
-        scales[b] = _unpack_6bit(blocks[b, 4:12], 8)
+    # scales: 8 bytes → 8 6-bit values (vectorized)
+    scales = _unpack_6bit_batch(blocks[:, 4:12], 8)  # (n_blocks, 8)
 
     # qs: 128 bytes (64 low + 64 high nibbles)
     qs = blocks[:, 16:80]
@@ -347,12 +334,11 @@ def _batch_dequant_q5_k(raw: bytes, n_blocks: int) -> np.ndarray:
     qs_all[:, 0::2] = np.concatenate([(qs & 0x0F), (qs2 & 0x0F)], axis=1).astype(np.float32)
     qs_all[:, 1::2] = np.concatenate([((qs >> 4) & 0x0F), ((qs2 >> 4) & 0x0F)], axis=1).astype(np.float32)
 
-    # qh: 32 bytes → 1 high bit per value
-    qh_bits = np.zeros((n_blocks, 256), dtype=np.float32)
-    for b in range(n_blocks):
-        qh = blocks[b, 144:176]
-        for i in range(8):
-            qh_bits[b, i::8] = ((qh >> (7 - i)) & 1).astype(np.float32)
+    # qh: 32 bytes → 1 high bit per value (vectorized)
+    qh = blocks[:, 144:176]  # (n_blocks, 32)
+    qh_shifts = np.arange(7, -1, -1, dtype=np.uint32)
+    qh_bits = ((qh.astype(np.uint32)[:, :, np.newaxis] >> qh_shifts) & 1
+               ).astype(np.float32).transpose(0, 2, 1).reshape(n_blocks, 256)
 
     val = qs_all + qh_bits * 16.0
 
@@ -379,12 +365,11 @@ def _batch_dequant_q6_k(raw: bytes, n_blocks: int) -> np.ndarray:
     ql_low[:, 0::2] = (ql & 0x0F).astype(np.float32)
     ql_low[:, 1::2] = ((ql >> 4) & 0x0F).astype(np.float32)
 
-    # qh: 2-bit high quants
-    qh_high = np.empty((n_blocks, 256), dtype=np.float32)
+    # qh: 2-bit high quants (vectorized — no per-block loop)
     shifts = np.array([6, 4, 2, 0], dtype=np.uint32)
-    for b in range(n_blocks):
-        qh_u32 = qh[b].astype(np.uint32)
-        qh_high[b] = ((qh_u32[:, np.newaxis] >> shifts) & 3).astype(np.float32).ravel()
+    qh_u32 = qh.astype(np.uint32)  # (n_blocks, 64)
+    qh_high = ((qh_u32[:, :, np.newaxis] >> shifts) & 3
+               ).astype(np.float32).reshape(n_blocks, 256)
 
     q = ql_low + qh_high * 16.0
     sc = sc_raw.astype(np.float32)
@@ -677,13 +662,36 @@ class GGUFLoader:
 
         # Fast path: vectorized batch dequant for K-quants
         if tid in _BATCH_DEQUANT:
-            if progress_cb:
-                progress_cb(tensor_name, n_blocks // 2, n_blocks, loading=True)
             batch_fn = _BATCH_DEQUANT[tid]
-            raw_bytes = bytes(raw[:n_blocks * block_bytes])
-            out = batch_fn(raw_bytes, n_blocks).ravel()[:n_elements]
+            import sys
+
+            # Chunk large tensors so progress bar updates between chunks
+            CHUNK_SIZE = 4096
+            if n_blocks <= CHUNK_SIZE:
+                # Small tensor — process in one shot
+                if progress_cb:
+                    progress_cb(tensor_name, n_blocks // 2, n_blocks, loading=True)
+                    sys.stdout.flush()
+                raw_bytes = bytes(raw[:n_blocks * block_bytes])
+                out = batch_fn(raw_bytes, n_blocks).ravel()[:n_elements]
+            else:
+                # Large tensor — chunk and report progress
+                out_parts = []
+                for chunk_start in range(0, n_blocks, CHUNK_SIZE):
+                    chunk_end = min(chunk_start + CHUNK_SIZE, n_blocks)
+                    chunk_n = chunk_end - chunk_start
+                    start_byte = chunk_start * block_bytes
+                    end_byte = chunk_end * block_bytes
+                    chunk_raw = bytes(raw[start_byte:end_byte])
+                    out_parts.append(batch_fn(chunk_raw, chunk_n))
+                    if progress_cb:
+                        progress_cb(tensor_name, chunk_end, n_blocks, loading=True)
+                        sys.stdout.flush()
+                out = np.concatenate(out_parts).ravel()[:n_elements]
+
             if progress_cb:
                 progress_cb(tensor_name, n_blocks, n_blocks, loading=True)
+                sys.stdout.flush()
             return out
 
         # Slow path: per-block dequant for small quant types (Q4_0, Q8_0, etc.)
@@ -721,7 +729,9 @@ class GGUFLoader:
             tensors[info["name"]] = self.load_tensor(info["name"], dtype,
                                                      progress_cb=_wrapped)
             if progress_cb:
+                import sys
                 progress_cb(info["name"], idx + 1, total, loading=True)
+                sys.stdout.flush()
         return tensors
 
     def close(self) -> None:
