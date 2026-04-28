@@ -3,9 +3,9 @@
 Pure standard CLI terminal, no external dependencies.
 
 Usage:
-    python -m vibeblade chat
-    python -m vibeblade chat --config vibeblade.yaml
-    python -m vibeblade chat --model model.gguf
+ python -m vibeblade chat
+ python -m vibeblade chat --config vibeblade.yaml
+ python -m vibeblade chat --model model.gguf
 """
 
 from __future__ import annotations
@@ -94,6 +94,11 @@ class ChatHistory:
         return len(self.messages)
 
 
+def _approx_tokens(text: str) -> int:
+    """Very rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
 # ── Chat REPL ────────────────────────────────────────────────────────────────
 
 def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
@@ -104,12 +109,12 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
 
     # Print banner
     print()
-    print(f"  {_c(_b('VibeBlade Chat'))}")
-    print(f"  {_d('Model:')} {model_path}")
-    print(f"  {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
+    print(f" {_c(_b('VibeBlade Chat'))}")
+    print(f" {_d('Model:')} {model_path}")
+    print(f" {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
     print()
-    print(f"  {_d('Commands:')} /help  /clear  /reset  /quit  /undo")
-    print(f"  {_d('───────────────────────────────────────────')}")
+    print(f" {_d('Commands:')} /help /clear /reset /quit /undo")
+    print(f" {_d('───────────────────────────────────────────')}")
     print()
 
     # Load model with progress
@@ -127,36 +132,36 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             bar = _g("█" * filled) + _d("░" * (bar_len - filled))
             short_name = name.split(".")[-1][:24] if name else ""
             sys.stdout.write(
-                f"\r  {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')}  {short_name:<24}"
+                f"\r {bar} {_b(f'{pct:5.1%}')} {_d(f'{elapsed:5.1f}s')} {short_name:<24}"
             )
             sys.stdout.flush()
             last_tensor[0] = name
 
     try:
         from . import VibeBladeModel
-        model = VibeBladeModel(model_path, progress_cb=_progress)
     except ImportError:
         from vibeblade import VibeBladeModel
-        model = VibeBladeModel(model_path, progress_cb=_progress)
+
+    model = VibeBladeModel(model_path, progress_cb=_progress)
 
     elapsed = time.time() - load_start
-    print(f"\r  {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')}  {'done':<24}  ")
+    print(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<24} ")
 
     # Enable MoE if detected
     if model.is_moe:
         model.enable_moe_hot_cold(hot_threshold=0.15)
         print()
-        print("  MoE detected - hot/cold split enabled")
+        print(" MoE detected - hot/cold split enabled")
 
     print()
-    print(f"  {_g('Model loaded. Start chatting!')}")
+    print(f" {_g('Model loaded. Start chatting!')}")
     print()
 
     while True:
         try:
-            user_input = input(f"  {_c(_b('You'))}: ").strip()
+            user_input = input(f" {_c(_b('You'))}: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print(f"\n  {_y('Goodbye!')}")
+            print(f"\n {_y('Goodbye!')}")
             break
 
         if not user_input:
@@ -168,17 +173,17 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             cmd0 = cmd[0] if cmd else ""
 
             if cmd0 in ("/quit", "/exit", "/q"):
-                print(f"  {_y('Goodbye!')}")
+                print(f" {_y('Goodbye!')}")
                 break
 
             elif cmd0 == "/clear":
                 history.clear()
-                print(f"  {_d('Chat history cleared.')}")
+                print(f" {_d('Chat history cleared.')}")
                 continue
 
             elif cmd0 == "/reset":
                 history.clear()
-                print(f"  {_d('Chat history and KV cache reset.')}")
+                print(f" {_d('Chat history and KV cache reset.')}")
                 continue
 
             elif cmd0 == "/undo":
@@ -187,54 +192,75 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
                     role = removed["role"]
                     snippet = removed["content"][:50]
                     msg = f"Undid: [{role}] {snippet}..."
-                    print(f"  {_d(msg)}")
+                    print(f" {_d(msg)}")
                 else:
-                    print(f"  {_d('Nothing to undo.')}")
+                    print(f" {_d('Nothing to undo.')}")
                 continue
 
             elif cmd0 == "/help":
                 print()
-                print(f"  {_b('Available commands:')}")
-                print("    /help   - Show this help")
-                print("    /clear  - Clear chat history")
-                print("    /reset  - Reset chat and model state")
-                print("    /undo   - Remove last message")
-                print("    /quit   - Exit chat")
+                print(f" {_b('Available commands:')}")
+                print(" /help - Show this help")
+                print(" /clear - Clear chat history")
+                print(" /reset - Reset chat and model state")
+                print(" /undo - Remove last message")
+                print(" /quit - Exit chat")
                 print()
                 continue
 
             elif cmd0 == "/tokens":
                 info = f"Turns: {history.turn_count}, Response tokens cap: {max_tokens}"
-                print(f"  {_d(info)}")
+                print(f" {_d(info)}")
                 continue
 
             else:
                 hint = f"Unknown command: {cmd0}. Type /help for available commands."
-                print(f"  {_y(hint)}")
+                print(f" {_y(hint)}")
                 continue
 
         # Build prompt from history
         history.add_user(user_input)
         prompt = history.format_context()
+        prompt_toks = _approx_tokens(prompt)
 
-        # Generate response
+        # Generate response with timing
+        gen_start = time.time()
+
+        # Collect output tokens via streaming callback
+        output_tokens = []
+
+        def _on_token(token_id, pos):
+            output_tokens.append(token_id)
+            if stream:
+                try:
+                    print(chr(token_id), end="", flush=True)
+                except (ValueError, OverflowError):
+                    pass
+
         try:
-            print(f"  {_g(_b('Assistant'))}: ", end="", flush=True)
-            response = model.generate(
+            print(f" {_g(_b('Assistant'))}: ", end="", flush=True)
+            stream = True
+            result, tps = model.generate(
                 prompt=prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
                 stream=True,
+                on_token=_on_token,
             )
+            gen_elapsed = time.time() - gen_start
+            gen_toks = len(output_tokens)
+
+            # LM Studio style: prompt tokens | gen time | t/s
             print()
-            history.add_assistant(response)
+            print(f" {_d(f'{prompt_toks} prompt | {gen_elapsed:.2f}s | {tps:.2f} t/s')}")
+
+            history.add_assistant(result)
             response_count += 1
 
         except Exception as e:
-            print(f"\n  {_r('Error:')} {e}")
-            # Remove the failed user message from history
+            print(f"\n {_r('Error:')} {e}")
             if history.messages and history.messages[-1]["role"] == "user":
                 history.messages.pop()
             continue
@@ -246,12 +272,12 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             cpu_lat = f"{stats.cpu_latency_ms:.1f}ms"
             hit = f"{stats.hit_rate:.1%}"
             msg = f"MoE Stats: GPU hit rate {hit}, GPU {gpu_lat} / CPU {cpu_lat}"
-            print(f"  {_d('-- ' + msg + ' --')}")
+            print(f" {_d('-- ' + msg + ' --')}")
 
     # Final stats
     if model.is_moe and model.moe_executor is not None:
         stats = model.moe_executor.stats
-        print(f"\n  {_b('Session Stats:')}")
-        print(f"  Turns: {history.turn_count // 2}")
-        print(f"  GPU hits: {stats.gpu_hits} | CPU falls: {stats.cpu_falls}")
-        print(f"  Hit rate: {stats.hit_rate:.1%}")
+        print(f"\n {_b('Session Stats:')}")
+        print(f" Turns: {history.turn_count // 2}")
+        print(f" GPU hits: {stats.gpu_hits} | CPU falls: {stats.cpu_falls}")
+        print(f" Hit rate: {stats.hit_rate:.1%}")
