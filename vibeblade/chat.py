@@ -250,7 +250,6 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
                 on_token=_on_token,
             )
             gen_elapsed = time.time() - gen_start
-            gen_toks = len(output_tokens)
 
             # LM Studio style: prompt tokens | gen time | t/s
             print()
