@@ -269,8 +269,8 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             continue
 
         # Print stats every 5 responses
-        if response_count % 5 == 0 and model.is_moe and model.moe_executor is not None:
-            stats = model.moe_executor.stats
+        if response_count % 5 == 0 and model.is_moe and model._moe_executor is not None:
+            stats = model._moe_executor.stats
             gpu_lat = f"{stats.gpu_latency_ms:.1f}ms"
             cpu_lat = f"{stats.cpu_latency_ms:.1f}ms"
             hit = f"{stats.hit_rate:.1%}"
@@ -278,8 +278,8 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
             print(f" {_d('-- ' + msg + ' --')}")
 
     # Final stats
-    if model.is_moe and model.moe_executor is not None:
-        stats = model.moe_executor.stats
+    if model.is_moe and model._moe_executor is not None:
+        stats = model._moe_executor.stats
         print(f"\n {_b('Session Stats:')}")
         print(f" Turns: {history.turn_count // 2}")
         print(f" GPU hits: {stats.gpu_hits} | CPU falls: {stats.cpu_falls}")
