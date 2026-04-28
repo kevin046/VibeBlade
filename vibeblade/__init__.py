@@ -25,7 +25,7 @@ from .quant import (
 )
 from .cache import KVCache
 from .scheduler import NeuronPredictor, PowerInferScheduler
-from .loader import GGUFLoader, load_model
+from .loader import GGUFLoader, load_model, _LazyWeights
 from .transformer import (
     rms_norm, silu, rope, build_rope_cache,
     attention, ffn_silu,
@@ -219,6 +219,12 @@ class VibeBladeModel:
         print(f"   Backend: {'C++ AVX-512' if _CPP_BACKEND else 'NumPy (pure Python)'}")
         print(f"   Sparse: {'ON' if use_sparse else 'OFF'}")
         print(f"   Hot budget: {hot_budget:.1%}")
+        if hasattr(self.weights, 'memory_info'):
+            mi = self.weights.memory_info()
+            mode = "Lazy" if isinstance(self.weights, _LazyWeights) else "Eager"
+            gpu = " + GPU" if mi.get("gpu_offload") else ""
+            print(f"   Weights: {mode} ({mi['total_tensors']} tensors, "
+                  f"cache {mi['cached_mb']:.0f}/{mi['max_mb']:.0f} MB{gpu})")
     
     def _extract_config(self):
         """Extract model config from GGUF metadata."""
@@ -246,6 +252,7 @@ class VibeBladeModel:
             num_heads=self.config["num_heads"],
             head_dim=self.config["hidden_dim"] // self.config["num_heads"],
             max_seq_len=self.config.get("context_length", 2048),
+            quantize=True,
         )
         self.generator = TextGenerator(temperature=1.0, top_k=50, top_p=0.9)
 

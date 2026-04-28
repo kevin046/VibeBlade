@@ -28,6 +28,14 @@ from typing import Any
 
 import numpy as np
 
+# ── GPU support (optional CuPy) ──
+try:
+    import cupy as cp
+    _HAS_CUPY = True
+except ImportError:
+    cp = None
+    _HAS_CUPY = False
+
 # ── GGUF constants ──
 
 GGUF_MAGIC = 0x46554747  # "GGUF" as little-endian uint32
@@ -803,16 +811,193 @@ def _map_tensor_name(name: str, arch: str) -> str:
     return name
 
 
-def load_model(path: str, progress_cb=None) -> dict:
-    """Load a GGUF model and return metadata, tensors, and config."""
-    with GGUFLoader(path) as loader:
-        metadata = dict(loader.metadata)
-        arch = metadata.get("general.architecture", "")
+def load_model(path: str, progress_cb=None, lazy: bool = True,
+               max_cached_mb: float = 4096,
+               gpu_offload: bool = False) -> dict:
+    """Load a GGUF model and return metadata, tensors, and config.
+
+    Args:
+        path: Path to GGUF file.
+        progress_cb: Optional progress callback(name, done, total, loading=bool).
+        lazy: If True, use lazy dequantization (instant load, low memory).
+              If False, eagerly load all tensors (slow, high memory).
+        max_cached_mb: Max RAM for cached dequantized tensors in lazy mode.
+        gpu_offload: If True and CuPy available, move tensors to GPU VRAM.
+
+    Returns:
+        dict with metadata, tensors, config.
+    """
+    loader = GGUFLoader(path)
+    metadata = dict(loader.metadata)
+    arch = metadata.get("general.architecture", "")
+    config = _extract_config(metadata)
+
+    if lazy:
+        weights = _LazyWeights(loader, arch, max_cached_mb=max_cached_mb,
+                               gpu_offload=gpu_offload)
+        # Preload shared tensors used every forward pass
+        if progress_cb:
+            progress_cb("preload", 0, 1, loading=True)
+        weights.preload_shared()
+        if progress_cb:
+            progress_cb("preload", 1, 1, loading=True)
+    else:
         tensors_raw = loader.load_all_tensors(progress_cb=progress_cb)
-        # Map tensor names to canonical names
-        tensors = {_map_tensor_name(k, arch): v for k, v in tensors_raw.items()}
-        config = _extract_config(metadata)
-        return {"metadata": metadata, "tensors": tensors, "config": config}
+        weights = {_map_tensor_name(k, arch): v for k, v in tensors_raw.items()}
+        loader.close()
+
+    return {"metadata": metadata, "tensors": weights, "config": config}
+
+
+class _LazyWeights:
+    """Dict-like that lazily dequantizes tensors from a memory-mapped GGUF file.
+
+    Instead of loading all weights into RAM (140GB for a 35B float32 model),
+    tensors are dequantized on-demand from the mmap'd file.  A LRU cache keeps
+    recently-used tensors resident while evicting older ones to stay within
+    *max_cached_mb*.  Shared tensors (embedding, output norm, output) are
+    pinned in cache and never evicted.
+
+    Usage is transparent — code that does ``self.weights["blk.0.attn.q.weight"]``
+    works identically whether *weights* is a plain dict or a _LazyWeights.
+    """
+
+    def __init__(self, loader: GGUFLoader, arch: str,
+                 dtype: np.dtype = np.dtype("float32"),
+                 max_cached_mb: float = 4096,
+                 gpu_offload: bool = False) -> None:
+        self._loader = loader
+        self._dtype = dtype
+        self._max_cached_mb = max_cached_mb
+        self._gpu_offload = gpu_offload and _HAS_CUPY
+        self._cache: dict[str, np.ndarray] = {}
+        self._pinned: set[str] = set()  # never evict
+        self._cached_bytes = 0
+        self._access_order: list[str] = []
+
+        # Pre-map canonical names → GGUF tensor info
+        self._name_map: dict[str, dict] = {}
+        for info in loader.tensor_infos:
+            canonical = _map_tensor_name(info["name"], arch)
+            self._name_map[canonical] = info
+
+    # ── dict interface ──
+
+    def __getitem__(self, key: str) -> np.ndarray:
+        if key in self._cache:
+            self._touch(key)
+            return self._cache[key]
+
+        if key not in self._name_map:
+            avail = list(self._name_map.keys())[:5]
+            raise KeyError(
+                f"Tensor '{key}' not found. "
+                f"Have (first 5): {avail}..."
+            )
+
+        info = self._name_map[key]
+        arr = self._loader.load_tensor(info["name"], self._dtype)
+
+        # Optional GPU offload
+        if self._gpu_offload:
+            arr = cp.asarray(arr)  # type: ignore[assignment]
+
+        self._cache[key] = arr
+        self._cached_bytes += arr.nbytes
+        self._access_order.append(key)
+        self._evict()
+
+        return arr
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._name_map
+
+    def __len__(self) -> int:
+        return len(self._name_map)
+
+    def __iter__(self):
+        return iter(self._name_map)
+
+    def __repr__(self) -> str:
+        info = self.memory_info()
+        gpu = "GPU" if self._gpu_offload else "CPU"
+        return (f"_LazyWeights({len(self)} tensors, "
+                f"{info['cached_mb']:.0f}/{info['max_mb']:.0f} MB, {gpu})")
+
+    def keys(self):
+        return self._name_map.keys()
+
+    def get(self, key: str, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def values(self):
+        return [self[k] for k in self._name_map]
+
+    def items(self):
+        return [(k, self[k]) for k in self._name_map]
+
+    # ── Cache management ──
+
+    def _touch(self, key: str) -> None:
+        """Move key to end of LRU order."""
+        if key in self._access_order:
+            self._access_order.remove(key)
+            self._access_order.append(key)
+
+    def _evict(self) -> None:
+        """Evict oldest non-pinned tensors to stay within budget."""
+        if self._max_cached_mb <= 0:
+            return
+        max_bytes = self._max_cached_mb * 1024 * 1024
+        while self._cached_bytes > max_bytes and len(self._access_order) > 0:
+            # Find oldest non-pinned entry
+            idx = 0
+            while idx < len(self._access_order):
+                candidate = self._access_order[idx]
+                if candidate not in self._pinned:
+                    break
+                idx += 1
+            else:
+                break  # all pinned, can't evict
+
+            evicted_key = self._access_order.pop(idx)
+            evicted_arr = self._cache.pop(evicted_key)
+            self._cached_bytes -= evicted_arr.nbytes
+
+    def preload_shared(self) -> None:
+        """Dequantize and pin shared tensors (used every forward pass)."""
+        for name in list(_SHARED_TENSORS):
+            if name in self._name_map:
+                self[name]  # triggers dequant + cache
+                self._pinned.add(name)
+        # Also pin output.weight (not in _SHARED_TENSORS but used every pass)
+        if "output.weight" in self._name_map:
+            self["output.weight"]
+            self._pinned.add("output.weight")
+
+    def memory_info(self) -> dict:
+        """Return cache memory usage stats."""
+        return {
+            "cached_mb": round(self._cached_bytes / (1024 * 1024), 1),
+            "max_mb": self._max_cached_mb,
+            "cached_tensors": len(self._cache),
+            "total_tensors": len(self._name_map),
+            "pinned_tensors": len(self._pinned),
+            "gpu_offload": self._gpu_offload,
+        }
+
+    def close(self) -> None:
+        """Release cached tensors and close the underlying GGUF loader."""
+        self._cache.clear()
+        self._pinned.clear()
+        self._access_order.clear()
+        self._cached_bytes = 0
+        if self._loader:
+            self._loader.close()
+            self._loader = None
 
 
 def _extract_config(metadata: dict[str, Any]) -> dict[str, Any]:

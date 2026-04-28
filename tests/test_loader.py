@@ -15,6 +15,7 @@ from vibeblade.loader import (
     GGUF_TYPE_F32,
     load_model,
     estimate_model_size_gb,
+    _LazyWeights,
 )
 
 # Metadata value type constants (used in KV pairs)
@@ -220,7 +221,7 @@ class TestLoadModelConvenience:
             assert result["metadata"]["general.architecture"] == "llama"
             assert result["config"]["architecture"] == "llama"
             assert result["config"]["context_length"] == 2048
-            assert isinstance(result["tensors"], dict)
+            assert isinstance(result["tensors"], (dict, _LazyWeights))
 
 
 class TestContextManager:

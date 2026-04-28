@@ -21,7 +21,7 @@ class TestKVCache:
     def test_cache_init_shape(self, cache):
         """Verify cache shape."""
         expected = (NUM_LAYERS, 2, NUM_HEADS, MAX_SEQ, HEAD_DIM)
-        assert cache.cache.shape == expected
+        assert cache.k_cache.shape == expected
         assert cache.dtype == np.float16
 
     def test_cache_update_and_get(self, cache):
