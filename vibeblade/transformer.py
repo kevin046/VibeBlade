@@ -40,14 +40,28 @@ logger = logging.getLogger(__name__)
 
 
 def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray:
-    """RMSNorm: x / sqrt(mean(x²) + eps) * weight."""
-    rms = np.sqrt(np.mean(x.astype(np.float32) ** 2, axis=-1, keepdims=True) + eps)
-    return (x.astype(np.float32) / rms) * weight
+    """RMSNorm: x / sqrt(mean(x²) + eps) * weight.
+
+    Clamps intermediate values to fp16 range to prevent overflow when
+    dequantized weights contain extreme values (common with low-bit quantization).
+    """
+    x32 = x.astype(np.float32)
+    weight32 = weight.astype(np.float32)
+    # Clamp to fp16 range to prevent inf/nan propagation
+    x32 = np.clip(x32, -65504.0, 65504.0)
+    weight32 = np.clip(weight32, -65504.0, 65504.0)
+    rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
+    # Clamp RMS to avoid division by near-zero
+    rms = np.maximum(rms, eps)
+    return (x32 / rms) * weight32
 
 
 def silu(x: np.ndarray) -> np.ndarray:
-    """SiLU activation: x * sigmoid(x)."""
-    x32 = x.astype(np.float32)
+    """SiLU activation: x * sigmoid(x).
+
+    Clamp to fp16 range to prevent exp overflow in sigmoid.
+    """
+    x32 = np.clip(x.astype(np.float32), -65504.0, 65504.0)
     return x32 * (1.0 / (1.0 + np.exp(-x32)))
 
 

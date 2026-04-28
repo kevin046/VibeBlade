@@ -1020,19 +1020,65 @@ class _LazyWeights:
         if self._gpu_offload:
             qkv = cp.asarray(qkv)  # type: ignore[assignment]
 
-        # Infer split sizes from the config metadata
-        n_heads = self._loader.metadata.get("qwen3.attention.head_count",
-                   self._loader.metadata.get("general.attention.head_count", 32))
-        n_kv_heads = self._loader.metadata.get("qwen3.attention.head_count_kv",
-                        self._loader.metadata.get("general.attention.head_count_kv", n_heads))
-        head_dim = qkv.shape[1] // n_heads  # hidden_dim // num_heads
+        # Infer split sizes from the config metadata.
+        # Try the architecture-specific prefix first, then general.
+        arch = self._loader.metadata.get("general.architecture", "")
+        meta = self._loader.metadata
+        n_heads = (meta.get(f"{arch}.attention.head_count") or
+                   meta.get("general.attention.head_count"))
+        n_kv_heads = (meta.get(f"{arch}.attention.head_count_kv") or
+                      meta.get("general.attention.head_count_kv"))
 
-        q_size = n_heads * head_dim
-        k_size = n_kv_heads * head_dim
+        if n_heads is None or n_kv_heads is None:
+            raise ValueError(
+                f"Cannot split fused QKV: missing head_count in metadata. "
+                f"arch={arch!r}, have n_heads={n_heads}, n_kv_heads={n_kv_heads}. "
+                f"QKV shape={qkv.shape}"
+            )
+        n_heads = int(n_heads)
+        n_kv_heads = int(n_kv_heads)
 
-        q_arr = qkv[:q_size]
-        k_arr = qkv[q_size:q_size + k_size]
-        v_arr = qkv[q_size + k_size:]
+        hidden_dim = qkv.shape[1]
+        head_dim = hidden_dim // n_heads
+
+        # Validate dimensions
+        expected_rows = (n_heads + 2 * n_kv_heads) * head_dim
+        if expected_rows != qkv.shape[0]:
+            # Try alternative: maybe rows = hidden_dim and cols = QKV dim (transposed)
+            # Or maybe head_dim is stored separately
+            alt_head_dim = meta.get(f"{arch}.attention.key_length") or \
+                           meta.get("general.attention.key_length")
+            if alt_head_dim:
+                alt_head_dim = int(alt_head_dim)
+                alt_rows = (n_heads + 2 * n_kv_heads) * alt_head_dim
+                if alt_rows == qkv.shape[0]:
+                    head_dim = alt_head_dim
+                    expected_rows = alt_rows
+                elif alt_rows == qkv.shape[1]:
+                    # Tensor is transposed
+                    qkv = qkv.T
+                    hidden_dim = qkv.shape[1]
+                    head_dim = alt_head_dim
+                    expected_rows = alt_rows
+
+        if expected_rows != qkv.shape[0]:
+            logger.warning(
+                "QKV split dimension mismatch: tensor shape=%s, "
+                "expected rows=%d (n_heads=%d, n_kv_heads=%d, head_dim=%d). "
+                "Falling back to equal 3-way split.",
+                qkv.shape, expected_rows, n_heads, n_kv_heads, head_dim
+            )
+            # Fallback: split QKV into 3 equal parts
+            third = qkv.shape[0] // 3
+            q_arr = qkv[:third]
+            k_arr = qkv[third:2*third]
+            v_arr = qkv[2*third:]
+        else:
+            q_size = n_heads * head_dim
+            k_size = n_kv_heads * head_dim
+            q_arr = qkv[:q_size]
+            k_arr = qkv[q_size:q_size + k_size]
+            v_arr = qkv[q_size + k_size:]
 
         # Derive K/V canonical key names from Q key
         # e.g., "blk.0.attn_q.weight" → "blk.0.attn_k.weight", "blk.0.attn_v.weight"
