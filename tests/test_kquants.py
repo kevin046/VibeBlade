@@ -233,11 +233,12 @@ class TestDispatchCompleteness:
     """Verify all known quant types are registered in _DEQUANT_FN."""
 
     def test_all_k_quants_registered(self):
-        from vibeblade.loader import _DEQUANT_FN
+        """K-quants use batch dequant (_BATCH_DEQUANT), not per-block _DEQUANT_FN."""
+        from vibeblade.loader import _BATCH_DEQUANT
         k_types = [GGUF_TYPE_Q3_K, GGUF_TYPE_Q4_K, GGUF_TYPE_Q5_K,
                     GGUF_TYPE_Q6_K, GGUF_TYPE_Q8_K]
         for t in k_types:
-            assert t in _DEQUANT_FN, f"Type {t} not in _DEQUANT_FN"
+            assert t in _BATCH_DEQUANT, f"Type {t} not in _BATCH_DEQUANT"
 
     def test_q8_1_registered(self):
         from vibeblade.loader import _DEQUANT_FN
