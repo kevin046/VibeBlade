@@ -461,6 +461,7 @@ def forward_prefill(
         v = h @ weights[f"{prefix}.attn_v.weight"].T
 
         # Validate Q shape matches expected (n_heads * head_dim)
+        # This catches the case where QKV was split with different head_dim than expected
         expected_q_dim = n_heads * head_dim
         if q.shape[-1] != expected_q_dim:
             import sys as _sys
@@ -469,9 +470,15 @@ def forward_prefill(
                 f"expected (seq, {expected_q_dim}). "
                 f"head_dim={head_dim}, n_heads={n_heads}, n_kv={n_kv_heads}\n"
             )
-            # Re-infer head_dim from actual Q tensor
-            head_dim = q.shape[-1] // n_heads
-            _sys.stderr.write(f"[WARN] Auto-corrected head_dim to {head_dim}\n")
+            # Also update n_kv_heads in case it was wrong
+            actual_kv_heads = min(n_kv_heads, n_heads)
+            actual_head_dim = q.shape[-1] // n_heads if n_heads > 0 else head_dim
+            _sys.stderr.write(f"[WARN] Also auto-correcting n_kv_heads from {n_kv_heads} to {actual_kv_heads}, head_dim to {actual_head_dim}\n")
+            n_kv_heads = actual_kv_heads
+            head_dim = actual_head_dim
+            # Must also re-compute k and v with the corrected dimensions to match q
+            k = h @ weights[f"{prefix}.attn_k.weight"].T
+            v = h @ weights[f"{prefix}.attn_v.weight"].T
 
         # Apply RoPE
         cos_slice = cos_cache[:seq_len]
