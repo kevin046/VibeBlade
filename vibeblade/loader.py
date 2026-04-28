@@ -1034,14 +1034,17 @@ class _LazyWeights:
         k_arr = qkv[q_size:q_size + k_size]
         v_arr = qkv[q_size + k_size:]
 
-        # Cache all three with their virtual names (keep qkv alive as backing store)
-        prefix = q_key.rsplit(".", 1)[0]  # e.g., "blk.0.attn"
-        qkv_key = f"{prefix}._qkv_full"
-        self._cache[qkv_key] = qkv  # prevent GC of backing array
-        self._access_order.append(qkv_key)
-        for name, arr in [(f"{prefix}.q.weight", q_arr),
-                          (f"{prefix}.k.weight", k_arr),
-                          (f"{prefix}.v.weight", v_arr)]:
+        # Derive K/V canonical key names from Q key
+        # e.g., "blk.0.attn_q.weight" → "blk.0.attn_k.weight", "blk.0.attn_v.weight"
+        k_key = q_key.replace(".attn_q.", ".attn_k.")
+        v_key = q_key.replace(".attn_q.", ".attn_v.")
+
+        # Cache all three splits with their correct canonical names,
+        # plus the backing QKV array to prevent GC of the views.
+        backing_key = f"{q_key}._qkv_backing"
+        self._cache[backing_key] = qkv
+        self._access_order.append(backing_key)
+        for name, arr in [(q_key, q_arr), (k_key, k_arr), (v_key, v_arr)]:
             self._cache[name] = arr
             self._cached_bytes += arr.nbytes
             self._access_order.append(name)
@@ -1051,13 +1054,22 @@ class _LazyWeights:
         return self._cache[q_key]
 
     def __contains__(self, key: str) -> bool:
-        return key in self._name_map or key in self._aliases
+        return key in self._name_map or key in self._aliases or key in self._cache
 
     def __len__(self) -> int:
         return len(self._name_map)
 
     def __iter__(self):
-        return iter(self._name_map)
+        # Yield both real names and aliases so code that iterates weights.keys()
+        # can find aliased names (e.g., MoE shared expert detection).
+        seen = set()
+        for k in self._name_map:
+            seen.add(k)
+            yield k
+        for k in self._aliases:
+            if k not in seen:
+                seen.add(k)
+                yield k
 
     def __repr__(self) -> str:
         info = self.memory_info()
@@ -1066,7 +1078,8 @@ class _LazyWeights:
                 f"{info['cached_mb']:.0f}/{info['max_mb']:.0f} MB, {gpu})")
 
     def keys(self):
-        return self._name_map.keys()
+        # Include aliases so set(weights.keys()) finds aliased names
+        return set(self).__iter__()
 
     def get(self, key: str, default=None):
         try:
