@@ -625,7 +625,7 @@ class GGUFLoader:
             arr = np.frombuffer(raw, dtype=np_dtype).reshape(shape)
             return arr.astype(dtype) if dtype != np_dtype else arr
 
-        if tid in _DEQUANT_FN:
+        if tid in _DEQUANT_FN or tid in _BATCH_DEQUANT:
             arr = self._dequant_blocks(raw, tid, n_elements,
                                       progress_cb=progress_cb, tensor_name=name)
             return arr.reshape(shape).astype(dtype)
