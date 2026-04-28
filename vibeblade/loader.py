@@ -21,12 +21,15 @@ Size math (LLaMA 70B):
 
 from __future__ import annotations
 
+import logging
 import mmap
 import os
 import struct
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # ── GPU support (optional CuPy) ──
 try:
