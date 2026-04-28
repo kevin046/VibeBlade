@@ -147,11 +147,11 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     elapsed = time.time() - load_start
     print(f"\r {_g('█' * 20)} {_b('100.0%')} {_d(f'{elapsed:5.1f}s')} {'done':<24} ")
 
-    # Enable MoE if detected
+    # MoE hot/cold split requires a pre-computed HotColdMap from profiling
+    # Skip in chat mode — runs all experts on CPU by default
     if model.is_moe:
-        model.enable_moe_hot_cold(hot_threshold=0.15)
         print()
-        print(" MoE detected - hot/cold split enabled")
+        print(" MoE detected — all experts on CPU (use 'run' for hot/cold split)")
 
     print()
     print(f" {_g('Model loaded. Start chatting!')}")

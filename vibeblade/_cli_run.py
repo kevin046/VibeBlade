@@ -225,24 +225,23 @@ def main():
         model = VibeBladeModel(model_path)
 
         # Enable MoE hot/cold split if model is MoE
-        if model.is_moe:
-            print("MoE model detected — enabling hot/cold split...")
-            model.enable_moe_hot_cold(
-                hot_threshold=off.hot_threshold,
-                cpu_threads=args.cpu_threads,
-            )
+        if model.is_moe and hasattr(off, 'hot_threshold') and off.hot_threshold is not None:
+            # hot/cold split requires a HotColdMap from prior profiling run
+            print("MoE model detected — all experts on CPU (run profiler first for hot/cold split)")
+        elif model.is_moe:
+            print("MoE model detected — all experts on CPU")
 
-            # If HYBRID_SSD, configure tiered memory
-            if off.mode.value == "HYBRID_SSD" and hasattr(model, 'configure_tiered_memory'):
-                model.configure_tiered_memory(
-                    ssd_path=off.ssd_path,
-                    ram_limit=off.ram_limit,
-                    ram_buffer_ratio=off.ram_buffer_ratio,
-                    preemptive_layers=getattr(off, 'ssd_preemptive_layers', 2),
-                )
-                print("Tiered memory: VRAM (hot) + RAM (active) + SSD (deep)")
-            else:
-                print("Memory mode: VRAM (hot) + RAM (cold)")
+        # If HYBRID_SSD, configure tiered memory
+        if off.mode.value == "HYBRID_SSD" and hasattr(model, 'configure_tiered_memory'):
+            model.configure_tiered_memory(
+                ssd_path=off.ssd_path,
+                ram_limit=off.ram_limit,
+                ram_buffer_ratio=off.ram_buffer_ratio,
+                preemptive_layers=getattr(off, 'ssd_preemptive_layers', 2),
+            )
+            print("Tiered memory: VRAM (hot) + RAM (active) + SSD (deep)")
+        else:
+            print("Memory mode: VRAM (hot) + RAM (cold)")
 
         # Generate
         print(f"Generating up to {args.max_new_tokens} tokens...\n")
