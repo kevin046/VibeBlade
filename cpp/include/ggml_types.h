@@ -140,6 +140,52 @@ struct block_q6_K {
 };
 static_assert(sizeof(block_q6_K) == 210, "block_q6_K size");
 
+// Q2_K: 256 values per super-block
+struct block_q2_K {
+    uint8_t  scales[16]; // 4-bit packed scales for 16 sub-blocks
+    uint8_t  qs[64];     // 2-bit packed quants (256 values)
+    uint16_t d;          // super-block scale (fp16)
+    uint16_t dmin;       // super-block minimum (fp16)
+};
+static_assert(sizeof(block_q2_K) == 84, "block_q2_K size");
+
+// Q3_K: 256 values per super-block
+struct block_q3_K {
+    uint8_t  hmask[32];  // 1-bit: is q >= 8?
+    uint8_t  qs[64];     // 2-bit packed quants (256 values), values 0-3
+    uint8_t  scales[12]; // 6-bit packed scales for 8 sub-blocks
+    uint16_t d;          // super-block scale (fp16)
+};
+static_assert(sizeof(block_q3_K) == 110, "block_q3_K size");
+
+// Q8_K: 256 values per super-block
+struct block_q8_K {
+    float    d;           // super-block scale (fp32)
+    int8_t   qs[256];     // quants (-128 to 127)
+    // NOTE: on-disk, scales are interleaved after every 32 quants.
+    // Layout: d(4) + [qs(32) + scale(1)] * 8 = 4 + 33*8 = 268.
+    // But actual on-disk is 292 bytes — scales are stored separately.
+};
+// Q8_K on-disk is 292 bytes. Struct above doesn't match layout;
+// use byte-level access with 292-byte stride (ggml_type_size).
+
+// ── BF16 ↔ F32 ──
+inline float bf16_to_f32(uint16_t h) {
+    uint32_t f = (uint32_t)h << 16;
+    float ret;
+    memcpy(&ret, &f, 4);
+    return ret;
+}
+
+inline uint16_t f32_to_bf16(float val) {
+    uint32_t f;
+    memcpy(&f, &val, 4);
+    // Round to nearest even
+    uint32_t lsb = (f >> 16) & 1;
+    uint32_t bias = 0x7FFF + lsb;
+    return (uint16_t)((f + bias) >> 16);
+}
+
 // ── F16 ↔ F32 (inline, already in fp16_compat.h but duplicated here for independence) ──
 inline float f16_to_f32(uint16_t h) {
     uint32_t sign = (h >> 15) & 1;

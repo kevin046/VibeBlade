@@ -119,36 +119,126 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
         float v = g.meta_float(prefixed, NAN);
         return !std::isnan(v) ? v : g.meta_float(key, def);
     };
+    auto gs = [&](const std::string& key) -> std::string {
+        std::string prefixed = cfg_.arch + "." + key;
+        std::string v = g.meta_string(prefixed);
+        return v.empty() ? g.meta_string(key) : v;
+    };
 
-    cfg_.n_layers        = (int)gi("block_count");
-    cfg_.n_heads         = (int)gi("attention.head_count");
-    cfg_.n_kv_heads      = (int)gi("attention.head_count_kv", cfg_.n_heads);
-    cfg_.head_dim        = (int)gi("attention.key_length");
-    cfg_.hidden_dim      = (int)gi("embedding_length");
-    cfg_.intermediate_dim= (int)gi("feed_forward_length");
-    cfg_.context_length  = (int)gi("context_length", 2048);
-    cfg_.vocab_size      = (int)gi("vocab_size");
-    cfg_.norm_eps        = gf("attention.layer_norm_rms_epsilon", 1e-5f);
+    cfg_.n_layers         = (int)gi("block_count");
+    cfg_.n_heads          = (int)gi("attention.head_count");
+    cfg_.n_kv_heads       = (int)gi("attention.head_count_kv", cfg_.n_heads);
+    cfg_.head_dim         = (int)gi("attention.key_length");
+    cfg_.hidden_dim       = (int)gi("embedding_length");
+    cfg_.intermediate_dim = (int)gi("feed_forward_length");
+    cfg_.context_length   = (int)gi("context_length", 2048);
+    cfg_.vocab_size       = (int)gi("vocab_size");
+    cfg_.norm_eps         = gf("attention.layer_norm_rms_epsilon", 1e-5f);
+
+    // Sliding window attention (Mistral)
+    cfg_.sliding_window = (int)gi("attention.sliding_window");
 
     if (cfg_.arch.empty() || cfg_.n_layers == 0) {
         cfg_.arch = "llama";
     }
 
+    // ── RoPE configuration ──
+    cfg_.rope_freq_base = gf("rope.freq_base", 10000.0f);
+    if (cfg_.rope_freq_base == 0.0f) cfg_.rope_freq_base = 10000.0f;
+
+    // RoPE scaling (read from metadata)
+    cfg_.rope_scaling_type = gs("rope.scaling.type");
+    cfg_.rope_scale = gf("rope.scaling.factor", 1.0f);
+    if (cfg_.rope_scale == 0.0f) cfg_.rope_scale = 1.0f;
+
+    // YaRN-specific parameters
+    cfg_.yarn_ext_factor  = gf("rope.scaling.yarn_log_mul", 1.0f);
+    cfg_.yarn_attn_factor = gf("rope.scaling.attn_factor", 1.0f);
+    cfg_.yarn_beta_fast   = gf("rope.scaling.beta_fast", 32.0f);
+    cfg_.yarn_beta_slow   = gf("rope.scaling.beta_slow", 1.0f);
+
+    // LongRoPE: per-dimension frequency factors
+    auto lr_factors = g.meta_float_array("rope.scaling.long_factor");
+    if (!lr_factors.empty()) {
+        cfg_.long_rope_factors.resize(lr_factors.size());
+        for (int i = 0; i < (int)lr_factors.size(); i++)
+            cfg_.long_rope_factors[i] = (int)lr_factors[i];
+    }
+
     cfg_.context_length = std::min(cfg_.context_length, MAX_SEQ);
+
+    // ── Architecture-specific flags ──
+    const std::string& a = cfg_.arch;
+    cfg_.use_geglu = (a == "gemma" || a == "gemma2");
+    cfg_.use_parallel_attn = (a == "falcon" || a == "gptneox");
+    cfg_.use_neox_rope = (a == "falcon" || a == "gptneox" || a == "starcoder2");
+
+    // Fused QKV: detect from weight names (checked in map_weights)
+    // Most models EXCEPT base llama use fused QKV
+    cfg_.use_fused_qkv = (a != "llama" && a != "llama_old");
+
+    // MoE (DeepSeek, Mixtral, Qwen2-MoE)
+    cfg_.n_experts = (int)gi("expert_count");
+    cfg_.n_experts_used = (int)gi("expert_used_count");
+
+    // Override norm_eps per architecture
+    if (a == "gemma" || a == "gemma2") {
+        cfg_.norm_eps = 1e-6f;
+    }
 }
 
 void VibeBladeFast::build_rope_cache() {
     int dim = cfg_.head_dim;
-    rope_cos_.resize(cfg_.context_length * dim / 2);
-    rope_sin_.resize(cfg_.context_length * dim / 2);
+    int half = dim / 2;
+    rope_cos_.resize(cfg_.context_length * half);
+    rope_sin_.resize(cfg_.context_length * half);
 
-    float base = 10000.0f;
+    float base = cfg_.rope_freq_base;
+    bool is_neox = cfg_.use_neox_rope;
+
     for (int pos = 0; pos < cfg_.context_length; pos++) {
-        for (int i = 0; i < dim / 2; i++) {
+        for (int i = 0; i < half; i++) {
             float theta = powf(base, -2.0f * i / dim);
-            float angle = pos * theta;
-            rope_cos_[pos * dim / 2 + i] = cosf(angle);
-            rope_sin_[pos * dim / 2 + i] = sinf(angle);
+
+            // Apply scaling based on type
+            float scaled_theta = theta;
+
+            if (!cfg_.rope_scaling_type.empty()) {
+                if (cfg_.rope_scaling_type == "linear") {
+                    // Linear: theta / scale
+                    scaled_theta = theta / cfg_.rope_scale;
+                }
+                else if (cfg_.rope_scaling_type == "yarn") {
+                    // YaRN: dynamic NTK-aware scaling
+                    float freq = 1.0f / theta;
+                    float beta_fast = cfg_.yarn_beta_fast;
+                    float beta_slow = cfg_.yarn_beta_slow;
+
+                    // Smooth interpolation factor
+                    float t = pos / (float)cfg_.context_length;
+                    float smooth = 1.0f - 1.0f / (1.0f + (t * (beta_slow - beta_fast) + beta_fast) / beta_fast);
+
+                    // Compute scaled freq
+                    float scaled_freq = freq / cfg_.rope_scale;
+
+                    // Apply YaRN correction
+                    float blend = smooth * cfg_.yarn_ext_factor;
+                    float final_freq = freq * (1.0f - blend) + scaled_freq * blend;
+                    scaled_theta = 1.0f / final_freq;
+                }
+            }
+
+            // LongRoPE: per-dimension scaling factors
+            if (!cfg_.long_rope_factors.empty() && (int)cfg_.long_rope_factors.size() >= half) {
+                // long_rope_factors[i] is typically a float encoded as int
+                // The factor is the ratio of new freq_base dimension to old
+                scaled_theta = powf(cfg_.rope_freq_base,
+                    -2.0f * i / dim / (float)cfg_.long_rope_factors[i]);
+            }
+
+            float angle = pos * scaled_theta;
+            rope_cos_[pos * half + i] = cosf(angle);
+            rope_sin_[pos * half + i] = sinf(angle);
         }
     }
 }
@@ -186,22 +276,26 @@ void VibeBladeFast::alloc_kv_cache() {
 void VibeBladeFast::map_weights(const GGUFFile& g) {
     const std::string& arch = cfg_.arch;
 
+    // ── Global weights (names differ per architecture) ──
     token_emb_ = g.tensor_data("token_embd.weight");
+    if (!token_emb_) token_emb_ = g.tensor_data("wte.weight");  // GPT-NeoX style
     if (token_emb_) {
         auto info = g.tensor_info("token_embd.weight");
-        emb_type_ = info->type;
+        if (!info) info = g.tensor_info("wte.weight");
+        emb_type_ = info ? info->type : GGML_TYPE_F32;
     }
 
     output_norm_ = (const float*)g.tensor_data("output_norm.weight");
+    if (!output_norm_) output_norm_ = (const float*)g.tensor_data("ln_f.weight");
 
     output_ = g.tensor_data("output.weight");
-    if (!output_) {
-        output_ = g.tensor_data("token_embd.weight");
-    }
+    if (!output_) output_ = g.tensor_data("lm_head.weight");
+    if (!output_) output_ = g.tensor_data("token_embd.weight");  // tied weights
     if (output_) {
         auto info = g.tensor_info("output.weight");
+        if (!info) info = g.tensor_info("lm_head.weight");
         if (!info) info = g.tensor_info("token_embd.weight");
-        out_type_ = info->type;
+        out_type_ = info ? info->type : GGML_TYPE_F32;
     }
 
     layers_.resize(cfg_.n_layers);
@@ -209,9 +303,17 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
         auto& lw = layers_[i];
         std::string pfx = "blk." + std::to_string(i) + ".";
 
+        // ── Norm weights (same names across archs) ──
         lw.attn_norm = (const float*)g.tensor_data(pfx + "attn_norm.weight");
         lw.ffn_norm  = (const float*)g.tensor_data(pfx + "ffn_norm.weight");
+        // GPT-NeoX / Falcon use different norm names
+        if (!lw.attn_norm) lw.attn_norm = (const float*)g.tensor_data(pfx + "ln_attn.weight");
+        if (!lw.ffn_norm)  lw.ffn_norm  = (const float*)g.tensor_data(pfx + "ln_mlp.weight");
+        if (!lw.attn_norm) lw.attn_norm = (const float*)g.tensor_data(pfx + "ln1.weight");
+        if (!lw.ffn_norm)  lw.ffn_norm  = (const float*)g.tensor_data(pfx + "ln2.weight");
 
+        // ── Attention weights ──
+        // Try fused QKV first, then fall back to separate Q/K/V
         auto set_w = [&](const std::string& name, const void*& ptr, ggml_type& type) {
             auto info = g.tensor_info(pfx + name);
             if (info) {
@@ -224,10 +326,34 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
         set_w("attn_k.weight",      lw.attn_k,  lw.ktype);
         set_w("attn_v.weight",      lw.attn_v,  lw.vtype);
         set_w("attn_output.weight", lw.attn_o,  lw.otype);
+
+        // Try fused QKV
+        set_w("attn_qkv.weight", lw.attn_qkv, lw.qkv_type);
+        if (lw.attn_qkv && (!lw.attn_q || !lw.attn_k || !lw.attn_v)) {
+            // Use fused QKV — split during forward pass
+            lw.has_fused_qkv = true;
+            lw.qkv_type = lw.qkv_type;
+        } else {
+            lw.has_fused_qkv = false;
+            lw.attn_qkv = nullptr;
+        }
+
+        // Falcon-style names
+        if (!lw.attn_q) set_w("attn_q.weight", lw.attn_q, lw.qtype);
+        if (!lw.attn_k) set_w("attn_k.weight", lw.attn_k, lw.ktype);
+        if (!lw.attn_v) set_w("attn_v.weight", lw.attn_v, lw.vtype);
+
+        // ── FFN weights ──
         set_w("ffn_gate.weight",    lw.ffn_gate, lw.gate_type);
         set_w("ffn_up.weight",      lw.ffn_up,   lw.up_type);
         set_w("ffn_down.weight",    lw.ffn_down, lw.down_type);
 
+        // GPT-NeoX / Falcon MLP names
+        if (!lw.ffn_gate) set_w("ffn_gate.weight", lw.ffn_gate, lw.gate_type);
+        if (!lw.ffn_up)   set_w("ffn_up.weight",   lw.ffn_up,   lw.up_type);
+        if (!lw.ffn_down) set_w("ffn_down.weight",  lw.ffn_down, lw.down_type);
+
+        // MoE gate (DeepSeek, Mixtral, Qwen2-MoE)
         set_w("ffn_gate_inp.weight", lw.ffn_gate_inp, lw.gate_inp_type);
     }
 }
@@ -279,12 +405,23 @@ void VibeBladeFast::forward_layer(
     }
 
     // ── 2. Q, K, V projections (gemv_dequant with inline dequant) ──
-    // For decode (seq_len=1), this is just 3 gemv calls — no parallelism benefit.
-    // For prefill (seq_len>1), parallelize across token positions.
-    for (int s = 0; s < seq_len; s++) {
-        gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype);
-        gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype);
-        gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype);
+    if (lw.has_fused_qkv && lw.attn_qkv) {
+        // Fused QKV: one gemv, then split
+        int qkv_dim = q_dim + 2 * kv_dim;
+        for (int s = 0; s < seq_len; s++) {
+            gemv_dequant(normed + s * hd, lw.attn_qkv, Q + s * q_dim,
+                         hd, qkv_dim, lw.qkv_type);
+            // Q is already at Q + s*q_dim, K and V follow
+            // QKV layout: [Q | K | V] — but K/V are packed after Q
+            memcpy(K_buf + s * kv_dim, Q + s * qkv_dim + q_dim, kv_dim * sizeof(float));
+            memcpy(V_buf + s * kv_dim, Q + s * qkv_dim + q_dim + kv_dim, kv_dim * sizeof(float));
+        }
+    } else {
+        for (int s = 0; s < seq_len; s++) {
+            gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype);
+            gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype);
+            gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype);
+        }
     }
 
     // ── 3. RoPE on Q and K ──
@@ -295,27 +432,46 @@ void VibeBladeFast::forward_layer(
 
         for (int h = 0; h < n_heads; h++) {
             float* q = Q + s * q_dim + h * head_d;
+            if (cfg_.use_neox_rope) {
+                // NeoX-style interleaved: pairs (0,1), (2,3), ... not halves
+                for (int i = 0; i < head_d; i += 2) {
+                    float x0 = q[i], x1 = q[i + 1];
+                    float ci = cos_v[i / 2], si = sin_v[i / 2];
+                    q[i]     = x0 * ci - x1 * si;
+                    q[i + 1] = x0 * si + x1 * ci;
+                }
+            } else {
 #ifdef __aarch64__
-            vapply_rope(q, head_d, cos_v, sin_v);
+                vapply_rope(q, head_d, cos_v, sin_v);
 #else
-            for (int i = 0; i < head_d / 2; i++) {
-                float x0 = q[i], x1 = q[i + head_d / 2];
-                q[i] = x0 * cos_v[i] - x1 * sin_v[i];
-                q[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
-            }
+                for (int i = 0; i < head_d / 2; i++) {
+                    float x0 = q[i], x1 = q[i + head_d / 2];
+                    q[i] = x0 * cos_v[i] - x1 * sin_v[i];
+                    q[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
+                }
 #endif
+            }
         }
         for (int h = 0; h < n_kv_heads; h++) {
             float* k = K_buf + s * kv_dim + h * head_d;
+            if (cfg_.use_neox_rope) {
+                for (int i = 0; i < head_d; i += 2) {
+                    float x0 = k[i], x1 = k[i + 1];
+                    float ci = cos_v[i / 2], si = sin_v[i / 2];
+                    k[i]     = x0 * ci - x1 * si;
+                    k[i + 1] = x0 * si + x1 * ci;
+                }
+            } else {
 #ifdef __aarch64__
-            vapply_rope(k, head_d, cos_v, sin_v);
+                vapply_rope(k, head_d, cos_v, sin_v);
 #else
-            for (int i = 0; i < head_d / 2; i++) {
-                float x0 = k[i], x1 = k[i + head_d / 2];
-                k[i] = x0 * cos_v[i] - x1 * sin_v[i];
-                k[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
-            }
+                for (int i = 0; i < head_d / 2; i++) {
+                    float x0 = k[i], x1 = k[i + head_d / 2];
+                    k[i] = x0 * cos_v[i] - x1 * sin_v[i];
+                    k[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
+                }
 #endif
+            }
         }
     }
 
@@ -330,6 +486,10 @@ void VibeBladeFast::forward_layer(
 
     // ── 5. Multi-Head Attention (fused SDPA) ──
     int total_pos = position_ + seq_len;
+    int window_start = 0;
+    if (cfg_.sliding_window > 0) {
+        window_start = std::max(0, total_pos - cfg_.sliding_window);
+    }
 
     for (int s = 0; s < seq_len; s++) {
         float* q = Q + s * q_dim;
@@ -337,6 +497,10 @@ void VibeBladeFast::forward_layer(
         memset(o, 0, q_dim * sizeof(float));
 
         float scale = 1.0f / sqrtf((float)head_d);
+        // Apply YaRN attention temperature if configured
+        if (cfg_.rope_scaling_type == "yarn" && cfg_.yarn_attn_factor != 1.0f) {
+            scale *= cfg_.yarn_attn_factor;
+        }
 
         for (int h = 0; h < n_heads; h++) {
             float* q_h = q + h * head_d;
@@ -345,8 +509,9 @@ void VibeBladeFast::forward_layer(
 
             float* score_row = scores + s * cfg_.context_length;
 
-            // ── Compute Q@K^T scores ──
-            for (int p = 0; p < total_pos; p++) {
+            // ── Compute Q@K^T scores (with sliding window) ──
+            int attn_start = window_start;
+            for (int p = attn_start; p < total_pos; p++) {
                 const float* k_h = k_cache.data() + p * kv_dim + kv_h * head_d;
 #ifdef __aarch64__
                 float dot = vdot_att(q_h, k_h, head_d) * scale;
@@ -358,12 +523,23 @@ void VibeBladeFast::forward_layer(
                 score_row[p] = dot;
             }
 
-            // ── Softmax ──
-            softmax(score_row, total_pos);
+            // ── Softmax (over windowed range) ──
+            int attn_len = total_pos - attn_start;
+            if (attn_len > 0 && attn_start > 0) {
+                // Shift scores to start of array for softmax
+                for (int p = 0; p < attn_len; p++) {
+                    score_row[p] = score_row[attn_start + p];
+                }
+                softmax(score_row, attn_len);
+            } else {
+                softmax(score_row, total_pos);
+                attn_len = total_pos;
+            }
 
             // ── Weighted sum of V ──
-            for (int p = 0; p < total_pos; p++) {
-                const float* v_h = v_cache.data() + p * kv_dim + kv_h * head_d;
+            for (int p = 0; p < attn_len; p++) {
+                int cache_pos = (attn_start > 0) ? (attn_start + p) : p;
+                const float* v_h = v_cache.data() + cache_pos * kv_dim + kv_h * head_d;
                 float w = score_row[p];
 #ifdef __aarch64__
                 vaxpy(o_h, w, v_h, head_d);
@@ -374,18 +550,9 @@ void VibeBladeFast::forward_layer(
         }
     }
 
-    // ── 6. Output projection + residual ──
+    // ── 6. Output projection ──
     for (int s = 0; s < seq_len; s++) {
         gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype);
-#ifdef __aarch64__
-        // Copy input + add o_proj in one NEON pass
-        memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
-        vadd_residual(output + s * hd, o_proj + s * hd, hd);
-#else
-        for (int d = 0; d < hd; d++) {
-            output[s * hd + d] = input[s * hd + d] + o_proj[d];
-        }
-#endif
     }
 
     // ── 7. FFN RMS Norm ──
@@ -393,33 +560,62 @@ void VibeBladeFast::forward_layer(
         rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
     }
 
-    // ── 8. SwiGLU FFN ──
+    // ── 8. FFN (SwiGLU or GeGLU) ──
     for (int s = 0; s < seq_len; s++) {
         gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                      hd, cfg_.intermediate_dim, lw.gate_type);
         gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
                      hd, cfg_.intermediate_dim, lw.up_type);
 
-        // SiLU(gate) * up — fused NEON kernel
         int id = cfg_.intermediate_dim;
+
+        if (cfg_.use_geglu) {
+            // GeGLU: GELU(gate) * up — used by Gemma
+            // Approximate GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 #ifdef __aarch64__
-        vsilu_mul_f32(gate_buf + s * id, up_buf + s * id, gate_buf + s * id, id);
-#else
-        for (int i = 0; i < id; i++) {
-            gate_buf[s * id + i] = silu_f(gate_buf[s * id + i]) * up_buf[s * id + i];
-        }
+            // NEON doesn't have tanh approximation, use scalar loop
 #endif
+            for (int i = 0; i < id; i++) {
+                float x = gate_buf[s * id + i];
+                float gelu = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+                gate_buf[s * id + i] = gelu * up_buf[s * id + i];
+            }
+        } else {
+            // SiLU(gate) * up — fused NEON kernel
+#ifdef __aarch64__
+            vsilu_mul_f32(gate_buf + s * id, up_buf + s * id, gate_buf + s * id, id);
+#else
+            for (int i = 0; i < id; i++) {
+                gate_buf[s * id + i] = silu_f(gate_buf[s * id + i]) * up_buf[s * id + i];
+            }
+#endif
+        }
 
         gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
                      id, hd, lw.down_type);
+    }
 
+    // ── 9. Residual connections (depends on parallel vs sequential attention) ──
+    for (int s = 0; s < seq_len; s++) {
+        if (cfg_.use_parallel_attn) {
+            // Falcon / GPT-NeoX: parallel attention + FFN
+            // output = input + attn_out + ff_out
+            for (int d = 0; d < hd; d++) {
+                output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d] + ff_out[s * hd + d];
+            }
+        } else {
+            // Standard LLaMA-style: sequential residual
+            // output = input + o_proj + ff_out
 #ifdef __aarch64__
-        vadd_residual(output + s * hd, ff_out + s * hd, hd);
+            memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+            vadd_residual(output + s * hd, o_proj + s * hd, hd);
+            vadd_residual(output + s * hd, ff_out + s * hd, hd);
 #else
-        for (int d = 0; d < hd; d++) {
-            output[s * hd + d] += ff_out[s * hd + d];
-        }
+            for (int d = 0; d < hd; d++) {
+                output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d] + ff_out[s * hd + d];
+            }
 #endif
+        }
     }
 }
 

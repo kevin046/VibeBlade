@@ -51,11 +51,14 @@ private:
         int rank;     // insertion order (used as fallback)
     };
 
-    // Pre-tokenize text into word pieces (simplified GPT-2 pre-tokenizer)
+    // Pre-tokenize text into word pieces
     std::vector<std::string> pre_tokenize(const std::string& text) const;
 
     // Apply BPE merges to a word (list of token IDs) → final token IDs
     std::vector<int> bpe(const std::vector<int>& word) const;
+
+    // SentencePiece encode word with ▁ prefix and byte fallback
+    std::vector<int> sp_encode_word(const std::string& word) const;
 
     // Lookup token text in vocab
     int lookup(const std::string& token) const;
@@ -69,6 +72,17 @@ private:
 
     // Hash for pair<int,int> keys
     std::unordered_map<std::pair<int, int>, int, pair_hash> merge_map_;
+
+    // Tokenizer type: "gpt2", "llama", "sentencepiece", "spm", "replit"
+    std::string tokenizer_model_;
+
+    // Pre-tokenization regex (from GGUF metadata)
+    std::string pre_token_regex_;
+
+    // BOS/EOS control
+    bool add_bos_ = true;
+    bool add_eos_ = false;
+    bool sp_byte_fallback_ = false;
 
     // Special token IDs
     int bos_id_ = 1;

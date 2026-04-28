@@ -25,6 +25,26 @@ struct FastConfig {
     int context_length = 2048;
     float norm_eps = 1e-5f;
     std::string arch = "llama";
+
+    // RoPE configuration
+    float rope_freq_base = 10000.0f;
+    float rope_scale = 1.0f;           // context-length scaling factor
+    std::string rope_scaling_type;     // "linear", "yarn", "longrope", ""
+    float yarn_ext_factor = 1.0f;      // YaRN extrapolation factor
+    float yarn_attn_factor = 1.0f;     // YaRN attention temperature factor
+    float yarn_beta_fast = 32.0f;
+    float yarn_beta_slow = 1.0f;
+    std::vector<float> yarn_orig_ctx;  // YaRN original context lengths (for longrope)
+    std::vector<int> long_rope_factors;// per-dimension freq scaling (longrope)
+
+    // Architecture-specific flags
+    bool use_geglu = false;            // Gemma uses GeGLU instead of SwiGLU
+    bool use_parallel_attn = false;    // Falcon: attention + FFN in parallel
+    bool use_fused_qkv = false;        // Many models fuse Q/K/V projections
+    bool use_neox_rope = false;        // NeoX-style interleaved RoPE (GPT-NeoX, Falcon)
+    int n_experts = 0;                 // MoE: number of experts (0 = dense)
+    int n_experts_used = 0;            // MoE: active experts per token
+    int sliding_window = 0;            // Mistral-style sliding window attention
 };
 
 struct LayerWeights {
