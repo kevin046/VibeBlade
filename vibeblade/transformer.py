@@ -442,131 +442,102 @@ def forward_prefill(
         (logits, kv_caches_k, kv_caches_v)
         logits: (seq_len, vocab_size)
     """
+    import sys as _dbg
+
     seq_len = len(token_ids)
     x = token_emb[token_ids]  # (seq, hidden_dim)
-    import sys as _sys
-    _sys.stderr.write(f"[FW EMBED DEBUG] token_ids.shape={token_ids.shape}, "
-                      f"token_emb.shape={token_emb.shape}, "
-                      f"x.shape={x.shape}\n")
+    _dbg.write(f"[FW EMBED] token_ids={token_ids.shape} token_emb={token_emb.shape} x={x.shape}\n")
 
     # Infer head_dim from Q tensor if not explicitly provided
-    # (hybrid models like Qwen3.6 may have head_dim != hidden_dim / n_heads)
     if head_dim <= 0:
         head_dim = token_emb.shape[-1] // n_heads
 
     kv_caches_k: list[np.ndarray] = []
     kv_caches_v: list[np.ndarray] = []
-    moe_cache: dict = {}  # caches parsed MoE routers/experts per layer
+    moe_cache: dict = {}
+
     try:
         for layer_idx in range(n_layers):
             prefix = f"blk.{layer_idx}"
+            _dbg.write(f"[FW LAYER] blk.{layer_idx} enter x={x.shape}\n")
 
-        # DEBUG: layer entry
-        import sys as _sys
-        _sys.stderr.write(f"[FW LAYER DEBUG] blk.{layer_idx}: entering, x.shape={x.shape}\n")
-        # Pre-attention RMSNorm
-        attn_norm_w = weights[f"{prefix}.attn_norm.weight"]
-        _sys.stderr.write(f"[FW LAYER DEBUG] blk.{layer_idx}: attn_norm_w.shape={attn_norm_w.shape}\n")
-        h = rms_norm(x, attn_norm_w, eps)
+            # ── Pre-attention RMSNorm ──────────────────────────────────
+            attn_norm_w = weights[f"{prefix}.attn_norm.weight"]
+            _dbg.write(f"[FW LAYER] blk.{layer_idx} attn_norm={attn_norm_w.shape}\n")
+            h = rms_norm(x, attn_norm_w, eps)
 
-        # DEBUG: print actual weight shape for all attention weights
-        import sys as _sys
-        _sys.stderr.write(f"[FW DEBUG] blk.{layer_idx}: h.shape={x.shape}, "
-                          f"q_key={prefix}.attn_q.weight, "
-                          f"q_w.shape={weights.get(f'{prefix}.attn_q.weight').shape}, "
-                          f"q_w.T.shape={weights.get(f'{prefix}.attn_q.weight').T.shape}, "
-                          f"k_w.shape={weights.get(f'{prefix}.attn_k.weight').shape}, "
-                          f"v_w.shape={weights.get(f'{prefix}.attn_v.weight').shape}, "
-                          f"attn_out_w.shape={weights.get(f'{prefix}.attn_output.weight').shape}\n")
-        q_w = weights[f"{prefix}.attn_q.weight"]
-        k_w = weights[f"{prefix}.attn_k.weight"]
-        v_w = weights[f"{prefix}.attn_v.weight"]
-        _sys.stderr.write(f"[MATMUL PRECHECK] blk.{layer_idx}: h.shape={h.shape}, "
-                          f"q_w.shape={q_w.shape}, q_w.T.shape={q_w.T.shape}, "
-                          f"k_w.shape={k_w.shape}, k_w.T.shape={k_w.T.shape}\n")
-        q = h @ q_w.T
-        k = h @ k_w.T
-        v = h @ v_w.T
+            # ── QKV projections ────────────────────────────────────────
+            q_w = weights[f"{prefix}.attn_q.weight"]
+            k_w = weights[f"{prefix}.attn_k.weight"]
+            v_w = weights[f"{prefix}.attn_v.weight"]
+            _dbg.write(f"[FW QKV]  blk.{layer_idx} h={h.shape} q_w={q_w.shape} k_w={k_w.shape} v_w={v_w.shape}\n")
+            q = h @ q_w.T
+            k = h @ k_w.T
+            v = h @ v_w.T
+            _dbg.write(f"[FW QKV]  blk.{layer_idx} q={q.shape} k={k.shape} v={v.shape}\n")
 
-        # Validate Q shape matches expected (n_heads * head_dim)
-        # This catches the case where QKV was split with different head_dim than expected
-        expected_q_dim = n_heads * head_dim
-        if q.shape[-1] != expected_q_dim:
-            import sys as _sys
-            _sys.stderr.write(
-                f"\n[WARN] blk.{layer_idx} Q shape {q.shape} != "
-                f"expected (seq, {expected_q_dim}). "
-                f"head_dim={head_dim}, n_heads={n_heads}, n_kv={n_kv_heads}\n"
-            )
-            # Also update n_kv_heads in case it was wrong
-            actual_kv_heads = min(n_kv_heads, n_heads)
-            actual_head_dim = q.shape[-1] // n_heads if n_heads > 0 else head_dim
-            _sys.stderr.write(f"[WARN] Also auto-correcting n_kv_heads from {n_kv_heads} to {actual_kv_heads}, head_dim to {actual_head_dim}\n")
-            n_kv_heads = actual_kv_heads
-            head_dim = actual_head_dim
-            # Must also re-compute k and v with the corrected dimensions to match q
-            k = h @ weights[f"{prefix}.attn_k.weight"].T
-            v = h @ weights[f"{prefix}.attn_v.weight"].T
+            # ── RoPE + cache ──────────────────────────────────────────
+            cos_slice = cos_cache[:seq_len]
+            sin_slice = sin_cache[:seq_len]
+            q_r = rope(q.reshape(seq_len, n_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+            k_r = rope(k.reshape(seq_len, n_kv_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+            _dbg.write(f"[FW ROPE] blk.{layer_idx} q_r={q_r.shape} k_r={k_r.shape}\n")
 
-        # Apply RoPE
-        cos_slice = cos_cache[:seq_len]
-        sin_slice = sin_cache[:seq_len]
-        q_r = rope(q.reshape(seq_len, n_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
-        k_r = rope(k.reshape(seq_len, n_kv_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+            kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, head_dim))
+            kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
 
-        # Store in KV cache
-        kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, head_dim))
-        kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
+            # ── Attention ─────────────────────────────────────────────
+            attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
+            _dbg.write(f"[FW ATTN] blk.{layer_idx} attn_out={attn_out.shape}\n")
 
-        # Attention with causal mask
-        attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
-        o_w = weights[f"{prefix}.attn_output.weight"]
-        _sys.stderr.write(f"[ATTN OUT] blk.{layer_idx}: attn_out.shape={attn_out.shape}, o_w.shape={o_w.shape}, o_w.T.shape={o_w.T.shape}\n")
-        attn_out = attn_out @ o_w.T
+            # ── Output projection ─────────────────────────────────────
+            o_w = weights[f"{prefix}.attn_output.weight"]
+            _dbg.write(f"[FW OPROJ] blk.{layer_idx} attn_out={attn_out.shape} o_w={o_w.shape}\n")
+            attn_out = attn_out @ o_w.T
 
-        x = x + attn_out
+            x = x + attn_out
+            _dbg.write(f"[FW RES1] blk.{layer_idx} x={x.shape}\n")
 
-        # FFN (dense during prefill) — MoE or dense
-        h_ffn = rms_norm(x, weights[f"{prefix}.ffn_norm.weight"], eps)
-        if f"{prefix}.ffn_gate_inp.weight" in weights:
-            # MoE layer
-            ffn_gate_inp = weights[f"{prefix}.ffn_gate_inp.weight"]
-            ffn_up_exps = weights[f"{prefix}.ffn_up_exps.weight"]
-            ffn_down_exps = weights[f"{prefix}.ffn_down_exps.weight"]
-            ffn_gate_exps = weights[f"{prefix}.ffn_gate_exps.weight"]
-            _sys.stderr.write(f"[FFN MOE PRECHECK] blk.{layer_idx}: h_ffn.shape={h_ffn.shape}, "
-                              f"gate_inp.shape={ffn_gate_inp.shape}, "
-                              f"up_exps.shape={ffn_up_exps.shape}, "
-                              f"down_exps.shape={ffn_down_exps.shape}, "
-                              f"gate_exps.shape={ffn_gate_exps.shape}\n")
-            ffn_out = _moe_ffn_prefill(weights, prefix, h_ffn, moe_cache)
-        else:
-            gate_w = weights[f"{prefix}.ffn_gate.weight"]
-            up_w = weights[f"{prefix}.ffn_up.weight"]
-            down_w = weights[f"{prefix}.ffn_down.weight"]
-            _sys.stderr.write(f"[FFN DENSE PRECHECK] blk.{layer_idx}: h_ffn.shape={h_ffn.shape}, "
-                              f"gate_w.shape={gate_w.shape}, up_w.shape={up_w.shape}, down_w.shape={down_w.shape}\n")
-            ffn_out = ffn_silu(h_ffn, gate_w, up_w, down_w)
-        x = x + ffn_out
+            # ── FFN (MoE or dense) ────────────────────────────────────
+            h_ffn = rms_norm(x, weights[f"{prefix}.ffn_norm.weight"], eps)
+            if f"{prefix}.ffn_gate_inp.weight" in weights:
+                ffn_gate_inp = weights[f"{prefix}.ffn_gate_inp.weight"]
+                ffn_up_exps  = weights[f"{prefix}.ffn_up_exps.weight"]
+                ffn_down_exps= weights[f"{prefix}.ffn_down_exps.weight"]
+                ffn_gate_exps= weights[f"{prefix}.ffn_gate_exps.weight"]
+                _dbg.write(f"[FW FFN]  blk.{layer_idx} MoE h_ffn={h_ffn.shape} "
+                            f"gate_inp={ffn_gate_inp.shape} up={ffn_up_exps.shape} "
+                            f"down={ffn_down_exps.shape} gate={ffn_gate_exps.shape}\n")
+                ffn_out = _moe_ffn_prefill(weights, prefix, h_ffn, moe_cache)
+            else:
+                gate_w = weights[f"{prefix}.ffn_gate.weight"]
+                up_w   = weights[f"{prefix}.ffn_up.weight"]
+                down_w = weights[f"{prefix}.ffn_down.weight"]
+                _dbg.write(f"[FW FFN]  blk.{layer_idx} Dense h_ffn={h_ffn.shape} "
+                            f"gate={gate_w.shape} up={up_w.shape} down={down_w.shape}\n")
+                ffn_out = ffn_silu(h_ffn, gate_w, up_w, down_w)
 
-    # Final norm + output projection
-    x = rms_norm(x, output_norm_w, eps)
-    _sys.stderr.write(f"[FINAL PROJ] x.shape={x.shape}, output_w.shape={output_w.shape}\n")
-    logits = x @ output_w.T  # (seq, vocab_size)
+            x = x + ffn_out
+            _dbg.write(f"[FW RES2] blk.{layer_idx} x={x.shape}\n")
+
+        # ── Final norm + output projection ─────────────────────────────
+        _dbg.write(f"[FW FINAL] x={x.shape} output_norm={output_norm_w.shape}\n")
+        x = rms_norm(x, output_norm_w, eps)
+        _dbg.write(f"[FW LOGIT] x={x.shape} output_w={output_w.shape}\n")
+        logits = x @ output_w.T
 
     except Exception:
         import traceback
-        _sys.stderr.write(f"[CRASH] forward_prefill exception:\n{traceback.format_exc()}\n")
+        _dbg.write(f"[CRASH]\n{traceback.format_exc()}")
         raise
 
-    # Bulk-load KV into MiniCache after prefill
+    # ── KV cache bulk-store ──────────────────────────────────────────
     if minicache is not None:
         for layer_idx in range(n_layers):
             minicache.bulk_load(
                 layer_idx, kv_caches_k[layer_idx], kv_caches_v[layer_idx], start_pos=0
             )
 
-    # Bulk-load KV into PagedKVCache after prefill
     if paged_attn is not None:
         for layer_idx in range(n_layers):
             paged_attn.bulk_append(
