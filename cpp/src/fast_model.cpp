@@ -326,6 +326,8 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
         if (!lw.ffn_norm)  lw.ffn_norm  = (const float*)g.tensor_data(pfx + "ln_mlp.weight");
         if (!lw.attn_norm) lw.attn_norm = (const float*)g.tensor_data(pfx + "ln1.weight");
         if (!lw.ffn_norm)  lw.ffn_norm  = (const float*)g.tensor_data(pfx + "ln2.weight");
+        // Hybrid attention/SSM: post_attention_norm used before FFN
+        if (!lw.ffn_norm) lw.ffn_norm = (const float*)g.tensor_data(pfx + "post_attention_norm.weight");
 
         // ── Attention weights ──
         // Try fused QKV first, then fall back to separate Q/K/V
