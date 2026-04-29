@@ -493,6 +493,27 @@ def forward_prefill(
             # ── Output projection ─────────────────────────────────────
             o_w = weights[f"{prefix}.attn_output.weight"]
             _dbg.write(f"[FW OPROJ] blk.{layer_idx} attn_out={attn_out.shape} o_w={o_w.shape}\n")
+
+            # Auto-correct o_w shape if it's wrong for the model architecture
+            # Some models (like Qwen3.6-MoE) have q_dim != hidden_dim
+            # o_w should be (q_dim, hidden_dim) where q_dim = n_heads * head_dim
+            o_w_rows = o_w.shape[0]
+            o_w_cols = o_w.shape[1]
+            q_dim = q.shape[-1]  # actual Q dimension from Q projection
+            expected_o_rows = q_dim
+            if o_w_rows != expected_o_rows:
+                _dbg.write(f"[FW OPROJ] blk.{layer_idx} WARNING: o_w has {o_w_rows} rows, "
+                            f"but q has {q_dim} cols. Transposing to match...\n")
+                o_w = o_w.T  # Transpose to get correct shape
+                o_w_rows, o_w_cols = o_w.shape[0], o_w.shape[1]
+
+            # Final shape check
+            if o_w_rows != q_dim:
+                raise ValueError(
+                    f"attn_output shape mismatch in blk.{layer_idx}: "
+                    f"attn_out has {q_dim} cols but o_w has {o_w_rows} rows. "
+                    f"Expected (q_dim={q_dim}, hidden_dim) or (hidden_dim, q_dim).")
+
             attn_out = attn_out @ o_w.T
 
             x = x + attn_out
@@ -515,6 +536,19 @@ def forward_prefill(
                 down_w = weights[f"{prefix}.ffn_down.weight"]
                 _dbg.write(f"[FW FFN]  blk.{layer_idx} Dense h_ffn={h_ffn.shape} "
                             f"gate={gate_w.shape} up={up_w.shape} down={down_w.shape}\n")
+
+                # Auto-correct FFN weight orientation: handle (hidden,inter) vs (inter,hidden)
+                # ffn_silu expects gate_w.T = (inter, hidden), down_w.T = (hidden, inter)
+                # If gate_w is (hidden, inter), transpose it
+                h_dim = h_ffn.shape[-1]
+                if gate_w.shape[0] == h_dim and gate_w.shape[1] != h_dim:
+                    _dbg.write(f"[FW FFN]  blk.{layer_idx} transposing gate_w from {gate_w.shape}\n")
+                    gate_w = gate_w.T
+                if up_w.shape[0] == h_dim and up_w.shape[1] != h_dim:
+                    up_w = up_w.T
+                if down_w.shape[1] == h_dim and down_w.shape[0] != h_dim:
+                    down_w = down_w.T
+
                 ffn_out = ffn_silu(h_ffn, gate_w, up_w, down_w)
 
             x = x + ffn_out
