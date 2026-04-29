@@ -44,23 +44,17 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
 
     Clamps intermediate values to fp16 range to prevent overflow when
     dequantized weights contain extreme values (common with low-bit quantization).
+    Also guards against NaN/Inf from corrupted quantization blocks.
     """
     x32 = x.astype(np.float32)
     weight32 = weight.astype(np.float32)
-    # Clamp to fp16 range to prevent inf/nan propagation
+    # Clamp to fp16 range to prevent overflow
     x32 = np.clip(x32, -65504.0, 65504.0)
-    weight32 = np.clip(weight32, -65504.0, 65504.0)
+    # Sanitize quantized weights: replace NaN/Inf with 0 (broken quantization blocks)
+    weight32 = np.where(np.isfinite(weight32), weight32, 0.0)
     rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
-    if np.any(np.isnan(x32)) or np.any(np.isinf(x32)):
-        import sys
-        sys.stderr.write(f"[NaN DETECTED in rms_norm] x has NaN/Inf. x.min={np.nanmin(x32):.4f} x.max={np.nanmax(x32):.4f}\n")
-    # DEBUG: print shapes on mismatch
-    if rms.shape[-1] != weight32.shape[-1]:
-        import sys
-        sys.stderr.write(f"[rms_norm DEBUG] x.shape={x.shape} x32.shape={x32.shape} "
-                          f"weight32.shape={weight32.shape} rms.shape={rms.shape}\n")
     return (x32 / rms) * weight32
 
 
@@ -339,8 +333,8 @@ def _get_moe_components(weights, prefix, cache):
         cache[prefix] = None
         return None
 
-    num_active = router_w.shape[-1] if router_w.ndim > 1 else router_w.shape[0]
-    topk = min(8, num_active)  # reasonable default
+    num_experts = router_w.shape[-1] if router_w.ndim > 1 else router_w.shape[0]
+    topk = 2  # Standard MoE top-2; caller can override via ExpertRouter topk
     router = ExpertRouter(router_w, topk=topk)
 
     # Shared expert (DeepSeek-style)
@@ -350,7 +344,7 @@ def _get_moe_components(weights, prefix, cache):
         sg = extras["shared_gate"]
         su = extras["shared_up"]
         sd = extras["shared_down"]
-        _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} sg={sg.shape} su={su.shape} sd={sd.shape}\n")
+        _sys.stderr.write(f"[MoE SHARED DEBUG] {prefix} sg={sg.shape} su={su.shape} sd={sd.shape}\n")
         # Convention (per MoEExpertSet.get_expert):
         #   gate_w: (shared_dim, expert_dim)  ← GGUF (expert_dim, shared_dim) → needs .T
         #   up_w:   (shared_dim, expert_dim)  ← GGUF (expert_dim, shared_dim) → needs .T
@@ -369,7 +363,7 @@ def _get_moe_components(weights, prefix, cache):
                 f"Expected gate/up=(expert,shared), down=(shared,expert). "
                 f"Got: sg.T={sg.T.shape}, su.T={su.T.shape}, sd.T={sd.T.shape}")
         shared = (sg.T, su.T, sd.T)
-        _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} shared_g={shared[0].shape} shared_u={shared[1].shape} shared_d={shared[2].shape}\n")
+        _sys.stderr.write(f"[MoE SHARED DEBUG] {prefix} shared_g={shared[0].shape} shared_u={shared[1].shape} shared_d={shared[2].shape}\n")
 
     cache[prefix] = {"router": router, "experts": expert_set, "shared": shared}
     return cache[prefix]

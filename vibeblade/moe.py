@@ -305,6 +305,17 @@ def detect_moe_config(weights: dict[str, np.ndarray]) -> MoEConfig | None:
     if gguf_router_keys and gguf_gate_keys:
         router_w = weights[gguf_router_keys[0]]
         gate_w   = weights[gguf_gate_keys[0]]
+
+        # Detect and fix router weight orientation.
+        # GGUF stores ffn_gate_inp as (num_experts, hidden_dim) for some models,
+        # but ExpertRouter expects (hidden_dim, num_experts).
+        # Cross-reference with expert weights: gate_w.shape[0] == num_experts.
+        if router_w.ndim == 2 and gate_w.ndim >= 2:
+            num_experts_from_gate = gate_w.shape[0]
+            if (router_w.shape[0] == num_experts_from_gate
+                    and router_w.shape[1] != num_experts_from_gate):
+                router_w = router_w.T.copy()
+
         # Derive dimensions from tensors
         num_experts = int(router_w.shape[1])
         shared_dim  = int(router_w.shape[0])
@@ -506,6 +517,21 @@ def load_moe_weights_from_layer(
         gate_w   = weights[gate_key]
         up_w     = weights.get(up_key)
         down_w   = weights.get(down_key)
+
+        # Detect and fix router weight orientation.
+        # GGUF stores ffn_gate_inp as (num_experts, hidden_dim) for some models,
+        # but ExpertRouter expects (hidden_dim, num_experts).
+        # Cross-reference with expert weights: gate_w.shape[0] == num_experts.
+        if router_w.ndim == 2 and gate_w.ndim >= 2:
+            num_experts_from_gate = gate_w.shape[0]
+            if (router_w.shape[0] == num_experts_from_gate
+                    and router_w.shape[1] != num_experts_from_gate):
+                import sys as _sys
+                _sys.stderr.write(
+                    f"[MoE ROUTER] transposing router from {router_w.shape} "
+                    f"to ({router_w.shape[1]}, {router_w.shape[0]})\n"
+                )
+                router_w = router_w.T.copy()
 
         # Shared expert (DeepSeek-style "shunt" or Qwen-style "shexp")
         for shared_suffix, alias in [("shexp", "shexp"), ("shunt", "shunt")]:
