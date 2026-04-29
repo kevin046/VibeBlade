@@ -53,6 +53,9 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
     rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
+    if np.any(np.isnan(x32)) or np.any(np.isinf(x32)):
+        import sys
+        sys.stderr.write(f"[NaN DETECTED in rms_norm] x has NaN/Inf. x.min={np.nanmin(x32):.4f} x.max={np.nanmax(x32):.4f}\n")
     # DEBUG: print shapes on mismatch
     if rms.shape[-1] != weight32.shape[-1]:
         import sys
@@ -511,7 +514,11 @@ def forward_prefill(
             kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
 
             # ── Attention ─────────────────────────────────────────────
+            if np.any(np.isnan(q_r)) or np.any(np.isinf(q_r)):
+                _dbg.write(f"[NaN DETECTED before attn] blk.{layer_idx} q_r has NaN/Inf\n")
             attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
+            if np.any(np.isnan(attn_out)) or np.any(np.isinf(attn_out)):
+                _dbg.write(f"[NaN DETECTED after attn] blk.{layer_idx} attn_out min={np.nanmin(attn_out):.4f} max={np.nanmax(attn_out):.4f}\n")
             _dbg.write(f"[FW ATTN] blk.{layer_idx} attn_out={attn_out.shape}\n")
 
             # ── Output projection ─────────────────────────────────────
@@ -555,6 +562,8 @@ def forward_prefill(
                 _dbg.write(f"[FW FFN]  blk.{layer_idx} MoE h_ffn={h_ffn.shape} "
                             f"gate_inp={ffn_gate_inp.shape} up={ffn_up_exps.shape} "
                             f"down={ffn_down_exps.shape} gate={ffn_gate_exps.shape}\n")
+                if np.any(np.isnan(h_ffn)) or np.any(np.isinf(h_ffn)):
+                    _dbg.write(f"[NaN DETECTED before FFN] blk.{layer_idx} h_ffn min={np.nanmin(h_ffn):.4f} max={np.nanmax(h_ffn):.4f}\n")
                 ffn_out = _moe_ffn_prefill(weights, prefix, h_ffn, moe_cache)
             else:
                 gate_w = weights[f"{prefix}.ffn_gate.weight"]
