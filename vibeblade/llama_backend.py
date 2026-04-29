@@ -55,7 +55,12 @@ class _LazyCDLL:
     # --- Model ---
     lib.llama_model_default_params.argtypes = []
     lib.llama_model_default_params.restype = ctypes.c_void_p
-    lib.llama_model_load_from_file.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    # llama_model_load_from_file / llama_init_from_model take structs BY VALUE.
+    # The helper stores them in static buffers; we memmove into opaque ctypes structs.
+    class _OpaqueParams(ctypes.Structure):
+      _fields_ = [("_pad", ctypes.c_byte * 256)]
+    lib._opaque_params_cls = _OpaqueParams  # stash for load()
+    lib.llama_model_load_from_file.argtypes = [ctypes.c_char_p, _OpaqueParams]
     lib.llama_model_load_from_file.restype = ctypes.c_void_p
     lib.llama_model_free.argtypes = [ctypes.c_void_p]
     lib.llama_model_free.restype = None
@@ -71,7 +76,7 @@ class _LazyCDLL:
     # --- Context ---
     lib.llama_context_default_params.argtypes = []
     lib.llama_context_default_params.restype = ctypes.c_void_p
-    lib.llama_init_from_model.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.llama_init_from_model.argtypes = [ctypes.c_void_p, _OpaqueParams]
     lib.llama_init_from_model.restype = ctypes.c_void_p
     lib.llama_free.argtypes = [ctypes.c_void_p]
     lib.llama_free.restype = None
@@ -266,16 +271,36 @@ class LlamaCppBackend:
         self._n_threads = n_threads
         self._n_threads_batch = n_threads_batch
 
-        # Set params via C helper (avoids ctypes struct mismatch)
+        # Set params via C helper (avoids ctypes struct mismatch).
+        # The helper stores structs in static buffers; we memmove the raw bytes
+        # into opaque ctypes.Structure instances so they're passed BY VALUE on the stack.
+        _helper.override_model_params.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
         _helper.override_model_params(1, 0, 0)   # use_mmap=1, use_mlock=0, n_gpu_layers=0
+        _helper.override_context_params.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32]
         _helper.override_context_params(n_ctx, n_threads, n_threads_batch)
-        mparams_ptr = _helper.get_default_model_params()
-        cparams_ptr = _helper.get_default_context_params()
+
+        _helper.get_default_model_params.restype = ctypes.c_void_p
+        _helper.get_default_context_params.restype = ctypes.c_void_p
+        _helper.get_model_params_size.argtypes = []
+        _helper.get_model_params_size.restype = ctypes.c_int32
+        _helper.get_context_params_size.argtypes = []
+        _helper.get_context_params_size.restype = ctypes.c_int32
+
+        mptr = _helper.get_default_model_params()
+        cptr = _helper.get_default_context_params()
+        msize = _helper.get_model_params_size()
+        csize = _helper.get_context_params_size()
+
+        OpaqueParams = _lib._opaque_params_cls
+        m_struct = OpaqueParams()
+        c_struct = OpaqueParams()
+        ctypes.memmove(ctypes.addressof(m_struct), mptr, msize)
+        ctypes.memmove(ctypes.addressof(c_struct), cptr, csize)
 
         # Load model
         if isinstance(model_path, str):
             model_path = model_path.encode("utf-8")
-        self._model = _lib.llama_model_load_from_file(model_path, mparams_ptr)
+        self._model = _lib.llama_model_load_from_file(model_path, m_struct)
         if not self._model:
             raise RuntimeError(f"Failed to load model: {model_path}")
 
@@ -283,7 +308,7 @@ class LlamaCppBackend:
         self._eos = _lib.llama_vocab_eos(self._vocab)
 
         # Create context
-        self._ctx = _lib.llama_init_from_model(self._model, cparams_ptr)
+        self._ctx = _lib.llama_init_from_model(self._model, c_struct)
         if not self._ctx:
             _lib.llama_model_free(self._model)
             raise RuntimeError("Failed to create context")
@@ -598,6 +623,17 @@ class LlamaCppBackend:
             _lib.llama_model_free(self._model)
             self._model = None
         self._loaded = False
+
+    def close(self) -> None:
+        """Alias for free()."""
+        self.free()
+
+    def set_turbosparse(self, enabled: bool, threshold: float = 0.1) -> None:
+        """Enable/disable TurboSparse activation sparsity."""
+        if enabled:
+            _lib.llama_turbosparse_enable(None, ctypes.c_float(threshold))
+        else:
+            _lib.llama_turbosparse_disable(None)
 
     def __del__(self):
         try:
