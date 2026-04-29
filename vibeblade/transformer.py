@@ -502,11 +502,13 @@ def forward_prefill(
             o_w_cols = o_w.shape[1]
             q_dim = q.shape[-1]  # actual Q dimension from Q projection
             expected_o_rows = q_dim
+            _o_w_transposed = False
             if o_w_rows != expected_o_rows:
                 _dbg.write(f"[FW OPROJ] blk.{layer_idx} WARNING: o_w has {o_w_rows} rows, "
                             f"but q has {q_dim} cols. Transposing to match...\n")
                 o_w = o_w.T  # Transpose to get correct shape
                 o_w_rows, o_w_cols = o_w.shape[0], o_w.shape[1]
+                _o_w_transposed = True
 
             # Final shape check
             if o_w_rows != q_dim:
@@ -515,7 +517,7 @@ def forward_prefill(
                     f"attn_out has {q_dim} cols but o_w has {o_w_rows} rows. "
                     f"Expected (q_dim={q_dim}, hidden_dim) or (hidden_dim, q_dim).")
 
-            attn_out = attn_out @ o_w.T
+            attn_out = attn_out @ o_w if not _o_w_transposed else attn_out @ o_w.T
 
             x = x + attn_out
             _dbg.write(f"[FW RES1] blk.{layer_idx} x={x.shape}\n")
