@@ -177,6 +177,16 @@ _lib.llama_set_n_threads.restype = None
 _lib.llama_n_threads_batch.argtypes = [ctypes.c_void_p]
 _lib.llama_n_threads_batch.restype = ctypes.c_int32
 
+# --- TurboSparse ---
+_lib.llama_turbosparse_enable.argtypes = [ctypes.c_void_p, ctypes.c_float]
+_lib.llama_turbosparse_enable.restype = None
+_lib.llama_turbosparse_disable.argtypes = [ctypes.c_void_p]
+_lib.llama_turbosparse_disable.restype = None
+_lib.llama_turbosparse_is_enabled.argtypes = [ctypes.c_void_p]
+_lib.llama_turbosparse_is_enabled.restype = ctypes.c_bool
+_lib.llama_turbosparse_get_threshold.argtypes = [ctypes.c_void_p]
+_lib.llama_turbosparse_get_threshold.restype = ctypes.c_float
+
 # --- C helper ---
 _helper.override_model_params.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
 _helper.override_model_params.restype = None
@@ -531,6 +541,32 @@ class LlamaCppBackend:
             prompt_tokens=n_prompt, stop_reason=stop_reason,
             time_prefill=t_prefill - t0, time_decode=t_decode, time_total=t_end - t0,
         )
+
+    # ----------------------------------------------------------
+    # TurboSparse (activation sparsity for MoE models)
+    # ----------------------------------------------------------
+    def turbosparse_enable(self, threshold: float = 0.1) -> None:
+        """Enable TurboSparse activation pruning in MoE FFN matmuls.
+
+        Args:
+            threshold: magnitude threshold — activations with |a| < threshold
+                       are zeroed, skipping their matmul contribution.
+        """
+        if not self._ctx:
+            raise RuntimeError("No context loaded")
+        _lib.llama_turbosparse_enable(self._ctx, threshold)
+
+    def turbosparse_disable(self) -> None:
+        """Disable TurboSparse activation pruning."""
+        if not self._ctx:
+            raise RuntimeError("No context loaded")
+        _lib.llama_turbosparse_disable(self._ctx)
+
+    def turbosparse_is_enabled(self) -> bool:
+        return bool(_lib.llama_turbosparse_is_enabled(self._ctx))
+
+    def turbosparse_get_threshold(self) -> float:
+        return float(_lib.llama_turbosparse_get_threshold(self._ctx))
 
     # ----------------------------------------------------------
     # Cleanup
