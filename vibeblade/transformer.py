@@ -53,6 +53,10 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
     rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
+    # DEBUG: print shapes on mismatch
+    if rms.shape[-1] != 1 and weight32.shape[-1] != rms.shape[-1]:
+        import sys
+        sys.stderr.write(f"[rms_norm DEBUG] x32.shape={x32.shape} weight32.shape={weight32.shape} rms.shape={rms.shape}\n")
     return (x32 / rms) * weight32
 
 

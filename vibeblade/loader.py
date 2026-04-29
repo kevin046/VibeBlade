@@ -1010,6 +1010,10 @@ class _LazyWeights:
 
         info = self._name_map[real_key]
         arr = self._loader.load_tensor(info["name"], self._dtype)
+        # DEBUG: warn if weight shape is suspiciously large
+        if "attn_norm" in key and arr.ndim == 1 and arr.shape[0] > 4098:
+            import sys as _sys
+            _sys.stderr.write(f"[LOADER DEBUG] {key}: shape={arr.shape}, nbytes={arr.nbytes}, GGUF_shape={info['shape']}\n")
 
         # Optional GPU offload
         if self._gpu_offload:
