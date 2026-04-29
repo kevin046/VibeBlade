@@ -21,20 +21,21 @@ void dequantize_row_q5_K(const void* row, float* out, int64_t n);
 void dequantize_row_q6_K(const void* row, float* out, int64_t n);
 
 // Matrix-vector multiply with inline dequantization:
-// out[j] = sum_i(x[i] * dequant(weight_row(j)[i])) for each output row j
-// x: (1, K) fp32, weight: (N, K) quantized, out: (N,) fp32
-// This is the hottest function in decode — dequant directly into dot product.
+// GGUF stores weights as (K, N) — K rows of N elements.
+// Computes: out[n] = sum_k(x[k] * W[k][n]) for n = 0..N-1
+// scratch: caller-provided buffer of at least N floats for row dequantization.
 void gemv_dequant(
  const float* x,    // (K,) input vector
- const void* weights, // quantized weight matrix, row-major
+ const void* weights, // quantized weight matrix in GGUF (K, N) layout
  float* out,        // (N,) output
- int64_t K,         // input dimension
- int64_t N,         // output dimension
- ggml_type wtype    // quantization type of weights
+ int64_t K,         // input dimension (= GGUF rows)
+ int64_t N,         // output dimension (= GGUF cols)
+ ggml_type wtype,   // quantization type of weights
+ float* scratch     // (N,) temp buffer for row dequantization
 );
 
-// Multi-threaded gemv_dequant — uses std::thread pool (no OpenMP, no LTO conflict).
-// n_threads=0 uses hardware_concurrency()-1. Falls back to single-threaded for small N.
+// Multi-threaded gemv_dequant — falls back to single-threaded for now.
+// TODO: per-thread partial outputs for proper MT with GGUF layout.
 void gemv_dequant_mt(
  const float* x,
  const void* weights,
@@ -42,7 +43,8 @@ void gemv_dequant_mt(
  int64_t K,
  int64_t N,
  ggml_type wtype,
- int n_threads = 0  // 0 = auto-detect
+ int n_threads,     // 0 = auto-detect
+ float* scratch     // (N,) temp buffer
 );
 
 } // namespace vibeblade

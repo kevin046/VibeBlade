@@ -95,6 +95,35 @@ VibeBladeFast::~VibeBladeFast() = default;
 void VibeBladeFast::load(const char* path) {
     gguf_ = std::make_unique<GGUFFile>(path);
     extract_config(*gguf_);
+
+    // Probe fused QKV tensor to correct n_kv_heads if metadata is wrong.
+    // For hybrid attention+SSM models (Qwen3.5-MoE), metadata reports
+    // head_count_kv=2 but the actual fused QKV tensor reveals kv_heads=8.
+    {
+        auto qkv_info = gguf_->tensor_info("blk.0.attn_qkv.weight");
+        fprintf(stderr, "[DEBUG] QKV probe: use_fused_qkv=%d, n_layers=%d, qkv_info=%p\n",
+                cfg_.use_fused_qkv, cfg_.n_layers, (void*)qkv_info);
+        if (qkv_info) {
+            fprintf(stderr, "[DEBUG] QKV tensor dims: %ld x %ld (n_dims=%d)\n",
+                    (long)qkv_info->dims[0], (long)qkv_info->dims[1], qkv_info->n_dims);
+        }
+        if (cfg_.use_fused_qkv && cfg_.n_layers > 0 && qkv_info && qkv_info->n_dims >= 2) {
+            int64_t qkv_rows = qkv_info->dims[0];  // (n_h*hd + 2*n_kv*hd)
+            int q_dim = cfg_.n_heads * cfg_.head_dim;
+            int64_t kv_total = qkv_rows - q_dim;
+            fprintf(stderr, "[DEBUG] qkv_rows=%ld, q_dim=%d, kv_total=%ld, head_dim=%d\n",
+                    (long)qkv_rows, q_dim, (long)kv_total, cfg_.head_dim);
+            if (kv_total > 0 && cfg_.head_dim > 0) {
+                int actual_kv = (int)(kv_total / cfg_.head_dim) / 2;
+                fprintf(stderr, "[DEBUG] actual_kv=%d, old n_kv_heads=%d\n", actual_kv, cfg_.n_kv_heads);
+                if (actual_kv > 0 && actual_kv != cfg_.n_kv_heads) {
+                    cfg_.n_kv_heads = actual_kv;
+                    fprintf(stderr, "[DEBUG] Corrected n_kv_heads to %d\n", cfg_.n_kv_heads);
+                }
+            }
+        }
+    }
+
     build_rope_cache();
     map_weights(*gguf_);
     alloc_kv_cache();
@@ -129,6 +158,11 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
     cfg_.n_kv_heads       = (int)gi("attention.head_count_kv", cfg_.n_heads);
     cfg_.hidden_dim       = (int)gi("embedding_length");
     cfg_.intermediate_dim = (int)gi("feed_forward_length");
+    // MoE models use expert-specific FFN dimension
+    if (cfg_.intermediate_dim == 0)
+        cfg_.intermediate_dim = (int)gi("expert_feed_forward_length");
+    if (cfg_.intermediate_dim == 0)
+        cfg_.intermediate_dim = (int)gi("expert_shared_feed_forward_length");
     cfg_.context_length   = (int)gi("context_length", 2048);
 
     // head_dim: explicit key_length, or derive from hidden_dim / n_heads
@@ -138,13 +172,16 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
 
     // vocab_size: explicit, or derive from token_embd weight rows
     cfg_.vocab_size = (int)gi("vocab_size");
-    if (cfg_.vocab_size == 0) {
+    {
+        // Always derive vocab_size from the actual embedding tensor — metadata
+        // is often wrong (e.g., Qwen3.5-MoE reports 1000 but actual vocab is 248320).
         auto emb_info = g.tensor_info("token_embd.weight");
         if (!emb_info) emb_info = g.tensor_info("wte.weight");
         if (emb_info) {
-            // GGUF stores dims as [n_rows, n_cols]; for embeddings, the larger
-            // dimension is typically vocab_size (other is hidden_dim).
-            cfg_.vocab_size = (int)std::max(emb_info->dims[0], emb_info->dims[1]);
+            int actual_vocab = (int)std::max(emb_info->dims[0], emb_info->dims[1]);
+            if (actual_vocab > cfg_.vocab_size || cfg_.vocab_size <= 0) {
+                cfg_.vocab_size = actual_vocab;
+            }
         }
     }
 
@@ -152,6 +189,12 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
 
     // Sliding window attention (Mistral)
     cfg_.sliding_window = (int)gi("attention.sliding_window");
+
+    // MoE expert configuration
+    cfg_.n_experts      = (int)gi("expert_count", 0);
+    cfg_.n_experts_used = (int)gi("expert_used_count", 0);
+    if (cfg_.n_experts_used == 0 && cfg_.n_experts > 0)
+        cfg_.n_experts_used = 2;  // safe default
 
     if (cfg_.arch.empty() || cfg_.n_layers == 0) {
         cfg_.arch = "llama";
@@ -186,7 +229,10 @@ void VibeBladeFast::extract_config(const GGUFFile& g) {
     const std::string& a = cfg_.arch;
     cfg_.use_geglu = (a == "gemma" || a == "gemma2");
     cfg_.use_parallel_attn = (a == "falcon" || a == "gptneox");
-    cfg_.use_neox_rope = (a == "falcon" || a == "gptneox" || a == "starcoder2");
+    cfg_.use_neox_rope = (a == "falcon" || a == "gptneox" || a == "starcoder2"
+                       || a == "llama" || a == "llama_old" || a == "qwen2"
+                       || a == "mistral" || a == "mixtral" || a == "codellama"
+                       || a == "tinyllama" || a == "qwen2_moe" || a == "qwen35moe");
 
     // Fused QKV: detect from weight names (checked in map_weights)
     // Most models EXCEPT base llama use fused QKV
@@ -286,6 +332,8 @@ void VibeBladeFast::alloc_kv_cache() {
     hidden_buf_.resize(hd);
     normed_buf_.resize(hd);
     logits_buf_.resize(cfg_.vocab_size);
+    // gemv_dequant needs scratch for row dequantization: max(vocab_size, intermediate_dim)
+    dequant_buf_.resize(std::max<int>(cfg_.vocab_size, cfg_.intermediate_dim));
 }
 
 void VibeBladeFast::map_weights(const GGUFFile& g) {
@@ -449,20 +497,16 @@ static void moe_expert_forward(
     ggml_type down_type,
     int hidden_dim,
     int intermediate_dim,
-    float* out                     // (hidden_dim,)
+    float* out,                    // (hidden_dim,)
+    float* gate_scratch,          // (intermediate_dim,) scratch
+    float* up_scratch             // (intermediate_dim,) scratch
 ) {
-    std::vector<float> gate_buf(intermediate_dim);
-    gemv_dequant(x, gate_w, gate_buf.data(), hidden_dim, intermediate_dim, gate_type);
-
-    std::vector<float> up_buf(intermediate_dim);
-    gemv_dequant(x, up_w, up_buf.data(), hidden_dim, intermediate_dim, up_type);
-
-    std::vector<float> hidden(intermediate_dim);
+    gemv_dequant(x, gate_w, gate_scratch, hidden_dim, intermediate_dim, gate_type, gate_scratch);
+    gemv_dequant(x, up_w, up_scratch, hidden_dim, intermediate_dim, up_type, up_scratch);
     for (int i = 0; i < intermediate_dim; i++) {
-        hidden[i] = silu_f(gate_buf[i]) * up_buf[i];
+        gate_scratch[i] = silu_f(gate_scratch[i]) * up_scratch[i];
     }
-
-    gemv_dequant(hidden.data(), down_w, out, intermediate_dim, hidden_dim, down_type);
+    gemv_dequant(gate_scratch, down_w, out, intermediate_dim, hidden_dim, down_type, gate_scratch);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -511,7 +555,7 @@ void VibeBladeFast::forward_layer(
         int qkv_dim = q_dim + 2 * kv_dim;
         for (int s = 0; s < seq_len; s++) {
             gemv_dequant(normed + s * hd, lw.attn_qkv, Q + s * q_dim,
-                         hd, qkv_dim, lw.qkv_type);
+                         hd, qkv_dim, lw.qkv_type, dequant_buf_.data());
             // Q is already at Q + s*q_dim, K and V follow
             // QKV layout: [Q | K | V] — but K/V are packed after Q
             memcpy(K_buf + s * kv_dim, Q + s * qkv_dim + q_dim, kv_dim * sizeof(float));
@@ -519,9 +563,9 @@ void VibeBladeFast::forward_layer(
         }
     } else {
         for (int s = 0; s < seq_len; s++) {
-            gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype);
-            gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype);
-            gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype);
+            gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype, dequant_buf_.data());
+            gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype, dequant_buf_.data());
+            gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype, dequant_buf_.data());
         }
     }
 
@@ -653,7 +697,7 @@ void VibeBladeFast::forward_layer(
 
     // ── 6. Output projection ──
     for (int s = 0; s < seq_len; s++) {
-        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype);
+        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype, dequant_buf_.data());
     }
 
     // ── 7. Post-attention residual ──
@@ -699,7 +743,7 @@ void VibeBladeFast::forward_layer(
 
             // Router: x @ gate_inp.T → (n_exp,)
             std::vector<float> router_logits(n_exp);
-            gemv_dequant(x, lw.ffn_gate_inp, router_logits.data(), hd, n_exp, lw.gate_inp_type);
+            gemv_dequant(x, lw.ffn_gate_inp, router_logits.data(), hd, n_exp, lw.gate_inp_type, dequant_buf_.data());
 
             // Softmax over expert logits
             softmax(router_logits.data(), n_exp);
@@ -722,7 +766,8 @@ void VibeBladeFast::forward_layer(
 
                 moe_expert_forward(x, eg, eu, ed,
                                    lw.gate_exps_type, lw.up_exps_type, lw.down_exps_type,
-                                   hd, exp_inter, exp_out.data());
+                                   hd, exp_inter, exp_out.data(),
+                                   dequant_buf_.data(), dequant_buf_.data());
 
                 for (int d = 0; d < hd; d++) moe_out[d] += w * exp_out[d];
             }
@@ -733,7 +778,8 @@ void VibeBladeFast::forward_layer(
                 moe_expert_forward(x,
                                    lw.ffn_gate_shexp, lw.ffn_up_shexp, lw.ffn_down_shexp,
                                    lw.shexp_gate_type, lw.shexp_up_type, lw.shexp_down_type,
-                                   hd, exp_inter, shared_out.data());
+                                   hd, exp_inter, shared_out.data(),
+                                   dequant_buf_.data(), dequant_buf_.data());
                 for (int d = 0; d < hd; d++) moe_out[d] += shared_out[d];
             }
 
@@ -743,9 +789,9 @@ void VibeBladeFast::forward_layer(
         // ── Dense FFN (SwiGLU or GeGLU) with TurboSparse ──
         for (int s = 0; s < seq_len; s++) {
             gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
-                         hd, cfg_.intermediate_dim, lw.gate_type);
+                         hd, cfg_.intermediate_dim, lw.gate_type, dequant_buf_.data());
             gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
-                         hd, cfg_.intermediate_dim, lw.up_type);
+                         hd, cfg_.intermediate_dim, lw.up_type, dequant_buf_.data());
 
             int id = cfg_.intermediate_dim;
 
@@ -770,10 +816,10 @@ void VibeBladeFast::forward_layer(
                         }
                     }
                     gemv_dequant(sparse_gate.data(), lw.ffn_down, ff_out + s * hd,
-                                 id, hd, GGML_TYPE_F32);
+                                 id, hd, GGML_TYPE_F32, dequant_buf_.data());
                 } else {
                     gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
-                                 id, hd, lw.down_type);
+                                 id, hd, lw.down_type, dequant_buf_.data());
                 }
             } else if (cfg_.use_geglu) {
                 for (int i = 0; i < id; i++) {
@@ -792,7 +838,7 @@ void VibeBladeFast::forward_layer(
             }
 
             gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
-                         id, hd, lw.down_type);
+                         id, hd, lw.down_type, dequant_buf_.data());
         }
     } else {
         // No FFN weights (shouldn't happen in practice)
@@ -853,7 +899,7 @@ std::vector<float> VibeBladeFast::prefill(const std::vector<int>& token_ids) {
     // ── Output projection: last token only → logits ──
     int last = seq_len - 1;
     std::vector<float> logits(cfg_.vocab_size);
-    gemv_dequant_mt(normed.data() + last * hd, output_, logits.data(), hd, cfg_.vocab_size, out_type_, 0);
+    gemv_dequant_mt(normed.data() + last * hd, output_, logits.data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
 
     position_ += seq_len;
     return logits;
@@ -889,7 +935,7 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
     rms_norm(x_buf_.data(), output_norm_, normed_buf_.data(), hd, cfg_.norm_eps);
 
     // ── Output projection → logits ──
-    gemv_dequant_mt(normed_buf_.data(), output_, logits_buf_.data(), hd, cfg_.vocab_size, out_type_, 0);
+    gemv_dequant_mt(normed_buf_.data(), output_, logits_buf_.data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
 
     position_++;
     return logits_buf_;  // Copy — safe because caller owns it

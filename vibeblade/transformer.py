@@ -760,7 +760,22 @@ def forward_decode_single(
 
             # Attention
             attn_out = attention(q, k_seq, v_seq, n_heads, n_kv_heads)
-            attn_out = attn_out @ weights[f"{prefix}.attn_output.weight"].T
+
+            # Output projection — auto-correct shape for fused QKV / attn_gate models
+            # Weight may be stored as (out_dim, hidden_dim) or (hidden_dim, out_dim).
+            # We need: attn_out @ W -> (1, hidden_dim)
+            #   If W is (attn_dim, hidden_dim): use W.T → (1, attn_dim) @ (hidden_dim, attn_dim) NO
+            #   If W is (hidden_dim, attn_dim): use W   → (1, attn_dim) @ (attn_dim, hidden_dim) ... no
+            # Actually: attn_out is (1, attn_dim), we want (1, hidden_dim).
+            # Standard: W is (hidden_dim, attn_dim) → attn_out @ W.T works
+            # Qwen3.6:  W is (attn_dim, hidden_dim) → attn_out @ W works
+            o_w = weights[f"{prefix}.attn_output.weight"]
+            if o_w.shape[1] == attn_out.shape[-1]:
+                # W is (hidden_dim, attn_dim) — standard layout
+                attn_out = attn_out @ o_w.T
+            else:
+                # W is (attn_dim, hidden_dim) — transposed layout
+                attn_out = attn_out @ o_w
 
             # Residual
             h = x + attn_out

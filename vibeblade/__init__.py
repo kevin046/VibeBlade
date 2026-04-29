@@ -203,6 +203,12 @@ class VibeBladeModel:
             self.config = data["config"]
             self.weights = data["tensors"]
             self._extract_config()
+            # Store EOS token ID from metadata
+            arch = self.metadata.get("general.architecture", "llama")
+            self.eos_token_id = int(self.metadata.get(
+                f"{arch}.eos_token_id",
+                self.metadata.get("tokenizer.ggml.eos_token_id", 2),
+            ))
         else:
             # Raw numpy weights directory or file
             self.pool = UnifiedMemoryPool(model_path)
@@ -284,6 +290,19 @@ class VibeBladeModel:
         )
         self.generator = TextGenerator(temperature=1.0, top_k=50, top_p=0.9)
 
+        # Initialize BPE tokenizer from GGUF metadata (if available)
+        self.tokenizer = None
+        if self.metadata and "tokenizer.ggml.tokens" in self.metadata:
+            from .tokenizer import GGUFTokenizer
+            try:
+                self.tokenizer = GGUFTokenizer.from_gguf_metadata(self.metadata)
+                print(f"   Tokenizer: BPE (vocab {len(self.tokenizer.tokens)}, "
+                      f"{len(self.tokenizer.merges)} merges, EOS={self.tokenizer.eos_token_id})")
+            except Exception as e:
+                print(f"   Tokenizer: fallback (BPE init failed: {e})")
+        else:
+            print(f"   Tokenizer: byte-level fallback")
+
         # Build RoPE cache (cos/sin tables for rotary positional embeddings)
         head_dim = self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"])
         max_ctx = self.config.get("context_length", 2048)
@@ -336,13 +355,21 @@ class VibeBladeModel:
         )
 
         # Cross-validate with attn_gate (output projection) shape if available
-        # attn_gate.weight is (hidden_dim, n_heads * head_dim) — the cols tell us
-        # the attention output dimension, which must equal n_heads * head_dim
+        # attn_gate.weight layout depends on the model:
+        #   Standard: (hidden_dim, n_heads * head_dim)  — gate_shape[1] = attn_out_dim
+        #   Qwen3.6+: (n_heads * head_dim, hidden_dim)  — gate_shape[0] = attn_out_dim
+        # So we validate against whichever dimension != hidden_dim
         if gate_shape is not None and len(gate_shape) == 2:
-            attn_out_dim = gate_shape[1]  # n_heads * head_dim
+            # The attention output dim is the one that's NOT hidden_dim
+            gate_dims = set(gate_shape)
+            attn_out_candidates = gate_dims - {hidden_dim}
+            # If both dims differ from hidden_dim, try both
+            if not attn_out_candidates:
+                attn_out_candidates = gate_dims
             validated = []
             for n_h, n_kv, hd in candidates:
-                if n_h * hd == attn_out_dim:
+                attn_out_dim = n_h * hd
+                if attn_out_dim in gate_dims:
                     validated.append((n_h, n_kv, hd))
             if validated:
                 candidates = validated
@@ -464,9 +491,14 @@ class VibeBladeModel:
         
         if token_ids is None:
             if prompt is None:
-                token_ids = np.array([1])  # BOS token
+                token_ids = np.array([self.tokenizer.bos_token_id]
+                                     if self.tokenizer and self.tokenizer.bos_token_id is not None
+                                     else [1])  # BOS token
+            elif self.tokenizer is not None:
+                # Use proper BPE tokenizer
+                token_ids = np.array(self.tokenizer.encode(prompt))
             else:
-                # Simple byte tokenization (placeholder — real tokenizer later)
+                # Fallback: raw byte tokenization
                 token_ids = np.array(list(prompt.encode("utf-8")) + [1])
         
         # Get shared weights
@@ -496,20 +528,32 @@ class VibeBladeModel:
         output_tokens = []
         gen_start = time.time()
         
+        # Normalize logits to 1D for sampling
+        # Prefill returns (seq_len, vocab) — take last position
+        # Decode returns (vocab,) — use directly
+        if logits.ndim > 1:
+            logits = logits[-1]
+        
         for i in range(max_tokens):
-            # Sample from logits
-            next_token = self.generator.sample(logits[-1])
+            # Sample from logits (always 1D at this point)
+            next_token = self.generator.sample(logits)
             output_tokens.append(next_token)
             
+            # Stream the decoded token text
             if on_token is not None:
                 on_token(next_token, i)
             elif stream:
-                try:
-                    print(chr(next_token), end="", flush=True)
-                except (ValueError, OverflowError):
-                    pass
+                if self.tokenizer is not None:
+                    chunk = self.tokenizer.decode([next_token], stop_at_eos=False)
+                    print(chunk, end="", flush=True)
+                else:
+                    try:
+                        print(chr(next_token), end="", flush=True)
+                    except (ValueError, OverflowError):
+                        pass
             
-            if next_token == 2:  # EOS
+            eos_id = self.tokenizer.eos_token_id if self.tokenizer else 2
+            if next_token == eos_id:
                 break
             
             # Forward single token through all layers with KV cache
@@ -538,10 +582,13 @@ class VibeBladeModel:
             print()
         
         # Decode output tokens to text
-        try:
-            text = "".join(chr(t) for t in output_tokens if 32 <= t < 127)
-        except (ValueError, OverflowError):
-            text = f"[{len(output_tokens)} tokens generated at {tps:.1f} t/s]"
+        if self.tokenizer is not None:
+            text = self.tokenizer.decode(output_tokens)
+        else:
+            try:
+                text = "".join(chr(t) for t in output_tokens if 32 <= t < 127)
+            except (ValueError, OverflowError):
+                text = f"[{len(output_tokens)} tokens generated at {tps:.1f} t/s]"
         
         return text, tps
 
@@ -678,7 +725,7 @@ class VibeBladeModel:
             kv_k, kv_v = new_kv_k, new_kv_v
             next_token = int(np.argmax(logits_all))
             token_ids = np.append(token_ids, next_token)
-            if next_token == 2:  # EOS
+            if next_token == self.eos_token_id:
                 break
 
             # Record MoE stats from the decode pass

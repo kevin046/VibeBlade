@@ -34,3 +34,12 @@ Makefile
 
 # Benchmarks output
 benchmarks/output/
+
+# llama.cpp submodule (compiled locally)
+llama.cpp/
+
+# Model weights (too large for git)
+models/
+
+# C helper build artifacts
+llama.cpp/build/

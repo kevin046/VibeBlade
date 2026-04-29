@@ -169,6 +169,8 @@ private:
     // Instance-owned decode buffers (NOT thread_local — avoids cross-instance clobbering).
     // Sized once during alloc_kv_cache(), never realloc'd during decode.
     std::vector<float> x_buf_, hidden_buf_, normed_buf_, logits_buf_;
+    // Scratch for gemv_dequant row dequantization (size = max(vocab_size, intermediate_dim))
+    std::vector<float> dequant_buf_;
 
     FastConfig cfg_;
     std::vector<LayerWeights> layers_;
