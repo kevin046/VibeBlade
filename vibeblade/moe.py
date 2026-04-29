@@ -35,7 +35,7 @@ __all__ = [
 
 def _silu(x: np.ndarray) -> np.ndarray:
     """SiLU activation: x * sigmoid(x).  Matches transformer.silu()."""
-    x32 = np.clip(x.astype(np.float32), -65504.0, 65504.0)
+    x32 = np.clip(np.nan_to_num(x.astype(np.float32), nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
     return x32 * (1.0 / (1.0 + np.exp(-x32)))
 
 
@@ -63,6 +63,8 @@ def _dense_ffn(
     up = x @ up_w          # (batch, expert_dim)
     hidden = _silu(gate) * up
     out = hidden @ down_w  # (batch, hidden_dim)
+    # Sanitize output to prevent NaN/Inf from propagating into residual stream
+    out = np.clip(np.nan_to_num(out, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
     if squeeze:
         out = out[0]
     return out
@@ -169,8 +171,8 @@ class ExpertRouter:
             x = x[np.newaxis, :]
 
         logits = x @ self.weight  # (batch, num_experts)
-        # Clamp to prevent overflow in softmax
-        logits = np.clip(logits, -65504.0, 65504.0)
+        # Sanitize: clip preserves NaN, so use nan_to_num first
+        logits = np.clip(np.nan_to_num(logits, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
         probs = _softmax(logits, axis=-1)  # (batch, num_experts)
 
         # Top-k selection (descending)
@@ -447,6 +449,9 @@ def moe_ffn_silu(
         # Compute each expert's output in one batched matmul
         gate_proj = np.einsum("bs,bse->be", x, gate_w)   # (batch, expert_dim)
         up_proj   = np.einsum("bs,bse->be", x, up_w)     # (batch, expert_dim)
+        # Clamp intermediate projections to prevent overflow in _silu and down projection
+        gate_proj = np.clip(np.nan_to_num(gate_proj, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
+        up_proj   = np.clip(np.nan_to_num(up_proj, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
         hidden = _silu(gate_proj) * up_proj               # (batch, expert_dim)
         expert_out = np.einsum("be,bed->bd", hidden, down_w)  # (batch, shared_dim)
 
@@ -454,6 +459,9 @@ def moe_ffn_silu(
         moe_out += slot_weights[:, np.newaxis] * expert_out
 
     output = moe_out + shared_out
+
+    # Sanitize output to prevent NaN/Inf from propagating into residual stream
+    output = np.clip(np.nan_to_num(output, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
 
     # ── Build stats ──
     stats = {

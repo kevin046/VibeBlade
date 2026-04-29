@@ -46,19 +46,19 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
     dequantized weights contain extreme values (common with low-bit quantization).
     Also guards against NaN/Inf from corrupted quantization blocks.
     """
-    x32 = x.astype(np.float32)
-    weight32 = weight.astype(np.float32)
+    x32 = np.nan_to_num(x.astype(np.float32), nan=0.0, posinf=65504.0, neginf=-65504.0)
     # Clamp inputs to fp16 range to prevent overflow in downstream matmuls
     x32 = np.clip(x32, -65504.0, 65504.0)
     # Sanitize quantized weights: clamp to fp16 range AND replace NaN/Inf with 0
+    weight32 = np.nan_to_num(weight.astype(np.float32), nan=0.0, posinf=65504.0, neginf=-65504.0)
     weight32 = np.clip(weight32, -65504.0, 65504.0)
     weight32 = np.where(np.isfinite(weight32), weight32, 0.0)
     rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
     result = (x32 / rms) * weight32
-    # Final clamp to prevent downstream overflow in QKV projections
-    return np.clip(result, -65504.0, 65504.0)
+    # Final sanitize: nan_to_num catches any residual NaN/Inf, then clip to fp16 range
+    return np.clip(np.nan_to_num(result, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
 
 
 def silu(x: np.ndarray) -> np.ndarray:
@@ -66,7 +66,7 @@ def silu(x: np.ndarray) -> np.ndarray:
 
     Clamp to fp16 range to prevent exp overflow in sigmoid.
     """
-    x32 = np.clip(x.astype(np.float32), -65504.0, 65504.0)
+    x32 = np.clip(np.nan_to_num(x.astype(np.float32), nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
     return x32 * (1.0 / (1.0 + np.exp(-x32)))
 
 

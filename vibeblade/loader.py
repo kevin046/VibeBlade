@@ -1009,6 +1009,15 @@ class _LazyWeights:
             )
 
         info = self._name_map[real_key]
+
+        # Pre-evict: estimate output size and free cache space BEFORE dequant.
+        # This prevents OOM when loading large expert weight tensors (~1 GiB).
+        n_elem = 1
+        for d in info.get("shape", []):
+            n_elem *= d
+        estimated_bytes = n_elem * np.dtype(self._dtype).itemsize
+        self._pre_evict(estimated_bytes)
+
         arr = self._loader.load_tensor(info["name"], self._dtype)
         # DEBUG: warn if weight shape is suspiciously large
         if "attn_norm" in key and arr.ndim == 1 and arr.shape[0] > 4098:
@@ -1276,6 +1285,37 @@ class _LazyWeights:
         if key in self._access_order:
             self._access_order.remove(key)
             self._access_order.append(key)
+
+    def _pre_evict(self, needed_bytes: int) -> None:
+        """Evict cached tensors to free at least *needed_bytes* before loading a new one.
+
+        This is called BEFORE dequantization to prevent OOM on large tensors.
+        The regular _evict() runs AFTER loading; this complements it by freeing
+        memory proactively.
+        """
+        if self._max_cached_mb <= 0:
+            return
+        max_bytes = self._max_cached_mb * 1024 * 1024
+        # How much we need to free: current usage + new tensor - budget
+        target = max(0, self._cached_bytes + needed_bytes - max_bytes)
+        if target <= 0:
+            return
+
+        freed = 0
+        while freed < target and len(self._access_order) > 0:
+            idx = 0
+            while idx < len(self._access_order):
+                candidate = self._access_order[idx]
+                if candidate not in self._pinned:
+                    break
+                idx += 1
+            else:
+                break  # all pinned
+
+            evicted_key = self._access_order.pop(idx)
+            evicted_arr = self._cache.pop(evicted_key)
+            freed += evicted_arr.nbytes
+            self._cached_bytes -= evicted_arr.nbytes
 
     def _evict(self) -> None:
         """Evict oldest non-pinned tensors to stay within budget."""
