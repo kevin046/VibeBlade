@@ -8,12 +8,12 @@
 
 **Linux / macOS**
 ```bash
-git clone https://github.com/kevin046/VibeBlade && cd VibeBlade && pip install -e . && python cpp/build_cpp.py && python -m vibeblade chat --model model.gguf
+git clone https://github.com/kevin046/VibeBlade && cd VibeBlade && pip install -e . && python cpp/build_cpp.py && python -m vibeblade wizard
 ```
 
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .; python cpp/build_cpp.py; python -m vibeblade chat --model model.gguf
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .; python cpp/build_cpp.py; python -m vibeblade wizard
 ```
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
