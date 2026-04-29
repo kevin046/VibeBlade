@@ -48,14 +48,17 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
     """
     x32 = x.astype(np.float32)
     weight32 = weight.astype(np.float32)
-    # Clamp to fp16 range to prevent overflow
+    # Clamp inputs to fp16 range to prevent overflow in downstream matmuls
     x32 = np.clip(x32, -65504.0, 65504.0)
-    # Sanitize quantized weights: replace NaN/Inf with 0 (broken quantization blocks)
+    # Sanitize quantized weights: clamp to fp16 range AND replace NaN/Inf with 0
+    weight32 = np.clip(weight32, -65504.0, 65504.0)
     weight32 = np.where(np.isfinite(weight32), weight32, 0.0)
     rms = np.sqrt(np.mean(x32 ** 2, axis=-1, keepdims=True) + eps)
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
-    return (x32 / rms) * weight32
+    result = (x32 / rms) * weight32
+    # Final clamp to prevent downstream overflow in QKV projections
+    return np.clip(result, -65504.0, 65504.0)
 
 
 def silu(x: np.ndarray) -> np.ndarray:

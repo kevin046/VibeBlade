@@ -250,7 +250,8 @@ class MoEExpertSet:
         down_w: (expert_dim, shared_dim)
         """
         # self.gate/up: (expert_dim, shared_dim) [GGUF], transpose to (shared_dim, expert_dim)
-        return self.gate[idx].T, self.up[idx].T, self.down[idx]
+        # self.down: (shared_dim, expert_dim) [GGUF], transpose to (expert_dim, shared_dim)
+        return self.gate[idx].T, self.up[idx].T, self.down[idx].T
 
     def get_experts_batch(
         self, indices: np.ndarray,
@@ -269,8 +270,10 @@ class MoEExpertSet:
         # Transpose to (E, shared_dim, expert_dim) for einsum compatibility
         gate_batch = np.transpose(self.gate[indices], (0, 2, 1))
         up_batch   = np.transpose(self.up[indices],   (0, 2, 1))
-        # self.down is already (E, shared_dim, expert_dim) — index directly
-        return gate_batch, up_batch, self.down[indices]
+        # self.down is (E, shared_dim, expert_dim) in GGUF — transpose to
+        # (E, expert_dim, shared_dim) for einsum "be,bed->bd"
+        down_batch = np.transpose(self.down[indices], (0, 2, 1))
+        return gate_batch, up_batch, down_batch
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
