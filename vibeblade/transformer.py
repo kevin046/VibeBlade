@@ -457,9 +457,9 @@ def forward_prefill(
     kv_caches_k: list[np.ndarray] = []
     kv_caches_v: list[np.ndarray] = []
     moe_cache: dict = {}  # caches parsed MoE routers/experts per layer
-
-    for layer_idx in range(n_layers):
-        prefix = f"blk.{layer_idx}"
+    try:
+        for layer_idx in range(n_layers):
+            prefix = f"blk.{layer_idx}"
 
         # DEBUG: layer entry
         import sys as _sys
@@ -478,9 +478,15 @@ def forward_prefill(
                           f"k_w.shape={weights.get(f'{prefix}.attn_k.weight').shape}, "
                           f"v_w.shape={weights.get(f'{prefix}.attn_v.weight').shape}, "
                           f"attn_out_w.shape={weights.get(f'{prefix}.attn_output.weight').shape}\n")
-        q = h @ weights[f"{prefix}.attn_q.weight"].T
-        k = h @ weights[f"{prefix}.attn_k.weight"].T
-        v = h @ weights[f"{prefix}.attn_v.weight"].T
+        q_w = weights[f"{prefix}.attn_q.weight"]
+        k_w = weights[f"{prefix}.attn_k.weight"]
+        v_w = weights[f"{prefix}.attn_v.weight"]
+        _sys.stderr.write(f"[MATMUL PRECHECK] blk.{layer_idx}: h.shape={h.shape}, "
+                          f"q_w.shape={q_w.shape}, q_w.T.shape={q_w.T.shape}, "
+                          f"k_w.shape={k_w.shape}, k_w.T.shape={k_w.T.shape}\n")
+        q = h @ q_w.T
+        k = h @ k_w.T
+        v = h @ v_w.T
 
         # Validate Q shape matches expected (n_heads * head_dim)
         # This catches the case where QKV was split with different head_dim than expected
@@ -514,25 +520,44 @@ def forward_prefill(
 
         # Attention with causal mask
         attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
-        attn_out = attn_out @ weights[f"{prefix}.attn_output.weight"].T
+        o_w = weights[f"{prefix}.attn_output.weight"]
+        _sys.stderr.write(f"[ATTN OUT] blk.{layer_idx}: attn_out.shape={attn_out.shape}, o_w.shape={o_w.shape}, o_w.T.shape={o_w.T.shape}\n")
+        attn_out = attn_out @ o_w.T
 
         x = x + attn_out
 
         # FFN (dense during prefill) — MoE or dense
-        h = rms_norm(x, weights[f"{prefix}.ffn_norm.weight"], eps)
+        h_ffn = rms_norm(x, weights[f"{prefix}.ffn_norm.weight"], eps)
         if f"{prefix}.ffn_gate_inp.weight" in weights:
-            # MoE layer — load on first encounter, cache for reuse
-            ffn_out = _moe_ffn_prefill(weights, prefix, h, moe_cache)
+            # MoE layer
+            ffn_gate_inp = weights[f"{prefix}.ffn_gate_inp.weight"]
+            ffn_up_exps = weights[f"{prefix}.ffn_up_exps.weight"]
+            ffn_down_exps = weights[f"{prefix}.ffn_down_exps.weight"]
+            ffn_gate_exps = weights[f"{prefix}.ffn_gate_exps.weight"]
+            _sys.stderr.write(f"[FFN MOE PRECHECK] blk.{layer_idx}: h_ffn.shape={h_ffn.shape}, "
+                              f"gate_inp.shape={ffn_gate_inp.shape}, "
+                              f"up_exps.shape={ffn_up_exps.shape}, "
+                              f"down_exps.shape={ffn_down_exps.shape}, "
+                              f"gate_exps.shape={ffn_gate_exps.shape}\n")
+            ffn_out = _moe_ffn_prefill(weights, prefix, h_ffn, moe_cache)
         else:
-            ffn_out = ffn_silu(h,
-                               weights[f"{prefix}.ffn_gate.weight"],
-                               weights[f"{prefix}.ffn_up.weight"],
-                               weights[f"{prefix}.ffn_down.weight"])
+            gate_w = weights[f"{prefix}.ffn_gate.weight"]
+            up_w = weights[f"{prefix}.ffn_up.weight"]
+            down_w = weights[f"{prefix}.ffn_down.weight"]
+            _sys.stderr.write(f"[FFN DENSE PRECHECK] blk.{layer_idx}: h_ffn.shape={h_ffn.shape}, "
+                              f"gate_w.shape={gate_w.shape}, up_w.shape={up_w.shape}, down_w.shape={down_w.shape}\n")
+            ffn_out = ffn_silu(h_ffn, gate_w, up_w, down_w)
         x = x + ffn_out
 
     # Final norm + output projection
     x = rms_norm(x, output_norm_w, eps)
+    _sys.stderr.write(f"[FINAL PROJ] x.shape={x.shape}, output_w.shape={output_w.shape}\n")
     logits = x @ output_w.T  # (seq, vocab_size)
+
+    except Exception:
+        import traceback
+        _sys.stderr.write(f"[CRASH] forward_prefill exception:\n{traceback.format_exc()}\n")
+        raise
 
     # Bulk-load KV into MiniCache after prefill
     if minicache is not None:
