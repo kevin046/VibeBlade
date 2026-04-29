@@ -6,11 +6,15 @@
 [![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
 [Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
 
+**Linux / macOS**
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade && pip install -e . && python cpp/build_cpp.py && python -m vibeblade chat --model model.gguf
 ```
 
-That's it. Clone, install, build the C++ engine, chat. Runs on Linux, macOS, and Windows.
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .; python cpp/build_cpp.py; python -m vibeblade chat --model model.gguf
+```
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
