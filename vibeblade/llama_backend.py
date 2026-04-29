@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import os
-import time
+import time as _time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -16,42 +16,184 @@ from typing import Generator, Optional
 
 
 # ============================================================
-# Library loading
+# Library loading — lazy proxy so libs load only when actually used
 # ============================================================
 def _find_lib(base_name: str, candidates: list[Path]) -> str:
-    for c in candidates:
-        p = c / base_name
-        if p.exists():
-            return str(p)
-    raise FileNotFoundError(f"{base_name} not found in {[str(c) for c in candidates]}")
+  for c in candidates:
+    p = c / base_name
+    if p.exists():
+      return str(p)
+  raise FileNotFoundError(f"{base_name} not found in {[str(c) for c in candidates]}")
 
 _BASE = Path(__file__).parent.parent
 _LLAMA_BIN = _BASE / "llama.cpp" / "build" / "bin"
 
-# Load llama.cpp
-_lib = ctypes.CDLL(_find_lib("libllama.so", [
-    _LLAMA_BIN, _BASE / "build" / "bin",
-    Path(os.environ.get("LLAMA_BUILD_DIR", "")) / "bin",
-]))
+_LLAMA_CANDIDATES = [
+  _LLAMA_BIN,
+  _BASE / "build" / "bin",
+  Path(os.environ.get("LLAMA_BUILD_DIR", "")) / "bin",
+]
 
-# Load C params helper
-_helper = ctypes.CDLL(_find_lib("libparams_helper.so", [_LLAMA_BIN]))
+
+class _LazyCDLL:
+  """Proxy that defers ctypes.CDLL loading + argtype setup until first attribute access."""
+
+  _lib = None
+  _setup = False
+
+  def _load(self, candidates: list[Path], lib_name: str) -> ctypes.CDLL:
+    if _LazyCDLL._lib is None:
+      _LazyCDLL._lib = ctypes.CDLL(_find_lib(lib_name, candidates))
+    return _LazyCDLL._lib
+
+  def _setup_lib(self, lib):
+    """Run once after library is first loaded."""
+    if _LazyCDLL._setup:
+      return
+    _LazyCDLL._setup = True
+
+    # --- Model ---
+    lib.llama_model_default_params.argtypes = []
+    lib.llama_model_default_params.restype = ctypes.c_void_p
+    lib.llama_model_load_from_file.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+    lib.llama_model_load_from_file.restype = ctypes.c_void_p
+    lib.llama_model_free.argtypes = [ctypes.c_void_p]
+    lib.llama_model_free.restype = None
+    lib.llama_model_get_vocab.argtypes = [ctypes.c_void_p]
+    lib.llama_model_get_vocab.restype = ctypes.c_void_p
+
+    # --- Vocab ---
+    lib.llama_vocab_n_tokens.argtypes = [ctypes.c_void_p]
+    lib.llama_vocab_n_tokens.restype = ctypes.c_int32
+    lib.llama_vocab_eos.argtypes = [ctypes.c_void_p]
+    lib.llama_vocab_eos.restype = ctypes.c_int32
+
+    # --- Context ---
+    lib.llama_context_default_params.argtypes = []
+    lib.llama_context_default_params.restype = ctypes.c_void_p
+    lib.llama_init_from_model.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.llama_init_from_model.restype = ctypes.c_void_p
+    lib.llama_free.argtypes = [ctypes.c_void_p]
+    lib.llama_free.restype = None
+
+    # --- Decode ---
+    lib.llama_decode.argtypes = [ctypes.c_void_p, LLamaBatch]
+    lib.llama_decode.restype = ctypes.c_int32
+    lib.llama_get_logits.argtypes = [ctypes.c_void_p]
+    lib.llama_get_logits.restype = ctypes.POINTER(ctypes.c_float)
+    lib.llama_get_logits_ith.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.llama_get_logits_ith.restype = ctypes.POINTER(ctypes.c_float)
+
+    # --- Tokenize / Detokenize ---
+    lib.llama_tokenize.argtypes = [
+      ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32,
+      ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+      ctypes.c_bool, ctypes.c_bool,
+    ]
+    lib.llama_tokenize.restype = ctypes.c_int32
+    lib.llama_token_to_piece.argtypes = [
+      ctypes.c_void_p, ctypes.c_int32, ctypes.c_char_p,
+      ctypes.c_int32, ctypes.c_int32, ctypes.c_bool,
+    ]
+    lib.llama_token_to_piece.restype = ctypes.c_int32
+    lib.llama_detokenize.argtypes = [
+      ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int32,
+      ctypes.c_char_p, ctypes.c_int32, ctypes.c_bool, ctypes.c_bool,
+    ]
+    lib.llama_detokenize.restype = ctypes.c_int32
+
+    # --- Batch ---
+    lib.llama_batch_init.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
+    lib.llama_batch_init.restype = LLamaBatch
+    lib.llama_batch_free.argtypes = [LLamaBatch]
+    lib.llama_batch_free.restype = None
+
+    # --- KV cache ---
+    lib.llama_get_memory.argtypes = [ctypes.c_void_p]
+    lib.llama_get_memory.restype = ctypes.c_void_p
+    lib.llama_memory_clear.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+    lib.llama_memory_clear.restype = None
+
+    # --- Sampling ---
+    lib.llama_sampler_init_greedy.argtypes = []
+    lib.llama_sampler_init_greedy.restype = ctypes.c_void_p
+    lib.llama_sampler_init_grammar.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
+    lib.llama_sampler_init_grammar.restype = ctypes.c_void_p
+    lib.llama_sampler_init_top_k.argtypes = [ctypes.c_int32]
+    lib.llama_sampler_init_top_k.restype = ctypes.c_void_p
+    lib.llama_sampler_init_top_p.argtypes = [ctypes.c_float, ctypes.c_uint32]
+    lib.llama_sampler_init_top_p.restype = ctypes.c_void_p
+    lib.llama_sampler_init_temp.argtypes = [ctypes.c_float]
+    lib.llama_sampler_init_temp.restype = ctypes.c_void_p
+    lib.llama_sampler_chain_add.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.llama_sampler_chain_add.restype = None
+    lib.llama_sampler_sample.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
+    lib.llama_sampler_sample.restype = ctypes.c_int32
+    lib.llama_sampler_reset.argtypes = [ctypes.c_void_p]
+    lib.llama_sampler_reset.restype = None
+    lib.llama_sampler_free.argtypes = [ctypes.c_void_p]
+    lib.llama_sampler_free.restype = None
+
+    # --- Threads / timing ---
+    lib.llama_synchronize.argtypes = [ctypes.c_void_p]
+    lib.llama_synchronize.restype = None
+    lib.llama_set_n_threads.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32]
+    lib.llama_set_n_threads.restype = None
+    lib.llama_n_threads_batch.argtypes = [ctypes.c_void_p]
+    lib.llama_n_threads_batch.restype = ctypes.c_int32
+
+    # --- TurboSparse ---
+    lib.llama_turbosparse_enable.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    lib.llama_turbosparse_enable.restype = None
+    lib.llama_turbosparse_disable.argtypes = [ctypes.c_void_p]
+    lib.llama_turbosparse_disable.restype = None
+    lib.llama_turbosparse_is_enabled.argtypes = [ctypes.c_void_p]
+    lib.llama_turbosparse_is_enabled.restype = ctypes.c_bool
+    lib.llama_turbosparse_get_threshold.argtypes = [ctypes.c_void_p]
+    lib.llama_turbosparse_get_threshold.restype = ctypes.c_float
+
+  def __getattr__(self, name):
+    if _LazyCDLL._lib is None:
+      lib = self._load(_LLAMA_CANDIDATES, "libllama.so")
+      self._setup_lib(lib)
+    return getattr(_LazyCDLL._lib, name)
+
+
+class _LazyHelperCDLL:
+  """Proxy that defers loading of libparams_helper.so until first attribute access."""
+
+  _lib = None
+
+  def _load(self, candidates: list[Path], lib_name: str) -> ctypes.CDLL:
+    if _LazyHelperCDLL._lib is None:
+      _LazyHelperCDLL._lib = ctypes.CDLL(_find_lib(lib_name, candidates))
+    return _LazyHelperCDLL._lib
+
+  def __getattr__(self, name):
+    if _LazyHelperCDLL._lib is None:
+      self._load([_LLAMA_BIN], "libparams_helper.so")
+    return getattr(_LazyHelperCDLL._lib, name)
+
+
+# Module-level proxies — loading only happens on first actual use
+_lib = _LazyCDLL()
+_helper = _LazyHelperCDLL()
 
 
 # ============================================================
 # C struct: llama_batch
 # ============================================================
 class LLamaBatch(ctypes.Structure):
-    """C llama_batch struct — 7 fields, NO logit_count."""
-    _fields_ = [
-        ("n_tokens", ctypes.c_int32),
-        ("token",    ctypes.POINTER(ctypes.c_int32)),
-        ("embd",     ctypes.POINTER(ctypes.c_float)),
-        ("pos",      ctypes.POINTER(ctypes.c_int32)),
-        ("n_seq_id", ctypes.POINTER(ctypes.c_int32)),
-        ("seq_id",   ctypes.POINTER(ctypes.POINTER(ctypes.c_int32))),
-        ("logits",   ctypes.POINTER(ctypes.c_int8)),
-    ]
+  """C llama_batch struct — 7 fields, NO logit_count."""
+  _fields_ = [
+    ("n_tokens", ctypes.c_int32),
+    ("token", ctypes.POINTER(ctypes.c_int32)),
+    ("embd", ctypes.POINTER(ctypes.c_float)),
+    ("pos", ctypes.POINTER(ctypes.c_int32)),
+    ("n_seq_id", ctypes.POINTER(ctypes.c_int32)),
+    ("seq_id", ctypes.POINTER(ctypes.POINTER(ctypes.c_int32))),
+    ("logits", ctypes.POINTER(ctypes.c_int8)),
+  ]
 
 
 # ============================================================
@@ -59,143 +201,14 @@ class LLamaBatch(ctypes.Structure):
 # ============================================================
 @dataclass
 class GenerateResult:
-    text: str
-    tokens: list[int]
-    tokens_per_second: float
-    prompt_tokens: int
-    stop_reason: str          # "eos" | "stop_token" | "max_tokens"
-    time_prefill: float = 0.0
-    time_decode: float = 0.0
-    time_total: float = 0.0
-
-
-# ============================================================
-# C API declarations (matching llama.h)
-# ============================================================
-# --- Model ---
-_lib.llama_model_default_params.argtypes = []
-_lib.llama_model_default_params.restype = ctypes.c_void_p  # raw struct by value
-_lib.llama_model_load_from_file.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
-_lib.llama_model_load_from_file.restype = ctypes.c_void_p
-_lib.llama_model_free.argtypes = [ctypes.c_void_p]
-_lib.llama_model_free.restype = None
-_lib.llama_model_get_vocab.argtypes = [ctypes.c_void_p]
-_lib.llama_model_get_vocab.restype = ctypes.c_void_p
-
-# --- Vocab ---
-_lib.llama_vocab_n_tokens.argtypes = [ctypes.c_void_p]
-_lib.llama_vocab_n_tokens.restype = ctypes.c_int32
-_lib.llama_vocab_eos.argtypes = [ctypes.c_void_p]
-_lib.llama_vocab_eos.restype = ctypes.c_int32
-
-# --- Context ---
-_lib.llama_context_default_params.argtypes = []
-_lib.llama_context_default_params.restype = ctypes.c_void_p
-_lib.llama_init_from_model.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-_lib.llama_init_from_model.restype = ctypes.c_void_p
-_lib.llama_free.argtypes = [ctypes.c_void_p]
-_lib.llama_free.restype = None
-
-# --- Decode ---
-# --- Decode (batch by value) ---
-_lib.llama_decode.argtypes = [ctypes.c_void_p, LLamaBatch]
-_lib.llama_decode.restype = ctypes.c_int32
-_lib.llama_get_logits.argtypes = [ctypes.c_void_p]
-_lib.llama_get_logits.restype = ctypes.POINTER(ctypes.c_float)
-_lib.llama_get_logits_ith.argtypes = [ctypes.c_void_p, ctypes.c_int32]
-_lib.llama_get_logits_ith.restype = ctypes.POINTER(ctypes.c_float)
-# --- Tokenize / Detokenize ---
-_lib.llama_tokenize.argtypes = [
-    ctypes.c_void_p,                  # vocab
-    ctypes.c_char_p,                  # text
-    ctypes.c_int32,                   # text_len
-    ctypes.POINTER(ctypes.c_int32),   # tokens
-    ctypes.c_int32,                   # n_tokens_max
-    ctypes.c_bool,                    # add_special
-    ctypes.c_bool,                    # parse_special
-]
-_lib.llama_tokenize.restype = ctypes.c_int32
-
-_lib.llama_token_to_piece.argtypes = [
-    ctypes.c_void_p,       # vocab
-    ctypes.c_int32,        # token
-    ctypes.c_char_p,       # buf
-    ctypes.c_int32,        # length (buf size)
-    ctypes.c_int32,        # lstrip
-    ctypes.c_bool,         # special
-]
-_lib.llama_token_to_piece.restype = ctypes.c_int32
-
-_lib.llama_detokenize.argtypes = [
-    ctypes.c_void_p,                  # vocab
-    ctypes.POINTER(ctypes.c_int32),   # tokens
-    ctypes.c_int32,                   # n_tokens
-    ctypes.c_char_p,                  # text buf
-    ctypes.c_int32,                   # text_len_max
-    ctypes.c_bool,                    # remove_special
-    ctypes.c_bool,                    # unparse_special
-]
-_lib.llama_detokenize.restype = ctypes.c_int32
-
-# --- Batch (returns struct by value, not pointer) ---
-_lib.llama_batch_init.argtypes = [ctypes.c_int32, ctypes.c_int32, ctypes.c_int32]
-_lib.llama_batch_init.restype = LLamaBatch
-_lib.llama_batch_free.argtypes = [LLamaBatch]
-_lib.llama_batch_free.restype = None
-
-# --- KV cache ---
-_lib.llama_get_memory.argtypes = [ctypes.c_void_p]
-_lib.llama_get_memory.restype = ctypes.c_void_p
-_lib.llama_memory_clear.argtypes = [ctypes.c_void_p, ctypes.c_bool]
-_lib.llama_memory_clear.restype = None
-
-# --- Sampling ---
-_lib.llama_sampler_init_greedy.argtypes = []
-_lib.llama_sampler_init_greedy.restype = ctypes.c_void_p
-_lib.llama_sampler_init_grammar.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_char_p]
-_lib.llama_sampler_init_grammar.restype = ctypes.c_void_p
-_lib.llama_sampler_init_top_k.argtypes = [ctypes.c_int32]
-_lib.llama_sampler_init_top_k.restype = ctypes.c_void_p
-_lib.llama_sampler_init_top_p.argtypes = [ctypes.c_float, ctypes.c_uint32]
-_lib.llama_sampler_init_top_p.restype = ctypes.c_void_p
-_lib.llama_sampler_init_temp.argtypes = [ctypes.c_float]
-_lib.llama_sampler_init_temp.restype = ctypes.c_void_p
-_lib.llama_sampler_chain_add.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-_lib.llama_sampler_chain_add.restype = None
-_lib.llama_sampler_sample.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
-_lib.llama_sampler_sample.restype = ctypes.c_int32
-_lib.llama_sampler_reset.argtypes = [ctypes.c_void_p]
-_lib.llama_sampler_reset.restype = None
-_lib.llama_sampler_free.argtypes = [ctypes.c_void_p]
-_lib.llama_sampler_free.restype = None
-
-# --- Threads / timing ---
-_lib.llama_synchronize.argtypes = [ctypes.c_void_p]
-_lib.llama_synchronize.restype = None
-_lib.llama_set_n_threads.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32]
-_lib.llama_set_n_threads.restype = None
-_lib.llama_n_threads_batch.argtypes = [ctypes.c_void_p]
-_lib.llama_n_threads_batch.restype = ctypes.c_int32
-
-# --- TurboSparse ---
-_lib.llama_turbosparse_enable.argtypes = [ctypes.c_void_p, ctypes.c_float]
-_lib.llama_turbosparse_enable.restype = None
-_lib.llama_turbosparse_disable.argtypes = [ctypes.c_void_p]
-_lib.llama_turbosparse_disable.restype = None
-_lib.llama_turbosparse_is_enabled.argtypes = [ctypes.c_void_p]
-_lib.llama_turbosparse_is_enabled.restype = ctypes.c_bool
-_lib.llama_turbosparse_get_threshold.argtypes = [ctypes.c_void_p]
-_lib.llama_turbosparse_get_threshold.restype = ctypes.c_float
-
-# --- C helper ---
-_helper.override_model_params.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
-_helper.override_model_params.restype = None
-_helper.override_context_params.argtypes = [ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32]
-_helper.override_context_params.restype = None
-_helper.get_default_model_params.argtypes = []
-_helper.get_default_model_params.restype = ctypes.c_void_p
-_helper.get_default_context_params.argtypes = []
-_helper.get_default_context_params.restype = ctypes.c_void_p
+  text: str
+  tokens: list[int]
+  tokens_per_second: float
+  prompt_tokens: int
+  stop_reason: str  # "eos" | "stop_token" | "max_tokens"
+  time_prefill: float = 0.0
+  time_decode: float = 0.0
+  time_total: float = 0.0
 
 
 # ============================================================
@@ -203,15 +216,15 @@ _helper.get_default_context_params.restype = ctypes.c_void_p
 # ============================================================
 @lru_cache(maxsize=65536)
 def _detokenize_cached(vocab_ptr: int, token_id: int) -> str:
-    """Cached single-token detokenization."""
-    piece_buf = ctypes.create_string_buffer(256)
-    n = _lib.llama_token_to_piece(
-        ctypes.cast(vocab_ptr, ctypes.c_void_p),
-        token_id, piece_buf, 256, 0, False,
-    )
-    if n > 0:
-        return piece_buf.value.decode("utf-8", errors="replace")
-    return ""
+  """Cached single-token detokenization."""
+  piece_buf = ctypes.create_string_buffer(256)
+  n = _lib.llama_token_to_piece(
+    ctypes.cast(vocab_ptr, ctypes.c_void_p),
+    token_id, piece_buf, 256, 0, False,
+  )
+  if n > 0:
+    return piece_buf.value.decode("utf-8", errors="replace")
+  return ""
 
 
 # ============================================================
@@ -425,9 +438,9 @@ class LlamaCppBackend:
             raise RuntimeError(f"Prompt ({n_prompt} tokens) exceeds context ({self._n_ctx})")
 
         # Prefill
-        t0 = time.time()
+        t0 = _time.time()
         self.prefill(prompt_tokens)
-        t_prefill = time.time()
+        t_prefill = _time.time()
 
         output_tokens: list[int] = []
         cur_pos = n_prompt
@@ -450,7 +463,7 @@ class LlamaCppBackend:
                 break
             _lib.llama_sampler_reset(self._sampler)
 
-        t_end = time.time()
+        t_end = _time.time()
         t_decode = t_end - t_prefill
         text = self.detokenize_batch(output_tokens) if len(output_tokens) > 5 else self.detokenize(output_tokens)
 
@@ -498,13 +511,13 @@ class LlamaCppBackend:
         if n_prompt >= self._n_ctx:
             raise RuntimeError(f"Prompt ({n_prompt}) exceeds context ({self._n_ctx})")
 
-        t0 = time.time()
+        t0 = _time.time()
         # Prefill
         batch = self._make_batch(prompt_tokens, pos_offset=0)
         ret = _lib.llama_decode(self._ctx, batch)
         if ret != 0:
             raise RuntimeError(f"llama_decode failed: {ret}")
-        t_prefill = time.time()
+        t_prefill = _time.time()
 
         output_tokens: list[int] = []
         cur_pos = n_prompt
@@ -532,7 +545,7 @@ class LlamaCppBackend:
                 break
             _lib.llama_sampler_reset(self._sampler)
 
-        t_end = time.time()
+        t_end = _time.time()
         t_decode = t_end - t_prefill
         tps = len(output_tokens) / t_decode if t_decode > 0 else 0.0
         yield GenerateResult(
