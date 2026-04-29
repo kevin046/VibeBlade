@@ -45,13 +45,23 @@ jobs:
       - name: Build C++ extension
         run: |
           cd cpp
-          mkdir build && cd build
+          mkdir -p build && cd build
           cmake .. -DPYBIND11_FINDPYTHON=ON
           make -j$(nproc)
 
+      - name: Copy C++ library for editable install
+        run: |
+          SO_FILE=$(find cpp/build -name "*.so" -o -name "*.cp312*.pyd" 2>/dev/null | head -1)
+          if [ -n "$SO_FILE" ]; then
+            cp "$SO_FILE" vibeblade/
+            echo "Copied $SO_FILE to vibeblade/"
+          else
+            echo "Warning: No .so file found in cpp/build"
+          fi
+          pip install -e .
+
       - name: Test C++ backend
         run: |
-          pip install -e .
           python -c "from vibeblade import _CPP_BACKEND; print(f'C++ backend: {_CPP_BACKEND}')"
 
   lint:
