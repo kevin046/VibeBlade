@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <stdexcept>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+
+// Thread pool for parallel inference
+#include <thread>
+#include <vector>
+#include <atomic>
 
 namespace vibeblade {
 
@@ -773,4 +775,67 @@ void gemv_dequant(const float* x, const void* weights, float* out,
     }
 }
 
-}  // namespace vibeblade
+// ── Multi-threaded gemv_dequant (no OpenMP, no LTO conflict) ──
+void gemv_dequant_mt(const float* x, const void* weights, float* out,
+                     int64_t K, int64_t N, ggml_type wtype, int n_threads) {
+    if (n_threads <= 1 || N < n_threads * 4) {
+        gemv_dequant(x, weights, out, K, N, wtype);
+        return;
+    }
+
+    const uint8_t* w = (const uint8_t*)weights;
+    int64_t row_bytes;
+    switch (wtype) {
+        case GGML_TYPE_F32: row_bytes = K * 4; break;
+        case GGML_TYPE_F16: row_bytes = K * 2; break;
+        case GGML_TYPE_Q4_0: row_bytes = (K / 32) * sizeof(block_q4_0); break;
+        case GGML_TYPE_Q4_1: row_bytes = (K / 32) * sizeof(block_q4_1); break;
+        case GGML_TYPE_Q5_0: row_bytes = (K / 32) * sizeof(block_q5_0); break;
+        case GGML_TYPE_Q5_1: row_bytes = (K / 32) * sizeof(block_q5_1); break;
+        case GGML_TYPE_Q8_0: row_bytes = (K / 32) * 34; break;
+        case GGML_TYPE_Q4_K: row_bytes = (K / 256) * sizeof(block_q4_K); break;
+        case GGML_TYPE_Q5_K: row_bytes = (K / 256) * sizeof(block_q5_K); break;
+        case GGML_TYPE_Q6_K: row_bytes = (K / 256) * sizeof(block_q6_K); break;
+        case GGML_TYPE_Q2_K: row_bytes = (K / 256) * sizeof(block_q2_K); break;
+        case GGML_TYPE_Q3_K: row_bytes = (K / 256) * sizeof(block_q3_K); break;
+        case GGML_TYPE_Q8_K: row_bytes = (K / 256) * 292; break;
+        default: row_bytes = K * 2; break;
+    }
+
+    int actual_threads = (n_threads == 0)
+        ? std::max(1, (int)std::thread::hardware_concurrency() - 1)
+        : n_threads;
+
+    std::atomic<int64_t> next_row{0};
+    auto dot_fn = [&](int) {
+        while (true) {
+            int64_t j = next_row.fetch_add(1);
+            if (j >= N) break;
+            const void* wrow = w + j * row_bytes;
+            switch (wtype) {
+                case GGML_TYPE_F32: out[j] = dot_dequant_f32(x, (const float*)wrow, K); break;
+                case GGML_TYPE_F16: out[j] = dot_dequant_f16(x, (const uint16_t*)wrow, K); break;
+                case GGML_TYPE_Q4_0: out[j] = dot_dequant_q4_0(x, (const block_q4_0*)wrow, K); break;
+                case GGML_TYPE_Q4_1: out[j] = dot_dequant_q4_1(x, (const block_q4_1*)wrow, K); break;
+                case GGML_TYPE_Q5_0: out[j] = dot_dequant_q5_0(x, (const block_q5_0*)wrow, K); break;
+                case GGML_TYPE_Q5_1: out[j] = dot_dequant_q5_1(x, (const block_q5_1*)wrow, K); break;
+                case GGML_TYPE_Q8_0: out[j] = dot_dequant_q8_0(x, (const block_q8_0*)wrow, K); break;
+                case GGML_TYPE_Q4_K: out[j] = dot_dequant_q4_K(x, (const block_q4_K*)wrow, K); break;
+                case GGML_TYPE_Q5_K: out[j] = dot_dequant_q5_K(x, (const block_q5_K*)wrow, K); break;
+                case GGML_TYPE_Q6_K: out[j] = dot_dequant_q6_K(x, (const uint8_t*)wrow, K); break;
+                case GGML_TYPE_Q2_K: out[j] = dot_dequant_q2_K(x, (const block_q2_K*)wrow, K); break;
+                case GGML_TYPE_Q3_K: out[j] = dot_dequant_q3_K(x, (const block_q3_K*)wrow, K); break;
+                case GGML_TYPE_Q8_K: out[j] = dot_dequant_q8_K(x, (const uint8_t*)wrow, K); break;
+                default: out[j] = 0.0f; break;
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < actual_threads; t++) {
+        threads.emplace_back(dot_fn, t);
+    }
+    for (auto& th : threads) th.join();
+}
+
+} // namespace vibeblade

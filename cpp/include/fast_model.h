@@ -92,7 +92,25 @@ public:
         std::function<void(int, const std::string&)> on_token = nullptr  // streaming callback
     );
 
-    // ── Individual steps (for advanced use / Python loop fallback) ──
+    // ── Speculative Decoding ──
+GenerateResult speculative_decode(
+    const std::string& prompt,
+    int max_tokens = 128,
+    float temperature = 1.0f,
+    int top_k = 50,
+    float top_p = 0.9f,
+    float repetition_penalty = 1.0f,
+    int seed = -1,
+    int n_spec_tokens = 4
+);
+
+// ── Grammar Constraints (GBNF) ──
+void set_grammar(const std::string& gbnf);
+void clear_grammar();
+bool has_grammar() const { return !grammar_states_.empty(); }
+std::vector<int> allowed_tokens_for_grammar() const;
+
+// ── Individual steps
     std::vector<float> prefill(const std::vector<int>& token_ids);
     std::vector<float> decode(int token_id);
     void reset();
@@ -140,6 +158,11 @@ private:
 
     FastConfig cfg_;
     std::vector<LayerWeights> layers_;
+    
+    // ── Grammar constraint state ──
+    std::string grammar_str_;
+    std::vector<std::vector<int>> grammar_states_;  // token_id → allowed_next[]
+    std::vector<int> last_grammar_tokens_;  // rolling window for grammar
 
     // Global weights
     const void* token_emb_ = nullptr;   ggml_type emb_type_ = GGML_TYPE_F32;

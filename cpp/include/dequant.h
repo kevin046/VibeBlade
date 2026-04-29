@@ -21,16 +21,28 @@ void dequantize_row_q5_K(const void* row, float* out, int64_t n);
 void dequantize_row_q6_K(const void* row, float* out, int64_t n);
 
 // Matrix-vector multiply with inline dequantization:
-// out[j] = sum_i(x[i] * dequant(weight_row(j)[i]))  for each output row j
+// out[j] = sum_i(x[i] * dequant(weight_row(j)[i])) for each output row j
 // x: (1, K) fp32, weight: (N, K) quantized, out: (N,) fp32
 // This is the hottest function in decode — dequant directly into dot product.
 void gemv_dequant(
-    const float* x,          // (K,) input vector
-    const void* weights,     // quantized weight matrix, row-major
-    float* out,              // (N,) output
-    int64_t K,               // input dimension
-    int64_t N,               // output dimension
-    ggml_type wtype          // quantization type of weights
+ const float* x,    // (K,) input vector
+ const void* weights, // quantized weight matrix, row-major
+ float* out,        // (N,) output
+ int64_t K,         // input dimension
+ int64_t N,         // output dimension
+ ggml_type wtype    // quantization type of weights
 );
 
-}  // namespace vibeblade
+// Multi-threaded gemv_dequant — uses std::thread pool (no OpenMP, no LTO conflict).
+// n_threads=0 uses hardware_concurrency()-1. Falls back to single-threaded for small N.
+void gemv_dequant_mt(
+ const float* x,
+ const void* weights,
+ float* out,
+ int64_t K,
+ int64_t N,
+ ggml_type wtype,
+ int n_threads = 0  // 0 = auto-detect
+);
+
+} // namespace vibeblade

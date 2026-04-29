@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """VibeBlade Interactive Setup Menu — Windows / Linux / macOS"""
 
-import os, sys, shutil, subprocess, platform, json
+import os
+import sys
+import subprocess
+import platform
 from pathlib import Path
 
 BANNER = r"""

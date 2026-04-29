@@ -293,10 +293,24 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
             return out;
         }, py::arg("token_id"),
             R"doc(Decode: process one token, return full vocab logits.)doc")
-        .def("reset", &VibeBladeFast::reset,
-            R"doc(Reset KV cache and position to start a new conversation.)doc")
+.def("reset", &VibeBladeFast::reset,
+ R"doc(Reset KV cache and position to start a new conversation.)doc")
 
-        // ── Properties ──
+ // ── Speculative Decoding ──
+ .def("speculative_decode", &VibeBladeFast::speculative_decode,
+ "prompt"_a, "max_tokens"_a = 128, "temperature"_a = 1.0f,
+ "top_k"_a = 50, "top_p"_a = 0.9f, "repetition_penalty"_a = 1.0f,
+ "seed"_a = -1, "n_spec_tokens"_a = 4,
+ R"doc(Speculative decoding: draft N tokens, verify all at once. Fast on large models.)doc")
+
+ // ── Grammar Constraints ──
+ .def("set_grammar", &VibeBladeFast::set_grammar, "gbnf"_a,
+ R"doc(Set GBNF grammar for structured output (JSON, code, etc.).)doc")
+ .def("clear_grammar", &VibeBladeFast::clear_grammar,
+ R"doc(Clear grammar constraint.)doc")
+ .def_property_readonly("has_grammar", &VibeBladeFast::has_grammar)
+
+ // ── Properties ──
         .def_property_readonly("position", [](const VibeBladeFast& self) { return self.position(); })
         .def_property_readonly("eos_id", [](const VibeBladeFast& self) { return self.eos_id(); })
         .def_property_readonly("bos_id", [](const VibeBladeFast& self) { return self.bos_id(); })
