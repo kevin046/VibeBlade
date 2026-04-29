@@ -370,6 +370,37 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
 
         // MoE gate (DeepSeek, Mixtral, Qwen2-MoE)
         set_w("ffn_gate_inp.weight", lw.ffn_gate_inp, lw.gate_inp_type);
+
+        // MoE expert weights (consolidated: num_experts × intermediate × hidden)
+        set_w("ffn_gate_exps.weight", lw.ffn_gate_exps, lw.gate_exps_type);
+        set_w("ffn_up_exps.weight",   lw.ffn_up_exps,   lw.up_exps_type);
+        set_w("ffn_down_exps.weight", lw.ffn_down_exps, lw.down_exps_type);
+
+        // Shared expert (DeepSeek/Qwen-style "shexp" suffix)
+        set_w("ffn_gate_shexp.weight", lw.ffn_gate_shexp, lw.shexp_gate_type);
+        set_w("ffn_up_shexp.weight",   lw.ffn_up_shexp,   lw.shexp_up_type);
+        set_w("ffn_down_shexp.weight", lw.ffn_down_shexp, lw.shexp_down_type);
+
+        // Detect MoE layer
+        if (lw.ffn_gate_inp && lw.ffn_gate_exps) {
+            lw.has_moe = true;
+            // Extract expert_intermediate_dim from gate_exps shape:
+            // gate_exps is (num_experts, intermediate, hidden)
+            auto* info = g.tensor_info(pfx + "ffn_gate_exps.weight");
+            if (info && info->n_dims >= 2) {
+                lw.expert_intermediate_dim = info->dims[1];
+            }
+        }
+
+        // Detect shared expert
+        if (lw.ffn_gate_shexp && lw.ffn_up_shexp && lw.ffn_down_shexp) {
+            lw.has_shared_expert = true;
+        }
+
+        // Detect hybrid attention/SSM: if no attention weights found, this is SSM-only
+        if (!lw.attn_q && !lw.attn_qkv) {
+            lw.has_attention = false;
+        }
     }
 }
 
@@ -380,6 +411,56 @@ void VibeBladeFast::reset() {
         std::fill(kv_k_[l].begin(), kv_k_[l].end(), 0.0f);
         std::fill(kv_v_[l].begin(), kv_v_[l].end(), 0.0f);
     }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  MoE helpers
+// ════════════════════════════════════════════════════════════════
+
+// Top-k selection: returns indices and weights for top-k elements of probs.
+// probs: (n,), k: number of top elements. out_idx: (k,), out_w: (k,)
+static void top_k_select(const float* probs, int n, int k, int* out_idx, float* out_w) {
+    std::vector<std::pair<float, int>> indexed(n);
+    for (int i = 0; i < n; i++) indexed[i] = {probs[i], i};
+    std::partial_sort(indexed.begin(), indexed.begin() + k, indexed.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
+    float sum = 0.0f;
+    for (int i = 0; i < k; i++) {
+        out_idx[i] = indexed[i].second;
+        out_w[i] = indexed[i].first;
+        sum += out_w[i];
+    }
+    if (sum > 1e-12f) {
+        for (int i = 0; i < k; i++) out_w[i] /= sum;
+    }
+}
+
+// MoE expert forward: compute output for one expert on one token.
+// gate_w, up_w, down_w point to the expert's row in the consolidated weight tensor.
+static void moe_expert_forward(
+    const float* x,               // (hidden_dim,)
+    const void* gate_w,            // (intermediate_dim, hidden_dim) quantized
+    const void* up_w,              // (intermediate_dim, hidden_dim) quantized
+    const void* down_w,            // (hidden_dim, intermediate_dim) quantized
+    ggml_type gate_type,
+    ggml_type up_type,
+    ggml_type down_type,
+    int hidden_dim,
+    int intermediate_dim,
+    float* out                     // (hidden_dim,)
+) {
+    std::vector<float> gate_buf(intermediate_dim);
+    gemv_dequant(x, gate_w, gate_buf.data(), hidden_dim, intermediate_dim, gate_type);
+
+    std::vector<float> up_buf(intermediate_dim);
+    gemv_dequant(x, up_w, up_buf.data(), hidden_dim, intermediate_dim, up_type);
+
+    std::vector<float> hidden(intermediate_dim);
+    for (int i = 0; i < intermediate_dim; i++) {
+        hidden[i] = silu_f(gate_buf[i]) * up_buf[i];
+    }
+
+    gemv_dequant(hidden.data(), down_w, out, intermediate_dim, hidden_dim, down_type);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -408,11 +489,14 @@ void VibeBladeFast::forward_layer(
     float* K_buf     = sp;                    sp += seq_len * kv_dim;
     float* V_buf     = sp;                    sp += seq_len * kv_dim;
     float* attn_out  = sp;                    sp += seq_len * q_dim;
-    float* gate_buf  = sp;                    sp += seq_len * cfg_.intermediate_dim;
-    float* up_buf    = sp;                    sp += seq_len * cfg_.intermediate_dim;
+    float* gate_buf  = sp;                    sp += seq_len * std::max(cfg_.intermediate_dim, 1);
+    float* up_buf    = sp;                    sp += seq_len * std::max(cfg_.intermediate_dim, 1);
     float* ff_out    = sp;                    sp += seq_len * hd;
     float* scores    = sp;                    sp += seq_len * cfg_.context_length;
-    float* o_proj    = sp;                    sp += seq_len * hd;  // ← was heap-alloc'd before!
+    float* o_proj    = sp;                    sp += seq_len * hd;
+
+    // ── Attention block (steps 1-7) — skipped for SSM-only hybrid blocks ──
+    if (lw.has_attention) {
 
     // ── 1. Attention RMS Norm ──
     for (int s = 0; s < seq_len; s++) {
@@ -570,8 +654,7 @@ void VibeBladeFast::forward_layer(
         gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype);
     }
 
-    // ── 7. Post-attention residual (must be computed BEFORE FFN norm) ──
-    // LLaMA: residual1 = input + o_proj; then ffn_norm(residual1)
+    // ── 7. Post-attention residual ──
     for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
         memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
@@ -583,12 +666,79 @@ void VibeBladeFast::forward_layer(
 #endif
     }
 
-    // ── 8. FFN RMS Norm (on post-attention residual) ──
+    } // end if (lw.has_attention)
+    else {
+        // SSM-only hybrid block: no attention, pass input through to FFN
+        for (int s = 0; s < seq_len; s++) {
+            memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+        }
+    }
+
+    // ── 8. FFN RMS Norm ──
     for (int s = 0; s < seq_len; s++) {
         rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
     }
 
-// ── 9. FFN (SwiGLU or GeGLU) with TurboSparse ──
+    // ── 9. FFN: MoE, Dense, or skip if no weights ──
+    if (lw.has_moe) {
+        // ── MoE FFN (top-k expert routing) ──
+        int n_exp = cfg_.n_experts;
+        int topk = (cfg_.n_experts_used > 0) ? cfg_.n_experts_used : 2;
+        int exp_inter = (int)lw.expert_intermediate_dim;
+        if (exp_inter <= 0) exp_inter = cfg_.intermediate_dim;
+
+        // Bytes per expert row (one expert's weight matrix)
+        size_t gate_bytes = (size_t)exp_inter * hd * ggml_type_size(lw.gate_exps_type);
+        size_t up_bytes   = (size_t)exp_inter * hd * ggml_type_size(lw.up_exps_type);
+        size_t down_bytes = (size_t)hd * exp_inter * ggml_type_size(lw.down_exps_type);
+
+        for (int s = 0; s < seq_len; s++) {
+            const float* x = normed + s * hd;
+
+            // Router: x @ gate_inp.T → (n_exp,)
+            std::vector<float> router_logits(n_exp);
+            gemv_dequant(x, lw.ffn_gate_inp, router_logits.data(), hd, n_exp, lw.gate_inp_type);
+
+            // Softmax over expert logits
+            softmax(router_logits.data(), n_exp);
+
+            // Top-k selection
+            std::vector<int> top_idx(topk);
+            std::vector<float> top_w(topk);
+            top_k_select(router_logits.data(), n_exp, topk, top_idx.data(), top_w.data());
+
+            // Weighted sum of top-k expert outputs
+            std::vector<float> moe_out(hd, 0.0f);
+            for (int k = 0; k < topk; k++) {
+                int e = top_idx[k];
+                float w = top_w[k];
+                std::vector<float> exp_out(hd);
+
+                const uint8_t* eg = (const uint8_t*)lw.ffn_gate_exps + e * gate_bytes;
+                const uint8_t* eu = (const uint8_t*)lw.ffn_up_exps   + e * up_bytes;
+                const uint8_t* ed = (const uint8_t*)lw.ffn_down_exps + e * down_bytes;
+
+                moe_expert_forward(x, eg, eu, ed,
+                                   lw.gate_exps_type, lw.up_exps_type, lw.down_exps_type,
+                                   hd, exp_inter, exp_out.data());
+
+                for (int d = 0; d < hd; d++) moe_out[d] += w * exp_out[d];
+            }
+
+            // Shared expert (always runs)
+            if (lw.has_shared_expert) {
+                std::vector<float> shared_out(hd);
+                moe_expert_forward(x,
+                                   lw.ffn_gate_shexp, lw.ffn_up_shexp, lw.ffn_down_shexp,
+                                   lw.shexp_gate_type, lw.shexp_up_type, lw.shexp_down_type,
+                                   hd, exp_inter, shared_out.data());
+                for (int d = 0; d < hd; d++) moe_out[d] += shared_out[d];
+            }
+
+            memcpy(ff_out + s * hd, moe_out.data(), hd * sizeof(float));
+        }
+    } else if (lw.ffn_gate && lw.ffn_up && lw.ffn_down) {
+        // ── Dense FFN (SwiGLU or GeGLU) with TurboSparse ──
         for (int s = 0; s < seq_len; s++) {
             gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                          hd, cfg_.intermediate_dim, lw.gate_type);
@@ -598,28 +748,19 @@ void VibeBladeFast::forward_layer(
             int id = cfg_.intermediate_dim;
 
             if (cfg_.use_turbo_sparse) {
-                // TurboSparse FFN: skip down projection for zero-activated neurons
-                // SiLU(x) = x / (1 + exp(-x)) → when x < -5, SiLU ≈ 0
-                // We compute SiLU * up, then identify non-zero outputs to skip down gemv
                 for (int i = 0; i < id; i++) {
                     float g = gate_buf[s * id + i];
                     float u = up_buf[s * id + i];
-                    // SiLU: x * sigmoid(x) — when x < -5, outputs ~0
                     float sig = 1.0f / (1.0f + expf(-g));
-                    gate_buf[s * id + i] = g * sig * u;  // fused SiLU * up
+                    gate_buf[s * id + i] = g * sig * u;
                 }
-
-                // Count non-zero activations (sparsity checkpoint)
                 int n_nonzero = 0;
                 for (int i = 0; i < id; i++) {
                     if (fabsf(gate_buf[s * id + i]) > 1e-5f) n_nonzero++;
                 }
-
-                // If all zeros, skip entirely
                 if (n_nonzero == 0) {
                     memset(ff_out + s * hd, 0, hd * sizeof(float));
                 } else if (n_nonzero < id / 5) {
-                    // Sparse path: <20% active — create sparse buffer
                     std::vector<float> sparse_gate(id, 0.0f);
                     for (int i = 0; i < id; i++) {
                         if (fabsf(gate_buf[s * id + i]) > 1e-5f) {
@@ -629,61 +770,40 @@ void VibeBladeFast::forward_layer(
                     gemv_dequant(sparse_gate.data(), lw.ffn_down, ff_out + s * hd,
                                  id, hd, GGML_TYPE_F32);
                 } else {
-                    // Dense path: >=20% active
                     gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
                                  id, hd, lw.down_type);
                 }
             } else if (cfg_.use_geglu) {
-            // GeGLU: GELU(gate) * up — used by Gemma
-            // Approximate GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+                for (int i = 0; i < id; i++) {
+                    float x = gate_buf[s * id + i];
+                    float gelu = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+                    gate_buf[s * id + i] = gelu * up_buf[s * id + i];
+                }
+            } else {
 #ifdef __aarch64__
-            // NEON doesn't have tanh approximation, use scalar loop
-#endif
-            for (int i = 0; i < id; i++) {
-                float x = gate_buf[s * id + i];
-                float gelu = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
-                gate_buf[s * id + i] = gelu * up_buf[s * id + i];
-            }
-        } else {
-            // SiLU(gate) * up — fused NEON kernel
-#ifdef __aarch64__
-            vsilu_mul_f32(gate_buf + s * id, up_buf + s * id, gate_buf + s * id, id);
+                vsilu_mul_f32(gate_buf + s * id, up_buf + s * id, gate_buf + s * id, id);
 #else
-            for (int i = 0; i < id; i++) {
-                gate_buf[s * id + i] = silu_f(gate_buf[s * id + i]) * up_buf[s * id + i];
-            }
+                for (int i = 0; i < id; i++) {
+                    gate_buf[s * id + i] = silu_f(gate_buf[s * id + i]) * up_buf[s * id + i];
+                }
 #endif
-        }
-
-        gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
-                     id, hd, lw.down_type);
-    }
-
-    // ── 10. Final residual: output += ff_out (output already = input + o_proj) ──
-    if (cfg_.use_parallel_attn) {
-        // Falcon / GPT-NeoX: parallel attention + FFN
-        // output already has input + o_proj from step 7, just add ff_out
-        for (int s = 0; s < seq_len; s++) {
-#ifdef __aarch64__
-            vadd_residual(output + s * hd, ff_out + s * hd, hd);
-#else
-            for (int d = 0; d < hd; d++) {
-                output[s * hd + d] += ff_out[s * hd + d];
             }
-#endif
+
+            gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
+                         id, hd, lw.down_type);
         }
     } else {
-        // Standard LLaMA-style: sequential residual
-        // output already has input + o_proj from step 7, just add ff_out
+        // No FFN weights (shouldn't happen in practice)
+        memset(ff_out, 0, seq_len * hd * sizeof(float));
+    }
+
+    // ── 10. Final residual: output += ff_out ──
+    for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
-        for (int s = 0; s < seq_len; s++) {
-            vadd_residual(output + s * hd, ff_out + s * hd, hd);
-        }
+        vadd_residual(output + s * hd, ff_out + s * hd, hd);
 #else
-        for (int s = 0; s < seq_len; s++) {
-            for (int d = 0; d < hd; d++) {
-                output[s * hd + d] += ff_out[s * hd + d];
-            }
+        for (int d = 0; d < hd; d++) {
+            output[s * hd + d] += ff_out[s * hd + d];
         }
 #endif
     }

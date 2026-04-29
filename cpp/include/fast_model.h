@@ -60,9 +60,23 @@ struct LayerWeights {
     const float* ffn_norm = nullptr;
     // MoE (optional)
     const void* ffn_gate_inp = nullptr;  ggml_type gate_inp_type = GGML_TYPE_F32;
+    // MoE expert weights (consolidated: num_experts × intermediate × hidden)
+    const void* ffn_gate_exps = nullptr;  ggml_type gate_exps_type = GGML_TYPE_F32;
+    const void* ffn_up_exps = nullptr;    ggml_type up_exps_type = GGML_TYPE_F32;
+    const void* ffn_down_exps = nullptr;  ggml_type down_exps_type = GGML_TYPE_F32;
+    // Shared expert (DeepSeek/Qwen-style)
+    const void* ffn_gate_shexp = nullptr; ggml_type shexp_gate_type = GGML_TYPE_F32;
+    const void* ffn_up_shexp = nullptr;   ggml_type shexp_up_type = GGML_TYPE_F32;
+    const void* ffn_down_shexp = nullptr; ggml_type shexp_down_type = GGML_TYPE_F32;
+    // MoE dimensions (extracted from expert weight tensor shapes)
+    int64_t expert_intermediate_dim = 0;  // e.g., 512
+    bool has_moe = false;
+    bool has_shared_expert = false;
     // Fused QKV support
     const void* attn_qkv = nullptr;     ggml_type qkv_type = GGML_TYPE_F32;
     bool has_fused_qkv = false;
+    // Hybrid attention/SSM: some blocks may be SSM-only
+    bool has_attention = true;  // default true; set false if no attn weights
 };
 
 struct GenerateResult {

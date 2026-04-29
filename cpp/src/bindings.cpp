@@ -326,7 +326,9 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
                 "vocab_size"_a = c.vocab_size,
                 "context_length"_a = c.context_length,
                 "norm_eps"_a = c.norm_eps,
-                "arch"_a = c.arch
+                "arch"_a = c.arch,
+                "n_experts"_a = c.n_experts,
+                "n_experts_used"_a = c.n_experts_used
             );
         })
         .def_property_readonly("kv_cache_bytes", [](const VibeBladeFast& self) {

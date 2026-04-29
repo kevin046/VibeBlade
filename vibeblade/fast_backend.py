@@ -52,9 +52,11 @@ class FastModelWrapper:
             "vocab_size": cfg["vocab_size"],
             "context_length": cfg["context_length"],
             "head_dim": cfg["head_dim"],
+            "n_experts": cfg.get("n_experts", 0),
+            "n_experts_used": cfg.get("n_experts_used", 0),
         }
         self.metadata = {"general.architecture": cfg["arch"]}
-        self.is_moe = False
+        self.is_moe = cfg.get("n_experts", 0) > 0
         self._moe_executor = None
 
     @property
