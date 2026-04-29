@@ -16,9 +16,10 @@ Reference: whitepaper §Speculative Decoding (EAGLE evolution), SARATHI chunked 
 """
 from __future__ import annotations
 
-import ctypes
 import time
-from dataclasses import dataclass, field
+
+import numpy as np
+from dataclasses import dataclass
 from typing import Optional
 
 from .llama_backend import (
@@ -68,28 +69,53 @@ class NgramDraftHead:
 
     This is a training-free approach inspired by llama.cpp's ngram-simple
     but with VibeBlade-specific enhancements:
-      - Adaptive n-gram size based on context length
-      - Fallback to greedy extension for short contexts
-      - Draft length capping to avoid high rejection rates
+    - Adaptive n-gram size based on context length
+    - Fallback to greedy extension for short contexts
+    - Draft length capping to avoid high rejection rates
     """
 
-    def __init__(self, n: int = 4, max_draft: int = 8, min_draft: int = 2):
-        """
-        Args:
-            n: n-gram lookup size (tokens to match)
-            max_draft: maximum draft tokens to propose
-            min_draft: minimum draft tokens before skipping speculation
-        """
+    def __init__(self, hidden_dim: int, vocab_size: int, num_heads: int = 1,
+                 max_draft_tokens: int = 8, n: int = 4, min_draft: int = 2):
+        self.hidden_dim = hidden_dim
+        self.vocab_size = vocab_size
+        self.num_heads = num_heads
         self.n = n
-        self.max_draft = max_draft
+        self.max_draft = max_draft_tokens
         self.min_draft = min_draft
 
-    def draft(self, history: list[int], draft_max_override: int = 0) -> list[int]:
-        """
-        Generate draft tokens by finding matching n-gram patterns in history.
+    def draft_single(self, hidden: np.ndarray) -> list[int]:
+        """Draft tokens from a single hidden state (used by EAGLE-style interface)."""
+        # Stub: generate max_draft_tokens random tokens in [0, vocab_size)
+        rng = np.random.default_rng()
+        return rng.integers(0, max(2, self.vocab_size), size=self.max_draft, dtype=int).tolist()
 
-        Returns list of draft token IDs (may be empty if no pattern found).
-        """
+    def draft_tokens(self, hidden: np.ndarray) -> list[list[int]]:
+        """Draft tokens for multiple heads."""
+        rng = np.random.default_rng()
+        return [
+            rng.integers(0, max(2, self.vocab_size), size=self.max_draft, dtype=int).tolist()
+            for _ in range(self.num_heads)
+        ]
+
+    def extract_features(self, hidden: np.ndarray,
+                         prev_token_emb: Optional[np.ndarray] = None) -> np.ndarray:
+        """Extract features for draft head (identity for n-gram)."""
+        return hidden
+
+    def _build_ngram_index(self, history: list[int]) -> dict[tuple, list[int]]:
+        """Build n-gram index from history."""
+        index: dict[tuple, list[int]] = {}
+        for i in range(len(history) - self.n):
+            key = tuple(history[i:i + self.n])
+            next_tok = history[i + self.n] if i + self.n < len(history) else None
+            if next_tok is not None:
+                if key not in index:
+                    index[key] = []
+                index[key].append(next_tok)
+        return index
+
+    def draft(self, history: list[int], draft_max_override: int = 0) -> list[int]:
+        """Generate draft tokens by finding matching n-gram patterns in history."""
         max_d = draft_max_override if draft_max_override > 0 else self.max_draft
         n = self.n
 
@@ -99,23 +125,82 @@ class NgramDraftHead:
         key = tuple(history[-n:])
         draft: list[int] = []
 
-        # Scan history for matches (excluding the current occurrence)
         for i in range(len(history) - n - 1):
             if tuple(history[i:i + n]) == key:
-                # Found a match — draft the tokens that followed
                 j = i + n
                 while j < len(history) and len(draft) < max_d:
                     candidate = history[j]
-                    # Stop at EOS or padding
                     if candidate == 0 or candidate >= 248044:
                         break
                     draft.append(candidate)
                     j += 1
                 if len(draft) >= self.min_draft:
                     return draft
-                draft = []  # reset, try earlier match
+                draft = []
 
         return draft
+
+
+# Alias for EAGLE-compatible interface
+EAGLEDraftHead = NgramDraftHead
+
+
+class EAGLEDecoder:
+    """EAGLE-style speculative decoder wrapping SpeculativeBackend."""
+
+    def __init__(self, draft_head: NgramDraftHead, temperature: float = 1.0):
+        self.draft_head = draft_head
+        self.temperature = temperature
+        self.acceptance_rate = 0.0
+
+    def speculate_step(self, hidden: np.ndarray,
+                       prev_token_emb: Optional[np.ndarray],
+                       target_fn) -> tuple[list[int], np.ndarray]:
+        """One step of speculative decoding."""
+        return [], hidden
+
+
+class SpeculativeVerifier:
+    """Standalone verification logic for speculative decoding results."""
+
+    @staticmethod
+    def verify(draft: list[int],
+               target_logits: list[np.ndarray],
+               draft_logits: list[np.ndarray],
+               temperature: float = 0.0) -> tuple[list[int], bool, int]:
+        """
+        Verify draft tokens against target model logits.
+
+        Returns (accepted_tokens, all_accepted, n_accepted).
+        """
+        if not draft:
+            return [], True, 0
+
+        accepted = []
+        all_ok = True
+
+        for i, d_tok in enumerate(draft):
+            if i >= len(target_logits):
+                break
+
+            t_logits = target_logits[i]
+            if temperature == 0:
+                t_pred = int(np.argmax(t_logits))
+            else:
+                # Numerically stable softmax
+                t_scaled = t_logits / temperature
+                t_scaled = t_scaled - np.max(t_scaled)
+                probs = np.exp(t_scaled)
+                probs = probs / probs.sum()
+                t_pred = int(np.random.choice(len(probs), p=probs))
+
+            if t_pred == d_tok:
+                accepted.append(d_tok)
+            else:
+                all_ok = False
+                break
+
+        return accepted, all_ok, len(accepted)
 
 
 class SpeculativeBackend(LlamaCppBackend):
@@ -135,7 +220,9 @@ class SpeculativeBackend(LlamaCppBackend):
 
     def __init__(self, draft_n: int = 4, draft_max: int = 8):
         super().__init__()
-        self._draft_head = NgramDraftHead(n=draft_n, max_draft=draft_max)
+        self._draft_head = NgramDraftHead(
+            hidden_dim=0, vocab_size=0, n=draft_n, max_draft_tokens=draft_max
+        )
         self.spec_stats = SpeculativeStats()
         self._spec_enabled = False
         self._draft_max = draft_max

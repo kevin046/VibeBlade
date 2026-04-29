@@ -301,7 +301,7 @@ class VibeBladeModel:
             except Exception as e:
                 print(f"   Tokenizer: fallback (BPE init failed: {e})")
         else:
-            print(f"   Tokenizer: byte-level fallback")
+            print("   Tokenizer: byte-level fallback")
 
         # Build RoPE cache (cos/sin tables for rotary positional embeddings)
         head_dim = self.config.get("head_dim", self.config["hidden_dim"] // self.config["num_heads"])
