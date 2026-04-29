@@ -35,11 +35,14 @@ def make_router(shared_dim: int = 16, num_experts: int = 4, topk: int = 2) -> Ex
 def make_expert_set(
     num_experts: int = 4, shared_dim: int = 16, expert_dim: int = 32
 ) -> MoEExpertSet:
-    """Create a small MoEExpertSet with random weights."""
+    """Create a small MoEExpertSet with random weights.
+
+    GGUF layout: gate/up (E, expert_dim, shared_dim), down (E, shared_dim, expert_dim).
+    """
     rng = np.random.RandomState(123)
-    gate = rng.randn(num_experts, shared_dim, expert_dim).astype(np.float32) * 0.1
-    up = rng.randn(num_experts, shared_dim, expert_dim).astype(np.float32) * 0.1
-    down = rng.randn(num_experts, expert_dim, shared_dim).astype(np.float32) * 0.1
+    gate = rng.randn(num_experts, expert_dim, shared_dim).astype(np.float32) * 0.1
+    up = rng.randn(num_experts, expert_dim, shared_dim).astype(np.float32) * 0.1
+    down = rng.randn(num_experts, shared_dim, expert_dim).astype(np.float32) * 0.1
     return MoEExpertSet(gate, up, down)
 
 

@@ -31,12 +31,17 @@ def make_weights(
     topk=2,
     seed=42,
 ):
-    """Build router + expert weights with deterministic seed."""
+    """Build router + expert weights with deterministic seed.
+
+    GGUF consolidated format:
+        gate/up: (num_experts, expert_dim, shared_dim)
+        down:    (num_experts, shared_dim, expert_dim)
+    """
     rng = np.random.default_rng(seed)
     router_w = rng.standard_normal((shared_dim, num_experts)).astype(np.float32)
-    gate_w = rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32)
-    up_w   = rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32)
-    down_w = rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32)
+    gate_w = rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32)
+    up_w   = rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32)
+    down_w = rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32)
     return router_w, gate_w, up_w, down_w
 
 
@@ -168,27 +173,30 @@ class TestMoEExpertSet:
         _, gate_w, up_w, down_w = make_weights(num_experts=4, shared_dim=16, expert_dim=32)
         es = MoEExpertSet(gate_w, up_w, down_w)
         g, u, d = es.get_expert(2)
+        # get_expert transposes from GGUF (expert_dim, shared_dim) → (shared_dim, expert_dim)
         assert g.shape == (16, 32)
         assert u.shape == (16, 32)
         assert d.shape == (32, 16)
-        # Should be the same as the original slice
-        np.testing.assert_array_equal(g, gate_w[2])
+        # Should be the transposed version of the GGUF slice
+        np.testing.assert_array_equal(g, gate_w[2].T)
 
     def test_get_experts_batch(self):
         _, gate_w, up_w, down_w = make_weights(num_experts=4, shared_dim=16, expert_dim=32)
         es = MoEExpertSet(gate_w, up_w, down_w)
         indices = np.array([0, 3, 1, 2])
         g, u, d = es.get_experts_batch(indices)
+        # get_experts_batch transposes from GGUF → einsum-compatible
         assert g.shape == (4, 16, 32)
         assert u.shape == (4, 16, 32)
         assert d.shape == (4, 32, 16)
-        np.testing.assert_array_equal(g[0], gate_w[0])
-        np.testing.assert_array_equal(g[1], gate_w[3])
+        np.testing.assert_array_equal(g[0], gate_w[0].T)
+        np.testing.assert_array_equal(g[1], gate_w[3].T)
 
     def test_shape_mismatch(self):
+        # GGUF: gate (E, expert_dim, shared_dim) = (4, 16, 32)
         gate_w = np.zeros((4, 16, 32), dtype=np.float32)
-        # down_w should be (num_experts, expert_dim, shared_dim) = (4, 32, 16)
-        # Use (4, 32, 8) — shared_dim 8 ≠ gate's shared_dim 16
+        # down should be (E, shared_dim, expert_dim) = (4, 32, 16)
+        # Use (4, 32, 8) — expert_dim 8 ≠ gate's expert_dim 16
         bad_down = np.zeros((4, 32, 8), dtype=np.float32)
         with pytest.raises(AssertionError):
             MoEExpertSet(gate_w, gate_w, bad_down)
@@ -281,9 +289,10 @@ class TestDetectMoEConfig:
         rng = np.random.default_rng(0)
         weights = {
             "blk.0.ffn_gate_inp.weight": rng.standard_normal((16, 4)).astype(np.float32),
-            "blk.0.ffn_gate_exps.weight": rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_up_exps.weight":   rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_down_exps.weight": rng.standard_normal((4, 32, 16)).astype(np.float32),
+            # GGUF: gate/up (E, expert_dim, shared_dim), down (E, shared_dim, expert_dim)
+            "blk.0.ffn_gate_exps.weight": rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_up_exps.weight":   rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_down_exps.weight": rng.standard_normal((4, 16, 32)).astype(np.float32),
         }
         cfg = detect_moe_config(weights)
         assert cfg is not None
@@ -296,9 +305,9 @@ class TestDetectMoEConfig:
         rng = np.random.default_rng(0)
         weights = {
             "blk.0.ffn_gate_inp.weight":  rng.standard_normal((16, 4)).astype(np.float32),
-            "blk.0.ffn_gate_exps.weight":  rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_up_exps.weight":    rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_down_exps.weight":  rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_gate_exps.weight":  rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_up_exps.weight":    rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_down_exps.weight":  rng.standard_normal((4, 16, 32)).astype(np.float32),
             "blk.0.ffn_gate_shunt.weight": rng.standard_normal((16, 32)).astype(np.float32),
         }
         cfg = detect_moe_config(weights)
@@ -348,9 +357,10 @@ class TestLoadMoEWeights:
         rng = np.random.default_rng(0)
         weights = {
             "blk.3.ffn_gate_inp.weight": rng.standard_normal((16, 4)).astype(np.float32),
-            "blk.3.ffn_gate_exps.weight": rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.3.ffn_up_exps.weight":   rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.3.ffn_down_exps.weight": rng.standard_normal((4, 32, 16)).astype(np.float32),
+            # GGUF: gate/up (E, expert_dim, shared_dim), down (E, shared_dim, expert_dim)
+            "blk.3.ffn_gate_exps.weight": rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.3.ffn_up_exps.weight":   rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.3.ffn_down_exps.weight": rng.standard_normal((4, 16, 32)).astype(np.float32),
         }
         router_w, expert_set, extra = load_moe_weights_from_layer(weights, 3)
         assert router_w is not None
@@ -362,9 +372,9 @@ class TestLoadMoEWeights:
         rng = np.random.default_rng(0)
         weights = {
             "blk.0.ffn_gate_inp.weight":  rng.standard_normal((16, 4)).astype(np.float32),
-            "blk.0.ffn_gate_exps.weight":  rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_up_exps.weight":    rng.standard_normal((4, 16, 32)).astype(np.float32),
-            "blk.0.ffn_down_exps.weight":  rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_gate_exps.weight":  rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_up_exps.weight":    rng.standard_normal((4, 32, 16)).astype(np.float32),
+            "blk.0.ffn_down_exps.weight":  rng.standard_normal((4, 16, 32)).astype(np.float32),
             "blk.0.ffn_gate_shunt.weight": rng.standard_normal((16, 32)).astype(np.float32),
             "blk.0.ffn_up_shunt.weight":   rng.standard_normal((16, 32)).astype(np.float32),
             "blk.0.ffn_down_shunt.weight": rng.standard_normal((32, 16)).astype(np.float32),
@@ -406,9 +416,10 @@ class TestLoadMoEWeights:
         num_experts, shared_dim, expert_dim, topk = 8, 64, 128, 2
         weights = {
             "blk.0.ffn_gate_inp.weight": rng.standard_normal((shared_dim, num_experts)).astype(np.float32),
-            "blk.0.ffn_gate_exps.weight": rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32),
-            "blk.0.ffn_up_exps.weight":   rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32),
-            "blk.0.ffn_down_exps.weight": rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32),
+            # GGUF: gate/up (E, expert_dim, shared_dim), down (E, shared_dim, expert_dim)
+            "blk.0.ffn_gate_exps.weight": rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32),
+            "blk.0.ffn_up_exps.weight":   rng.standard_normal((num_experts, expert_dim, shared_dim)).astype(np.float32),
+            "blk.0.ffn_down_exps.weight": rng.standard_normal((num_experts, shared_dim, expert_dim)).astype(np.float32),
         }
         router_w, expert_set, _ = load_moe_weights_from_layer(weights, 0)
         router = ExpertRouter(router_w, topk=topk)

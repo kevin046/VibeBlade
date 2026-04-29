@@ -111,15 +111,15 @@ class MoEConfig:
         """Derive config from raw weight tensors.
 
         router_w:  (shared_dim, num_experts)
-        gate_exps: (num_experts, shared_dim, expert_dim)
-        up_exps:   (num_experts, shared_dim, expert_dim)
-        down_exps: (num_experts, expert_dim, shared_dim)
+        gate_exps: (num_experts, expert_dim, shared_dim)
+        up_exps:   (num_experts, expert_dim, shared_dim)
+        down_exps: (num_experts, shared_dim, expert_dim)
         """
         return cls(
             num_experts=int(router_w.shape[1]),
             num_active=num_active,
-            expert_dim=int(gate_exps.shape[2]),
-            shared_dim=int(gate_exps.shape[1]),
+            expert_dim=int(gate_exps.shape[1]),
+            shared_dim=int(gate_exps.shape[2]),
         )
 
     def __repr__(self) -> str:
@@ -211,10 +211,12 @@ class ExpertRouter:
 class MoEExpertSet:
     """Holds all expert weight tensors for a single MoE layer.
 
-    Weight layout (same as GGUF/llama.cpp consolidated format):
-        gate_weights: (num_experts, shared_dim, expert_dim)
-        up_weights:   (num_experts, shared_dim, expert_dim)
-        down_weights: (num_experts, expert_dim, shared_dim)
+    GGUF/llama.cpp consolidated layout (raw storage):
+        gate_weights: (num_experts, expert_dim, shared_dim)
+        up_weights:   (num_experts, expert_dim, shared_dim)
+        down_weights: (num_experts, shared_dim, expert_dim)
+
+    Where shared_dim = model hidden_dim, expert_dim = expert intermediate dim.
     """
 
     def __init__(
@@ -229,11 +231,10 @@ class MoEExpertSet:
 
         assert self.gate.shape == self.up.shape, \
             f"gate {self.gate.shape} != up {self.up.shape}"
-        # gate/up: (E, shared_dim, expert_dim), down: (E, expert_dim, shared_dim)
-        # Check shared_dim and expert_dim are consistent between gate and down
+        # gate/up: (E, expert_dim, shared_dim), down: (E, shared_dim, expert_dim)
         assert self.gate.shape[0] == self.down.shape[0] and \
-               self.gate.shape[1] == self.down.shape[2] and \
-               self.gate.shape[2] == self.down.shape[1], \
+               self.gate.shape[2] == self.down.shape[1] and \
+               self.gate.shape[1] == self.down.shape[2], \
             f"gate {self.gate.shape} incompatible with down {self.down.shape}"
 
     @property
@@ -242,20 +243,21 @@ class MoEExpertSet:
 
     @property
     def expert_dim(self) -> int:
-        return int(self.gate.shape[2])
+        return int(self.gate.shape[1])
 
     @property
     def shared_dim(self) -> int:
-        return int(self.gate.shape[1])
+        return int(self.gate.shape[2])
 
     def get_expert(self, idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return (gate_w, up_w, down_w) for expert *idx*.
 
-        gate_w: (shared_dim, expert_dim)
-        up_w:   (shared_dim, expert_dim)
-        down_w: (expert_dim, shared_dim)
+        Transposes GGUF layout to einsum-compatible layout:
+            gate_w: (shared_dim, expert_dim)
+            up_w:   (shared_dim, expert_dim)
+            down_w: (expert_dim, shared_dim)
         """
-        return self.gate[idx], self.up[idx], self.down[idx]
+        return self.gate[idx].T, self.up[idx].T, self.down[idx].T
 
     def get_experts_batch(
         self, indices: np.ndarray,
@@ -266,11 +268,16 @@ class MoEExpertSet:
             indices: 1-D array of expert IDs, shape (batch,).
 
         Returns:
-            gate_w: (batch, shared_dim, expert_dim)
-            up_w:   (batch, shared_dim, expert_dim)
-            down_w: (batch, expert_dim, shared_dim)
+            gate_w: (batch, shared_dim, expert_dim)   — transposed from GGUF
+            up_w:   (batch, shared_dim, expert_dim)   — transposed from GGUF
+            down_w: (batch, expert_dim, shared_dim)   — transposed from GGUF
         """
-        return self.gate[indices], self.up[indices], self.down[indices]
+        # GGUF: gate/up (E, expert_dim, shared_dim) → transpose to (E, shared_dim, expert_dim)
+        gate_batch = np.transpose(self.gate[indices], (0, 2, 1))
+        up_batch   = np.transpose(self.up[indices],   (0, 2, 1))
+        # GGUF: down (E, shared_dim, expert_dim) → transpose to (E, expert_dim, shared_dim)
+        down_batch = np.transpose(self.down[indices], (0, 2, 1))
+        return gate_batch, up_batch, down_batch
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -319,7 +326,8 @@ def detect_moe_config(weights: dict[str, np.ndarray]) -> MoEConfig | None:
         # Derive dimensions from tensors
         num_experts = int(router_w.shape[1])
         shared_dim  = int(router_w.shape[0])
-        expert_dim  = int(gate_w.shape[2])
+        # GGUF: gate_w is (E, expert_dim, shared_dim)
+        expert_dim  = int(gate_w.shape[1])
 
         # Check for shared expert
         has_shared = any(_RE_GGUF_SHARED.match(k) for k in keys)
