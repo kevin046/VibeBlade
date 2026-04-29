@@ -348,9 +348,14 @@ def _get_moe_components(weights, prefix, cache):
         su = extras["shared_up"]
         sd = extras["shared_down"]
         _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} sg={sg.shape} su={su.shape} sd={sd.shape}\n")
-        # _dense_ffn expects gate_w=(hidden,expert), up_w=(hidden,expert), down_w=(expert,hidden)
-        # GGUF shexp: gate/up=(intermediate,hidden)=(expert,hidden), down=(hidden,intermediate)=(hidden,expert)
-        # → sg and su need .T, sd does NOT need .T
+        # Convention (per MoEExpertSet.get_expert):
+        #   gate_w: (shared_dim, expert_dim)  ← GGUF (expert_dim, shared_dim) → needs .T
+        #   up_w:   (shared_dim, expert_dim)  ← GGUF (expert_dim, shared_dim) → needs .T
+        #   down_w: (expert_dim, shared_dim)   ← GGUF stored as-is
+        #
+        # GGUF shexp weights:
+        #   sg/su: (intermediate, hidden) = (expert, shared)  → needs .T to get (shared, expert)
+        #   sd:    (hidden, intermediate) = (shared, expert)   → needs .T to get (expert, shared)
         if sg.shape[0] == sg.shape[1]:
             raise ValueError(f"shared_gate is square {sg.shape} — shape unclear, check GGUF layout manually")
         if sg.shape[0] != su.shape[0]:
@@ -358,9 +363,9 @@ def _get_moe_components(weights, prefix, cache):
         if sg.shape[1] != sd.shape[0] or sg.shape[0] != sd.shape[1]:
             raise ValueError(
                 f"shared weights shape mismatch: gate={sg.shape}, up={su.shape}, down={sd.shape}. "
-                f"Expected gate/up=(expert,hidden), down=(hidden,expert). "
-                f"Got: sg.T={sg.T.shape}, su.T={su.T.shape}, sd={sd.shape}")
-        shared = (sg.T, su.T, sd)
+                f"Expected gate/up=(expert,shared), down=(shared,expert). "
+                f"Got: sg.T={sg.T.shape}, su.T={su.T.shape}, sd.T={sd.T.shape}")
+        shared = (sg.T, su.T, sd.T)
         _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} shared_g={shared[0].shape} shared_u={shared[1].shape} shared_d={shared[2].shape}\n")
 
     cache[prefix] = {"router": router, "experts": expert_set, "shared": shared}
