@@ -442,7 +442,8 @@ def forward_prefill(
         (logits, kv_caches_k, kv_caches_v)
         logits: (seq_len, vocab_size)
     """
-    import sys as _dbg
+    import sys
+    _dbg = sys.stderr
 
     seq_len = len(token_ids)
     x = token_emb[token_ids]  # (seq, hidden_dim)
