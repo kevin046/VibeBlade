@@ -9,16 +9,23 @@
 **Linux / macOS**
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e . && python -m vibeblade wizard
+pip install -e .
+bash cpp/build_cpp.sh          # build C++ engine (one-time)
+python -m vibeblade chat --model model.gguf
 ```
 
 **Windows (PowerShell)**
 ```powershell
 git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
-pip install -e .; python -m vibeblade wizard
+pip install -e .
+cd cpp; mkdir build; cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release; cmake --build . --config Release
+Copy-Item _vibeblade_native* ..\..\vibeblade\
+cd ..\..
+python -m vibeblade chat --model model.gguf
 ```
 
-The wizard detects your hardware, installs any missing tools, configures memory offload, and downloads a model. You're ready to run in under 5 minutes.
+The C++ engine handles all model architectures — dense, MoE (Mistral/Qwen/DeepSeek), and hybrid attention+SSM — natively. No Python in the decode hot path.
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
@@ -34,8 +41,8 @@ The wizard detects your hardware, installs any missing tools, configures memory 
 | Command | What it does |
 |---|---|
 | `python -m vibeblade wizard` | Guided setup — hardware detection, install, config, model download |
-| `python -m vibeblade chat --model model.gguf` | Interactive chat with a GGUF model (C++ fast engine by default) |
-| `python -m vibeblade chat --model model.gguf --backend numpy` | Fallback to pure NumPy inference |
+| `python -m vibeblade chat --model model.gguf` | Interactive chat (C++ fast engine, auto-detected for .gguf) |
+| `python -m vibeblade chat --model model.gguf --backend numpy` | Force pure NumPy inference (slow, for debugging) |
 | `python -m vibeblade serve` | Start local inference API server (OpenAI-compatible) |
 | `python -m vibeblade bench` | Benchmark suite |
 | `python -m vibeblade bench --quick` | Quick benchmark (single prompt, ~30s) |
@@ -109,12 +116,21 @@ Auto-selects best eviction policy: LRU-K, frequency-aware, cost-benefit, or MAB 
 
 VibeBlade ships a **native C++ inference engine** — the entire generate pipeline (tokenization, forward pass, sampling, detokenization) runs in C++ with zero Python in the decode hot path. Weights are mmap'd from GGUF files and dequantized inline during matrix multiplication. No numpy, no llama.cpp dependency.
 
+Supports **all architectures natively**: dense transformers, MoE (Mistral, Qwen, DeepSeek), and hybrid attention+SSM models. MoE routing (top-k expert selection + shared experts) runs entirely in C++.
+
 ```bash
-# Build the C++ engine (requires pybind11)
-cd cpp && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release && make
+# Build the C++ engine (requires pybind11, cmake)
+cd cpp && bash build_cpp.sh
+
+# Or manually:
+cd cpp && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release && make
+
+# Copy the native module into the Python package
+cp _vibeblade_native*.so ../../vibeblade/
 
 # Auto-detected by the chat command for .gguf files
-python -m vibeblade chat --model model.gguf            # uses C++ fast engine
+python -m vibeblade chat --model model.gguf            # C++ fast engine
 python -m vibeblade chat --model model.gguf --backend numpy  # force NumPy
 ```
 
