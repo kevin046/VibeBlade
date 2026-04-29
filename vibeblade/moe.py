@@ -35,7 +35,7 @@ __all__ = [
 
 def _silu(x: np.ndarray) -> np.ndarray:
     """SiLU activation: x * sigmoid(x).  Matches transformer.silu()."""
-    x32 = x.astype(np.float32)
+    x32 = np.clip(x.astype(np.float32), -65504.0, 65504.0)
     return x32 * (1.0 / (1.0 + np.exp(-x32)))
 
 
@@ -169,6 +169,8 @@ class ExpertRouter:
             x = x[np.newaxis, :]
 
         logits = x @ self.weight  # (batch, num_experts)
+        # Clamp to prevent overflow in softmax
+        logits = np.clip(logits, -65504.0, 65504.0)
         probs = _softmax(logits, axis=-1)  # (batch, num_experts)
 
         # Top-k selection (descending)

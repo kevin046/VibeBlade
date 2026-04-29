@@ -485,69 +485,79 @@ def forward_prefill(
             prefix = f"blk.{layer_idx}"
             _dbg.write(f"[FW LAYER] blk.{layer_idx} enter x={x.shape}\n")
 
-            # ── Pre-attention RMSNorm ──────────────────────────────────
-            attn_norm_w = weights[f"{prefix}.attn_norm.weight"]
-            _dbg.write(f"[FW LAYER] blk.{layer_idx} attn_norm={attn_norm_w.shape}\n")
-            h = rms_norm(x, attn_norm_w, eps)
+            # ── Detect block type: attention+SSM hybrid vs pure SSM ──
+            # Use try/except because the lazy weight loader's __contains__
+            # returns True for aliased keys even when the underlying tensor
+            # doesn't exist (e.g., SSM-only blocks in hybrid models).
+            try:
+                _probe_q = weights[f"{prefix}.attn_q.weight"]
+                has_attention = True
+            except (KeyError, ValueError):
+                has_attention = False
 
-            # ── QKV projections ────────────────────────────────────────
-            q_w = weights[f"{prefix}.attn_q.weight"]
-            k_w = weights[f"{prefix}.attn_k.weight"]
-            v_w = weights[f"{prefix}.attn_v.weight"]
-            _dbg.write(f"[FW QKV]  blk.{layer_idx} h={h.shape} q_w={q_w.shape} k_w={k_w.shape} v_w={v_w.shape}\n")
-            q = h @ q_w.T
-            k = h @ k_w.T
-            v = h @ v_w.T
-            _dbg.write(f"[FW QKV]  blk.{layer_idx} q={q.shape} k={k.shape} v={v.shape}\n")
+            if has_attention:
+                # ── Pre-attention RMSNorm ──────────────────────────────
+                attn_norm_w = weights[f"{prefix}.attn_norm.weight"]
+                _dbg.write(f"[FW LAYER] blk.{layer_idx} attn_norm={attn_norm_w.shape}\n")
+                h = rms_norm(x, attn_norm_w, eps)
 
-            # ── RoPE + cache ──────────────────────────────────────────
-            cos_slice = cos_cache[:seq_len]
-            sin_slice = sin_cache[:seq_len]
-            q_r = rope(q.reshape(seq_len, n_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
-            k_r = rope(k.reshape(seq_len, n_kv_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
-            _dbg.write(f"[FW ROPE] blk.{layer_idx} q_r={q_r.shape} k_r={k_r.shape}\n")
+                # ── QKV projections ────────────────────────────────────
+                q_w = weights[f"{prefix}.attn_q.weight"]
+                k_w = weights[f"{prefix}.attn_k.weight"]
+                v_w = weights[f"{prefix}.attn_v.weight"]
+                _dbg.write(f"[FW QKV]  blk.{layer_idx} h={h.shape} q_w={q_w.shape} k_w={k_w.shape} v_w={v_w.shape}\n")
+                q = h @ q_w.T
+                k = h @ k_w.T
+                v = h @ v_w.T
+                _dbg.write(f"[FW QKV]  blk.{layer_idx} q={q.shape} k={k.shape} v={v.shape}\n")
 
-            kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, head_dim))
-            kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
+                # ── RoPE + cache ──────────────────────────────────────
+                cos_slice = cos_cache[:seq_len]
+                sin_slice = sin_cache[:seq_len]
+                q_r = rope(q.reshape(seq_len, n_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+                k_r = rope(k.reshape(seq_len, n_kv_heads, head_dim), cos_slice, sin_slice).reshape(seq_len, -1)
+                _dbg.write(f"[FW ROPE] blk.{layer_idx} q_r={q_r.shape} k_r={k_r.shape}\n")
 
-            # ── Attention ─────────────────────────────────────────────
-            if np.any(np.isnan(q_r)) or np.any(np.isinf(q_r)):
-                _dbg.write(f"[NaN DETECTED before attn] blk.{layer_idx} q_r has NaN/Inf\n")
-            attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
-            if np.any(np.isnan(attn_out)) or np.any(np.isinf(attn_out)):
-                _dbg.write(f"[NaN DETECTED after attn] blk.{layer_idx} attn_out min={np.nanmin(attn_out):.4f} max={np.nanmax(attn_out):.4f}\n")
-            _dbg.write(f"[FW ATTN] blk.{layer_idx} attn_out={attn_out.shape}\n")
+                kv_caches_k.append(k_r.reshape(n_kv_heads, seq_len, head_dim))
+                kv_caches_v.append(v.reshape(n_kv_heads, seq_len, head_dim))
 
-            # ── Output projection ─────────────────────────────────────
-            o_w = weights[f"{prefix}.attn_output.weight"]
-            _dbg.write(f"[FW OPROJ] blk.{layer_idx} attn_out={attn_out.shape} o_w={o_w.shape}\n")
+                # ── Attention ─────────────────────────────────────────
+                if np.any(np.isnan(q_r)) or np.any(np.isinf(q_r)):
+                    _dbg.write(f"[NaN DETECTED before attn] blk.{layer_idx} q_r has NaN/Inf\n")
+                attn_out = attention(q_r, k_r, v, n_heads, n_kv_heads)
+                if np.any(np.isnan(attn_out)) or np.any(np.isinf(attn_out)):
+                    _dbg.write(f"[NaN DETECTED after attn] blk.{layer_idx} attn_out min={np.nanmin(attn_out):.4f} max={np.nanmax(attn_out):.4f}\n")
+                _dbg.write(f"[FW ATTN] blk.{layer_idx} attn_out={attn_out.shape}\n")
 
-            # Auto-correct o_w shape if it's wrong for the model architecture
-            # Some models (like Qwen3.6-MoE) have q_dim != hidden_dim
-            # o_w should be (q_dim, hidden_dim) where q_dim = n_heads * head_dim
-            o_w_rows = o_w.shape[0]
-            o_w_cols = o_w.shape[1]
-            q_dim = q.shape[-1]  # actual Q dimension from Q projection
-            expected_o_rows = q_dim
-            _o_w_transposed = False
-            if o_w_rows != expected_o_rows:
-                _dbg.write(f"[FW OPROJ] blk.{layer_idx} WARNING: o_w has {o_w_rows} rows, "
-                            f"but q has {q_dim} cols. Transposing to match...\n")
-                o_w = o_w.T  # Transpose to get correct shape
-                o_w_rows, o_w_cols = o_w.shape[0], o_w.shape[1]
-                _o_w_transposed = True
+                # ── Output projection ─────────────────────────────────
+                o_w = weights[f"{prefix}.attn_output.weight"]
+                _dbg.write(f"[FW OPROJ] blk.{layer_idx} attn_out={attn_out.shape} o_w={o_w.shape}\n")
 
-            # Final shape check
-            if o_w_rows != q_dim:
-                raise ValueError(
-                    f"attn_output shape mismatch in blk.{layer_idx}: "
-                    f"attn_out has {q_dim} cols but o_w has {o_w_rows} rows. "
-                    f"Expected (q_dim={q_dim}, hidden_dim) or (hidden_dim, q_dim).")
+                # Auto-correct o_w shape if it's wrong for the model architecture
+                o_w_rows = o_w.shape[0]
+                q_dim = q.shape[-1]
+                _o_w_transposed = False
+                if o_w_rows != q_dim:
+                    _dbg.write(f"[FW OPROJ] blk.{layer_idx} WARNING: o_w has {o_w_rows} rows, "
+                                f"but q has {q_dim} cols. Transposing to match...\n")
+                    o_w = o_w.T
+                    _o_w_transposed = True
 
-            attn_out = attn_out @ o_w if not _o_w_transposed else attn_out @ o_w.T
+                if o_w.shape[0] != q_dim:
+                    raise ValueError(
+                        f"attn_output shape mismatch in blk.{layer_idx}: "
+                        f"attn_out has {q_dim} cols but o_w has {o_w.shape[0]} rows.")
 
-            x = x + attn_out
-            _dbg.write(f"[FW RES1] blk.{layer_idx} x={x.shape}\n")
+                attn_out = attn_out @ o_w if not _o_w_transposed else attn_out @ o_w.T
+
+                x = x + attn_out
+                _dbg.write(f"[FW RES1] blk.{layer_idx} x={x.shape}\n")
+            else:
+                # Pure SSM block — no attention weights, pass through
+                _dbg.write(f"[FW LAYER] blk.{layer_idx} SSM-only block, skipping attention\n")
+                # Append placeholder KV cache for index compatibility
+                kv_caches_k.append(np.zeros((n_kv_heads, 0, head_dim), dtype=np.float32))
+                kv_caches_v.append(np.zeros((n_kv_heads, 0, head_dim), dtype=np.float32))
 
             # ── FFN (MoE or dense) ────────────────────────────────────
             h_ffn = rms_norm(x, weights[f"{prefix}.ffn_norm.weight"], eps)
@@ -689,65 +699,77 @@ def forward_decode_single(
         if head_dim <= 0:
             head_dim = token_emb.shape[-1] // n_heads
 
-        # Pre-attention RMSNorm
-        h = rms_norm(x, weights[f"{prefix}.attn_norm.weight"], eps)
+        # Pre-attention RMSNorm + detect attention blocks
+        try:
+            h = rms_norm(x, weights[f"{prefix}.attn_norm.weight"], eps)
+            # Probe Q to confirm attention tensors exist (SSM blocks don't have them)
+            _probe_q = weights[f"{prefix}.attn_q.weight"]
+            has_attention = True
+        except (KeyError, ValueError):
+            has_attention = False
 
-        # QKV projections
-        q = h @ weights[f"{prefix}.attn_q.weight"].T
-        k_new = h @ weights[f"{prefix}.attn_k.weight"].T
-        v_new = h @ weights[f"{prefix}.attn_v.weight"].T
+        if has_attention:
+            # QKV projections
+            q = h @ weights[f"{prefix}.attn_q.weight"].T
+            k_new = h @ weights[f"{prefix}.attn_k.weight"].T
+            v_new = h @ weights[f"{prefix}.attn_v.weight"].T
 
-        # Apply RoPE
-        cos_pos = cos_cache[position:position + 1]
-        sin_pos = sin_cache[position:position + 1]
-        q = q.reshape(1, n_heads, head_dim)
-        k_new = k_new.reshape(1, n_kv_heads, head_dim)
-        q = rope(q, cos_pos, sin_pos).reshape(1, n_heads * head_dim)
-        k_new = rope(k_new, cos_pos, sin_pos).reshape(1, n_kv_heads * head_dim)
+            # Apply RoPE
+            cos_pos = cos_cache[position:position + 1]
+            sin_pos = sin_cache[position:position + 1]
+            q = q.reshape(1, n_heads, head_dim)
+            k_new = k_new.reshape(1, n_kv_heads, head_dim)
+            q = rope(q, cos_pos, sin_pos).reshape(1, n_heads * head_dim)
+            k_new = rope(k_new, cos_pos, sin_pos).reshape(1, n_kv_heads * head_dim)
 
-        # KV cache: append to raw flat cache
-        k_full = np.concatenate([kv_caches_k[layer_idx], k_new.reshape(n_kv_heads, 1, head_dim)], axis=1)
-        v_full = np.concatenate([kv_caches_v[layer_idx], v_new.reshape(n_kv_heads, 1, head_dim)], axis=1)
+            # KV cache: append to raw flat cache
+            k_full = np.concatenate([kv_caches_k[layer_idx], k_new.reshape(n_kv_heads, 1, head_dim)], axis=1)
+            v_full = np.concatenate([kv_caches_v[layer_idx], v_new.reshape(n_kv_heads, 1, head_dim)], axis=1)
 
-        # Update MiniCache with new KV for this layer
-        if minicache is not None:
-            minicache.update(
-                layer_idx,
-                k_new.reshape(n_kv_heads, head_dim),
-                v_new.reshape(n_kv_heads, head_dim),
-                position,
-            )
+            # Update MiniCache with new KV for this layer
+            if minicache is not None:
+                minicache.update(
+                    layer_idx,
+                    k_new.reshape(n_kv_heads, head_dim),
+                    v_new.reshape(n_kv_heads, head_dim),
+                    position,
+                )
 
-        # Update PagedKVCache with new KV for this layer
-        if paged_attn is not None:
-            paged_attn.append(
-                layer_idx,
-                k_new.reshape(n_kv_heads, head_dim),
-                v_new.reshape(n_kv_heads, head_dim),
-                position=position,
-            )
+            # Update PagedKVCache with new KV for this layer
+            if paged_attn is not None:
+                paged_attn.append(
+                    layer_idx,
+                    k_new.reshape(n_kv_heads, head_dim),
+                    v_new.reshape(n_kv_heads, head_dim),
+                    position=position,
+                )
 
-        # Choose KV source (priority: minicache > paged_attn > raw flat cache)
-        if minicache is not None:
-            mc_k, mc_v = minicache.get(layer_idx, end=position + 1)
-            k_seq = mc_k.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
-            v_seq = mc_v.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
-            minicache_stats["layers_compressed"] += 1
-        elif paged_attn is not None:
-            pa_k, pa_v = paged_attn.get(layer_idx, end=position + 1)
-            k_seq = pa_k.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
-            v_seq = pa_v.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
+            # Choose KV source (priority: minicache > paged_attn > raw flat cache)
+            if minicache is not None:
+                mc_k, mc_v = minicache.get(layer_idx, end=position + 1)
+                k_seq = mc_k.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
+                v_seq = mc_v.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
+                minicache_stats["layers_compressed"] += 1
+            elif paged_attn is not None:
+                pa_k, pa_v = paged_attn.get(layer_idx, end=position + 1)
+                k_seq = pa_k.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
+                v_seq = pa_v.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim).astype(np.float32)
+            else:
+                # Reshape raw cache for attention
+                k_seq = k_full.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim)
+                v_seq = v_full.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim)
+
+            # Attention
+            attn_out = attention(q, k_seq, v_seq, n_heads, n_kv_heads)
+            attn_out = attn_out @ weights[f"{prefix}.attn_output.weight"].T
+
+            # Residual
+            h = x + attn_out
         else:
-            # Reshape raw cache for attention
-            k_seq = k_full.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim)
-            v_seq = v_full.transpose(1, 0, 2).reshape(-1, n_kv_heads * head_dim)
-
-        # Attention
-        attn_out = attention(q, k_seq, v_seq, n_heads, n_kv_heads)
-        attn_out = attn_out @ weights[f"{prefix}.attn_output.weight"].T
-
-        # Residual
-        h = x + attn_out
+            # SSM-only block — no attention, pass through
+            k_full = kv_caches_k[layer_idx]
+            v_full = kv_caches_v[layer_idx]
+            h = x
 
         # Pre-FFN RMSNorm
         h_norm = rms_norm(h, weights[f"{prefix}.ffn_norm.weight"], eps)
