@@ -54,9 +54,10 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-5) -> np.ndarray
     # Clamp RMS to avoid division by near-zero
     rms = np.maximum(rms, eps)
     # DEBUG: print shapes on mismatch
-    if rms.shape[-1] != 1 and weight32.shape[-1] != rms.shape[-1]:
+    if rms.shape[-1] != weight32.shape[-1]:
         import sys
-        sys.stderr.write(f"[rms_norm DEBUG] x32.shape={x32.shape} weight32.shape={weight32.shape} rms.shape={rms.shape}\n")
+        sys.stderr.write(f"[rms_norm DEBUG] x.shape={x.shape} x32.shape={x32.shape} "
+                          f"weight32.shape={weight32.shape} rms.shape={rms.shape}\n")
     return (x32 / rms) * weight32
 
 
@@ -443,6 +444,10 @@ def forward_prefill(
     """
     seq_len = len(token_ids)
     x = token_emb[token_ids]  # (seq, hidden_dim)
+    import sys as _sys
+    _sys.stderr.write(f"[FW EMBED DEBUG] token_ids.shape={token_ids.shape}, "
+                      f"token_emb.shape={token_emb.shape}, "
+                      f"x.shape={x.shape}\n")
 
     # Infer head_dim from Q tensor if not explicitly provided
     # (hybrid models like Qwen3.6 may have head_dim != hidden_dim / n_heads)
@@ -456,10 +461,23 @@ def forward_prefill(
     for layer_idx in range(n_layers):
         prefix = f"blk.{layer_idx}"
 
+        # DEBUG: layer entry
+        import sys as _sys
+        _sys.stderr.write(f"[FW LAYER DEBUG] blk.{layer_idx}: entering, x.shape={x.shape}\n")
         # Pre-attention RMSNorm
-        h = rms_norm(x, weights[f"{prefix}.attn_norm.weight"], eps)
+        attn_norm_w = weights[f"{prefix}.attn_norm.weight"]
+        _sys.stderr.write(f"[FW LAYER DEBUG] blk.{layer_idx}: attn_norm_w.shape={attn_norm_w.shape}\n")
+        h = rms_norm(x, attn_norm_w, eps)
 
-        # QKV projections
+        # DEBUG: print actual weight shape for all attention weights
+        import sys as _sys
+        _sys.stderr.write(f"[FW DEBUG] blk.{layer_idx}: h.shape={x.shape}, "
+                          f"q_key={prefix}.attn_q.weight, "
+                          f"q_w.shape={weights.get(f'{prefix}.attn_q.weight').shape}, "
+                          f"q_w.T.shape={weights.get(f'{prefix}.attn_q.weight').T.shape}, "
+                          f"k_w.shape={weights.get(f'{prefix}.attn_k.weight').shape}, "
+                          f"v_w.shape={weights.get(f'{prefix}.attn_v.weight').shape}, "
+                          f"attn_out_w.shape={weights.get(f'{prefix}.attn_output.weight').shape}\n")
         q = h @ weights[f"{prefix}.attn_q.weight"].T
         k = h @ weights[f"{prefix}.attn_k.weight"].T
         v = h @ weights[f"{prefix}.attn_v.weight"].T
