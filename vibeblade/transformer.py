@@ -343,7 +343,12 @@ def _get_moe_components(weights, prefix, cache):
     # Shared expert (DeepSeek-style)
     shared = None
     if "shared_gate" in extras and "shared_up" in extras and "shared_down" in extras:
-        shared = (extras["shared_gate"], extras["shared_up"], extras["shared_down"])
+        # extras keys store the first expert's weights as (expert_dim, shared_dim) from GGUF
+        # _dense_ffn expects (shared_dim, expert_dim) — transpose them
+        sg = extras["shared_gate"]  # (expert_dim, shared_dim)
+        su = extras["shared_up"]    # (expert_dim, shared_dim)
+        sd = extras["shared_down"]  # (shared_dim, expert_dim)
+        shared = (sg.T, su.T, sd)
 
     cache[prefix] = {"router": router, "experts": expert_set, "shared": shared}
     return cache[prefix]

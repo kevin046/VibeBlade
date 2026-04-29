@@ -207,10 +207,10 @@ class ExpertRouter:
 class MoEExpertSet:
     """Holds all expert weight tensors for a single MoE layer.
 
-    Consolidated layout (llama.cpp style):
-        gate_weights: (num_experts, shared_dim, expert_dim)
-        up_weights:   (num_experts, shared_dim, expert_dim)
-        down_weights: (num_experts, expert_dim, shared_dim)
+    GGUF/llama.cpp consolidated layout:
+        gate_weights: (num_experts, expert_dim, shared_dim)
+        up_weights:   (num_experts, expert_dim, shared_dim)
+        down_weights: (num_experts, shared_dim, expert_dim)
     """
 
     def __init__(
@@ -225,8 +225,9 @@ class MoEExpertSet:
 
         assert self.gate.shape == self.up.shape, \
             f"gate {self.gate.shape} != up {self.up.shape}"
+        # gate/up: (E, expert_dim, shared_dim), down: (E, shared_dim, expert_dim)
         assert self.gate.shape[0] == self.down.shape[0] and \
-               self.gate.shape[1] == self.down.shape[2], \
+               self.gate.shape[2] == self.down.shape[1], \
             f"gate {self.gate.shape} incompatible with down {self.down.shape}"
 
     @property
@@ -248,7 +249,8 @@ class MoEExpertSet:
         up_w:   (shared_dim, expert_dim)
         down_w: (expert_dim, shared_dim)
         """
-        return self.gate[idx], self.up[idx], self.down[idx]
+        # self.gate/up: (expert_dim, shared_dim) [GGUF], transpose to (shared_dim, expert_dim)
+        return self.gate[idx].T, self.up[idx].T, self.down[idx]
 
     def get_experts_batch(
         self, indices: np.ndarray,
@@ -263,7 +265,12 @@ class MoEExpertSet:
             up_w:   (batch, shared_dim, expert_dim)
             down_w: (batch, expert_dim, shared_dim)
         """
-        return self.gate[indices], self.up[indices], self.down[indices]
+        # self.gate/up are (E, expert_dim, shared_dim) [GGUF format]
+        # Transpose to (E, shared_dim, expert_dim) for einsum compatibility
+        gate_batch = np.transpose(self.gate[indices], (0, 2, 1))
+        up_batch   = np.transpose(self.up[indices],   (0, 2, 1))
+        # self.down is already (E, shared_dim, expert_dim) — index directly
+        return gate_batch, up_batch, self.down[indices]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
