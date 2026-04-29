@@ -336,7 +336,6 @@ def _get_moe_components(weights, prefix, cache):
         cache[prefix] = None
         return None
 
-    num_experts = router_w.shape[-1] if router_w.ndim > 1 else router_w.shape[0]
     topk = 2  # Standard MoE top-2; caller can override via ExpertRouter topk
     router = ExpertRouter(router_w, topk=topk)
 
