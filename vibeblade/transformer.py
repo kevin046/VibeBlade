@@ -343,12 +343,25 @@ def _get_moe_components(weights, prefix, cache):
     # Shared expert (DeepSeek-style)
     shared = None
     if "shared_gate" in extras and "shared_up" in extras and "shared_down" in extras:
-        # GGUF stores shexp weights as (expert_dim, hidden_dim) — transpose to (hidden_dim, expert_dim)
-        # _dense_ffn expects gate_w/up_w=(hidden_dim, expert_dim), down_w=(expert_dim, hidden_dim)
-        sg = extras["shared_gate"]  # (512, 2048) → needs .T
-        su = extras["shared_up"]    # (512, 2048) → needs .T
-        sd = extras["shared_down"] # (2048, 512) → already (expert_dim, hidden_dim), no transpose
+        import sys as _sys
+        sg = extras["shared_gate"]
+        su = extras["shared_up"]
+        sd = extras["shared_down"]
+        _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} sg={sg.shape} su={su.shape} sd={sd.shape}\n")
+        # _dense_ffn expects gate_w=(hidden,expert), up_w=(hidden,expert), down_w=(expert,hidden)
+        # GGUF shexp: gate/up=(intermediate,hidden)=(expert,hidden), down=(hidden,intermediate)=(hidden,expert)
+        # → sg and su need .T, sd does NOT need .T
+        if sg.shape[0] == sg.shape[1]:
+            raise ValueError(f"shared_gate is square {sg.shape} — shape unclear, check GGUF layout manually")
+        if sg.shape[0] != su.shape[0]:
+            raise ValueError(f"shared_gate/shared_up expert_dim mismatch: {sg.shape} vs {su.shape}")
+        if sg.shape[1] != sd.shape[0] or sg.shape[0] != sd.shape[1]:
+            raise ValueError(
+                f"shared weights shape mismatch: gate={sg.shape}, up={su.shape}, down={sd.shape}. "
+                f"Expected gate/up=(expert,hidden), down=(hidden,expert). "
+                f"Got: sg.T={sg.T.shape}, su.T={su.T.shape}, sd={sd.shape}")
         shared = (sg.T, su.T, sd)
+        _sys.stderr.write(f"[MoE SHARED DEBUG] blk.{prefix} shared_g={shared[0].shape} shared_u={shared[1].shape} shared_d={shared[2].shape}\n")
 
     cache[prefix] = {"router": router, "experts": expert_set, "shared": shared}
     return cache[prefix]
