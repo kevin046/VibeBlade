@@ -4,33 +4,18 @@
 
 [![Star History](https://api.star-history.com/svg?repos=kevin046/VibeBlade)](https://star-history.com/#kevin046/VibeBlade)
 [![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
-[![Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
+[Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
 
-**Linux / macOS**
 ```bash
-git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e .
-bash cpp/build_cpp.sh          # build C++ engine (one-time)
-python -m vibeblade chat --model model.gguf
+git clone https://github.com/kevin046/VibeBlade && cd VibeBlade && pip install -e . && python cpp/build_cpp.py && python -m vibeblade chat --model model.gguf
 ```
 
-**Windows (PowerShell)**
-```powershell
-git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
-pip install -e .
-cd cpp; mkdir build; cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release; cmake --build . --config Release
-Copy-Item _vibeblade_native* ..\..\vibeblade\
-cd ..\..
-python -m vibeblade chat --model model.gguf
-```
-
-The C++ engine handles all model architectures — dense, MoE (Mistral/Qwen/DeepSeek), and hybrid attention+SSM — natively. No Python in the decode hot path.
+That's it. Clone, install, build the C++ engine, chat. Runs on Linux, macOS, and Windows.
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 776 passed](https://img.shields.io/badge/tests-776%20passed-brightgreen.svg)]()
+[![Tests: 791 passed](https://img.shields.io/badge/tests-791%20passed-brightgreen.svg)]()
 
 📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./WHITEPAPER.md#performance) · 🔒 [Security](./WHITEPAPER.md#security)
 
@@ -120,14 +105,10 @@ Supports **all architectures natively**: dense transformers, MoE (Mistral, Qwen,
 
 ```bash
 # Build the C++ engine (requires pybind11, cmake)
+python cpp/build_cpp.py          # cross-platform (Linux/macOS/Windows)
+
+# Or manually on Linux/macOS:
 cd cpp && bash build_cpp.sh
-
-# Or manually:
-cd cpp && mkdir -p build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release && make
-
-# Copy the native module into the Python package
-cp _vibeblade_native*.so ../../vibeblade/
 
 # Auto-detected by the chat command for .gguf files
 python -m vibeblade chat --model model.gguf            # C++ fast engine
@@ -246,6 +227,7 @@ vibeblade/              # Python package
   └── openai_server.py  # OpenAI-compatible API server
 
 cpp/                    # Native C++ inference engine
+  ├── build_cpp.py      # Cross-platform build script (Linux/macOS/Windows)
   ├── include/
   │   ├── gguf.h        # GGUF mmap reader (zero-copy weight loading)
   │   ├── ggml_types.h  # GGML quantization types (Q4_0/Q5/Q8/K-quants/F16)
@@ -262,7 +244,7 @@ cpp/                    # Native C++ inference engine
       ├── fast_model.cpp # Full inference: prefill, decode, generate
       └── bindings.cpp  # pybind11 Python bindings
 
-tests/                 # 776 tests covering all modules
+tests/                 # 791 tests covering all modules
 ```
 
 ---
