@@ -514,6 +514,10 @@ def load_moe_weights_from_layer(
             shared_down_key = f"{pfx}.ffn_down_{shared_suffix}.weight"
             if shared_gate_key in keys:
                 extra["shared_gate"] = weights[shared_gate_key]
+                import sys as _sys
+                _sys.stderr.write(f"[LOADER SHEXP] {shared_gate_key}: {weights[shared_gate_key].shape} "
+                                  f"{shared_up_key}: {weights[shared_up_key].shape} "
+                                  f"{shared_down_key}: {weights[shared_down_key].shape}\n")
                 if shared_up_key in keys:
                     extra["shared_up"] = weights[shared_up_key]
                 if shared_down_key in keys:
