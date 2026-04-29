@@ -1221,6 +1221,10 @@ class _LazyWeights:
             self._cached_bytes += arr.nbytes
             self._access_order.append(name)
 
+        # DEBUG: print actual split sizes
+        import sys as _sys
+        _sys.stderr.write(f"[QKV SPLIT DEBUG] {q_key}: n_heads={n_heads}, n_kv={n_kv_heads}, hd={head_dim} → "
+                          f"q_size={q_size}, k_size={k_size}, q_arr.shape={q_arr.shape}\n")
         self._evict()
         self._touch(q_key)
         return self._cache[q_key]
