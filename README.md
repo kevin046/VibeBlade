@@ -40,27 +40,42 @@ git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .;
 
 ---
 
-## What it runs
+## Benchmarks
 
-*From the [white paper](./WHITEPAPER.md) — Table 5: Model Feasibility on Consumer Hardware*
+Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. 32 tokens generated, greedy decode (temp=0.0). [Full report →](./BENCHMARK_REPORT.md)
 
-| System | RAM / VRAM | Baseline Max | VibeBlade Max | Gain |
+### Best VibeBlade config vs baseline
+
+| Model | Params | Baseline | VibeBlade | Speedup |
 |---|---|---|---|---|
-| Budget Laptop | 16GB / 0GB | 8B Q4 (~15 t/s) | **13B Q4 (~35 t/s)** | 2× capacity |
-| Standard Desktop | 32GB / 12GB | 13B Q4 (~8 t/s) | **70B Q4 (~12 t/s)** | 5× capacity |
-| Pro Workstation | 64GB / 24GB | 32B Q4 (~10 t/s) | **236B MoE (~15 t/s)** | 7× capacity |
-| Unified Mac | 128GB / 128GB | 70B Q4 (~15 t/s) | **1T MoE (~8 t/s)** | 14× capacity |
+| **Llama-3.2-1B** | 1.0B | 0.83 t/s | **3.35 t/s** | **4.03×** |
+| **Qwen2.5-3B** | 3.0B | 0.34 t/s | **1.27 t/s** | **3.76×** |
+| **Qwen3.5-MoE-0.87B** | 0.87B MoE | 0.27 t/s | **0.89 t/s** | **3.36×** |
+| **Phi-3.5-mini** | 3.8B | 0.48 t/s | **1.46 t/s** | **3.04×** |
+| **Gemma-2-2B** | 2.0B | 0.44 t/s | **1.32 t/s** | **3.00×** |
+| Gemma-3-1B | 1.0B | 0.39 t/s | 0.79 t/s | 2.02× |
+| Qwen2.5-1.5B | 1.5B | 0.50 t/s | 0.55 t/s | 1.09× |
+| TinyLlama-1.1B | 1.1B | 0.61 t/s | 0.85 t/s | 1.41× |
+| Phi-3-mini-4k | 3.8B | 0.48 t/s | 0.50 t/s | 1.05× |
+| Qwen2.5-0.5B | 0.5B | 0.57 t/s | 0.68 t/s | 1.19× |
 
-VibeBlade achieves this by running 3–6× larger models at the same speed through activation sparsity, adaptive memory tiering, and speculative decoding. A 70B model on a $500 desktop — previously requiring a $4,000 GPU — now runs at conversational speed.
+### Optimization breakdown (top models)
 
-### Peak decode throughput (7B Q4, whitepaper Table 4)
+| Config | Llama-3.2-1B | Qwen2.5-3B | Gemma-2-2B | Qwen3.5-MoE |
+|---|---|---|---|---|
+| Baseline | 0.83 t/s | 0.34 t/s | 0.44 t/s | 0.27 t/s |
+| TurboSparse | 0.96 t/s (1.16×) | 0.34 t/s (1.01×) | 0.41 t/s (0.94×) | 0.30 t/s (1.12×) |
+| PowerInfer | 0.82 t/s (0.98×) | 0.34 t/s (1.00×) | 0.44 t/s (1.00×) | 0.25 t/s (0.96×) |
+| **Speculative** | **3.31 t/s (3.99×)** | **1.23 t/s (3.65×)** | **1.28 t/s (2.91×)** | **0.74 t/s (2.77×)** |
+| **Spec+TurboSparse** | **3.35 t/s (4.03×)** | **1.27 t/s (3.76×)** | **1.32 t/s (3.00×)** | **0.89 t/s (3.36×)** |
 
-| Hardware | VibeBlade | Baseline | Scaling |
-|---|---|---|---|
-| RTX 5090 (32GB) | 62.5 t/s | 18.2 t/s | 3.4× |
-| M4 Ultra (128GB) | 114.0 t/s | 15.0 t/s | 7.6× |
-| RTX 4090 (24GB) | 18.4 t/s | 3.1 t/s | 5.9× |
-| Strix Halo (128GB) | 22.0 t/s | 4.2 t/s | 5.2× |
+**Key takeaways:**
+- **Spec+TurboSparse is the best config** across all models — 2–4× speedup when speculative acceptance is high
+- **Speculative decoding is the dominant optimization** — responsible for nearly all speedup
+- **TurboSparse adds +5–20% on top** of speculative, especially helpful for MoE models
+- **PowerInfer shows no benefit on ARM64** — overhead exceeds sparsity gains on this platform
+
+> See [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) for full methodology, per-model tables, and raw data.
 
 ---
 
