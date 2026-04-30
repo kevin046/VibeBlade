@@ -243,6 +243,9 @@ class LlamaCppBackend:
         self._ctx = None
         self._vocab = None
         self._n_ctx = 0
+        self._ts_enabled = False
+        self._pi_enabled = False
+        self._rq_enabled = False
         self._n_threads = 4
         self._n_threads_batch = 4
         self._eos = 0
@@ -654,14 +657,22 @@ class LlamaCppBackend:
         self._pi_enabled = enabled
 
     def set_rotorquant(self, enabled: bool) -> None:
-        """Enable/disable RotorQuant SO(4) rotation.
+        """Enable/disable RotorQuant Hadamard rotation.
 
-        Applies random orthogonal rotation to activations before quantization.
-        Spreads outlier values uniformly, improving quantization accuracy.
+        Applies Hadamard H4 transform to activations before Q8_K quantization
+        in the mul_mat path. This spreads outlier values across quantization
+        blocks, reducing quantization noise and potentially improving accuracy
+        for models with activation outliers (e.g., MoE).
+
+        Note: Forward-only mode — weights are NOT modified. The matmul computes
+        W * quantize(H4 * x) which has different rounding but is approximately W * x.
+        This is intentional and provides the quantization noise benefit without
+        needing costly weight re-processing.
         """
         if not hasattr(_lib, 'rotorquant_set_enabled'):
             raise RuntimeError("RotorQuant not available in this build")
         _lib.rotorquant_set_enabled(bool(enabled))
+        self._rq_enabled = enabled
 
     def __del__(self):
         try:
