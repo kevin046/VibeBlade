@@ -249,6 +249,7 @@ class LlamaCppBackend:
         self._sampler = None
         self._loaded = False
         self._decode_batch = None
+        self._pi_enabled = False
 
     def config(self) -> dict:
         if not self._loaded:
@@ -634,6 +635,33 @@ class LlamaCppBackend:
             _lib.llama_turbosparse_enable(None, ctypes.c_float(threshold))
         else:
             _lib.llama_turbosparse_disable(None)
+
+    def set_powerinfer(self, enabled: bool, hot_budget: float = 0.1) -> None:
+        """Enable/disable PowerInfer neuron-prediction row skipping.
+
+        PowerInfer tracks activation magnitudes via EMA and skips
+        vec_dot calls for matmul columns where activations are near-zero.
+        Works best combined with TurboSparse (which creates the sparsity).
+
+        Note: PowerInfer is automatically disabled during speculative decoding
+        because row-skipping changes model output, breaking n-gram patterns.
+        """
+        if not hasattr(_lib, 'powerinfer_set_enabled'):
+            raise RuntimeError("PowerInfer not available in this build")
+        _lib.powerinfer_set_enabled(bool(enabled))
+        _lib.powerinfer_set_hot_budget(ctypes.c_float(hot_budget))
+        _lib.powerinfer_reset()
+        self._pi_enabled = enabled
+
+    def set_rotorquant(self, enabled: bool) -> None:
+        """Enable/disable RotorQuant SO(4) rotation.
+
+        Applies random orthogonal rotation to activations before quantization.
+        Spreads outlier values uniformly, improving quantization accuracy.
+        """
+        if not hasattr(_lib, 'rotorquant_set_enabled'):
+            raise RuntimeError("RotorQuant not available in this build")
+        _lib.rotorquant_set_enabled(bool(enabled))
 
     def __del__(self):
         try:

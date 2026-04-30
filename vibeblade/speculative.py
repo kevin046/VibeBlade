@@ -268,6 +268,18 @@ class SpeculativeBackend(LlamaCppBackend):
 
         # Reset state
         self.spec_stats = SpeculativeStats()
+
+        # PowerInfer row-skipping zeroes matmul rows, changing model output.
+        # This breaks n-gram pattern consistency needed by the draft head.
+        # Disable PI when speculative is active — TurboSparse alone gives
+        # 2.7-3.3x speedup on MoE, and PI's ~1.0-1.4x benefit doesn't
+        # compensate for completely disabling speculative.
+        # Check C global state directly (not Python flag) since PI state
+        # can persist across instances via shared library globals.
+        pi_was_enabled = _lib.powerinfer_is_enabled()
+        if pi_was_enabled:
+            _lib.powerinfer_set_enabled(False)
+
         mem = _lib.llama_get_memory(self._ctx)
         _lib.llama_memory_clear(mem, True)
         _lib.llama_synchronize(self._ctx)
@@ -409,6 +421,11 @@ class SpeculativeBackend(LlamaCppBackend):
 
         t_end = time.time()
         t_decode = t_end - t_prefill
+
+        # Re-enable PI if we disabled it for speculative
+        if pi_was_enabled:
+            _lib.powerinfer_set_enabled(True)
+
         text = self.detokenize_batch(output_tokens) if len(output_tokens) > 5 else self.detokenize(output_tokens)
 
         if len(output_tokens) >= max_tokens:
