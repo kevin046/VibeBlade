@@ -21,7 +21,7 @@ git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .;
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Tests: 791 passed](https://img.shields.io/badge/tests-791%20passed-brightgreen.svg)]()
 
-📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./WHITEPAPER.md#performance) · 🔒 [Security](./WHITEPAPER.md#security)
+📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./BENCHMARK_REPORT.md) · 🔒 [Security](./WHITEPAPER.md#security)
 
 ---
 
