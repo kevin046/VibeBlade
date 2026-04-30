@@ -115,30 +115,38 @@ class NgramDraftHead:
         return index
 
     def draft(self, history: list[int], draft_max_override: int = 0) -> list[int]:
-        """Generate draft tokens by finding matching n-gram patterns in history."""
+        """Generate draft tokens by finding matching n-gram patterns in history.
+
+        Tries multiple n-gram sizes (4, 3, 2) and relaxes min_draft to maximize
+        draft yield. Returns empty list only when no pattern matches at all.
+        """
         max_d = draft_max_override if draft_max_override > 0 else self.max_draft
         n = self.n
 
-        if len(history) < n + 1:
+        if len(history) < 3:
             return []
 
-        key = tuple(history[-n:])
-        draft: list[int] = []
+        # Try progressively shorter n-gram sizes for better match rate
+        for try_n in [n, n - 1, n - 2]:
+            if try_n < 2 or len(history) < try_n + 1:
+                continue
+            key = tuple(history[-try_n:])
+            draft: list[int] = []
+            for i in range(len(history) - try_n - 1):
+                if tuple(history[i:i + try_n]) == key:
+                    j = i + try_n
+                    while j < len(history) and len(draft) < max_d:
+                        candidate = history[j]
+                        if candidate == 0 or candidate >= 248044:
+                            break
+                        draft.append(candidate)
+                        j += 1
+                    # Accept even 1 draft token (min_draft=1)
+                    if len(draft) >= 1:
+                        return draft
+                    draft = []
 
-        for i in range(len(history) - n - 1):
-            if tuple(history[i:i + n]) == key:
-                j = i + n
-                while j < len(history) and len(draft) < max_d:
-                    candidate = history[j]
-                    if candidate == 0 or candidate >= 248044:
-                        break
-                    draft.append(candidate)
-                    j += 1
-                if len(draft) >= self.min_draft:
-                    return draft
-                draft = []
-
-        return draft
+        return []
 
 
 # Alias for EAGLE-compatible interface
@@ -304,139 +312,131 @@ class SpeculativeBackend(LlamaCppBackend):
             if cur_pos >= self._n_ctx:
                 break
 
-            # --- Draft phase ---
-            draft_tokens = self._draft_head.draft(history, self._draft_max)
+            # --- Sample first token from current logits ---
+            first_token = _lib.llama_sampler_sample(self._sampler, self._ctx, -1)
+            if first_token == self._eos:
+                break
+            if stop_tokens and first_token in stop_tokens:
+                output_tokens.append(first_token)
+                break
 
-            if draft_tokens:
-                # Sample the first token (from prefill or last verify)
-                first_token = _lib.llama_sampler_sample(self._sampler, self._ctx, -1)
-                if first_token == self._eos:
-                    break
-                if stop_tokens and first_token in stop_tokens:
-                    output_tokens.append(first_token)
-                    break
+            # --- N-gram draft (for repetitive text) ---
+            # Only effective when token history contains repeated n-grams.
+            # On non-repetitive text, this returns empty and we fall through
+            # to standard single-token decode.
+            ngram_draft = self._draft_head.draft(history, self._draft_max)
 
-                # --- Verify first_token against draft_tokens[0] ---
-                # first_token was sampled from the model's distribution.
-                # draft_tokens[0] is the n-gram's prediction for the same position.
-                # If they match, draft_tokens[1:] are the remaining predictions.
-                n_accepted = 0
-                if first_token == draft_tokens[0]:
-                    # First draft token accepted (matches model's greedy choice)
-                    n_accepted = 1
-                    remaining_draft = draft_tokens[1:]
-                else:
-                    # First draft rejected — use model's token, no batch decode
-                    remaining_draft = []
+            if ngram_draft and first_token == ngram_draft[0]:
+                # N-gram first token matched — verify remaining drafts
+                remaining_draft = ngram_draft[1:]
+            else:
+                remaining_draft = []
 
-                accepted_tokens = [first_token]
-                self.spec_stats.n_draft_generated += len(draft_tokens)
-                self.spec_stats.n_draft_accepted += n_accepted
+            accepted_tokens = [first_token]
+            self.spec_stats.n_draft_generated += len(remaining_draft)
+            n_draft_accepted = 0
+            rejected = False
 
-                if remaining_draft:
-                    # Build verification batch: [first_token, remaining_draft[0], ...]
-                    # The KV cache needs first_token decoded, then the remaining
-                    # draft tokens are fed in sequence for verification.
-                    n_verify = 1 + len(remaining_draft)
-                    batch = self._spec_batch
-                    batch.n_tokens = n_verify
+            # Context bounds check — don't exceed KV cache
+            if remaining_draft and cur_pos + 1 + len(remaining_draft) > self._n_ctx:
+                remaining_draft = remaining_draft[:self._n_ctx - cur_pos - 1]
 
-                    # First: the already-sampled token
+            if remaining_draft:
+                n_verify = 1 + len(remaining_draft)
+                batch = self._spec_batch
+                batch.n_tokens = n_verify
+
+                batch.token[0] = first_token
+                batch.pos[0] = cur_pos
+                batch.n_seq_id[0] = 1
+                batch.seq_id[0][0] = 0
+                batch.logits[0] = 1
+
+                for i, dt in enumerate(remaining_draft):
+                    batch.token[1 + i] = dt
+                    batch.pos[1 + i] = cur_pos + 1 + i
+                    batch.n_seq_id[1 + i] = 1
+                    batch.seq_id[1 + i][0] = 0
+                    batch.logits[1 + i] = 1
+
+                ret = _lib.llama_decode(self._ctx, batch)
+                self.spec_stats.n_target_decodes += 1
+                self.spec_stats.n_target_decode_tokens += n_verify
+
+                if ret != 0:
+                    # Fallback: single decode using existing batch
+                    batch.n_tokens = 1
                     batch.token[0] = first_token
                     batch.pos[0] = cur_pos
                     batch.n_seq_id[0] = 1
                     batch.seq_id[0][0] = 0
-                    batch.logits[0] = 1  # need logits for verification
-
-                    # Remaining draft tokens
-                    for i, dt in enumerate(remaining_draft):
-                        batch.token[1 + i] = dt
-                        batch.pos[1 + i] = cur_pos + 1 + i
-                        batch.n_seq_id[1 + i] = 1
-                        batch.seq_id[1 + i][0] = 0
-                        batch.logits[1 + i] = 1  # need logits at each position
-
-                    # Single target decode for ALL tokens
-                    ret = _lib.llama_decode(self._ctx, batch)
-                    self.spec_stats.n_target_decodes += 1
-                    self.spec_stats.n_target_decode_tokens += n_verify
-
-                    if ret != 0:
-                        # Fallback: decode first_token alone, then continue
-                        self.spec_stats.n_target_decodes += 1
-                        self.spec_stats.n_target_decode_tokens += 1
-                        single_batch = self._make_batch([first_token], pos_offset=cur_pos)
-                        ret2 = _lib.llama_decode(self._ctx, single_batch)
-                        if ret2 != 0:
-                            print(f"[WARNING] fallback decode failed: {ret2}")
-                            break
-                        output_tokens.append(first_token)
-                        history.append(first_token)
-                        cur_pos += 1
-                        _lib.llama_sampler_reset(self._sampler)
-                        continue
-
-                    # --- Verify remaining draft tokens ---
-                    # After batch decode with [first_token, d1, d2, ...]:
-                    # logits_ith(0) predicts next after first_token -> should match d1=remaining_draft[0]
-                    # logits_ith(1) predicts next after [first_token, d1] -> should match d2=remaining_draft[1]
-                    _lib.llama_sampler_reset(self._sampler)
-
-                    for i in range(len(remaining_draft)):
-                        proposed = _lib.llama_sampler_sample(
-                            self._sampler, self._ctx, i
-                        )
-                        if proposed == remaining_draft[i] and proposed != self._eos:
-                            accepted_tokens.append(remaining_draft[i])
-                            n_accepted += 1
-                            _lib.llama_sampler_reset(self._sampler)
-                        else:
-                            # Mismatch — use target model's prediction instead
-                            if proposed != self._eos:
-                                accepted_tokens.append(proposed)
-                            _lib.llama_sampler_reset(self._sampler)
-                            break
-
-                    self.spec_stats.n_draft_accepted += n_accepted - 1  # already counted first_token match
-                else:
-                    # No remaining draft to verify — just decode first_token alone
+                    batch.logits[0] = 1
+                    ret2 = _lib.llama_decode(self._ctx, batch)
                     self.spec_stats.n_target_decodes += 1
                     self.spec_stats.n_target_decode_tokens += 1
-                    single_batch = self._make_batch([first_token], pos_offset=cur_pos)
-                    ret = _lib.llama_decode(self._ctx, single_batch)
-                    if ret != 0:
-                        print(f"[WARNING] decode failed: {ret}")
+                    if ret2 != 0:
+                        print(f"[WARNING] decode failed: {ret}/{ret2}")
+                        break
+                    _lib.llama_sampler_reset(self._sampler)
+                    output_tokens.append(first_token)
+                    history.append(first_token)
+                    cur_pos += 1
+                    continue
+
+                # Verify remaining draft tokens
+                _lib.llama_sampler_reset(self._sampler)
+                for i in range(len(remaining_draft)):
+                    proposed = _lib.llama_sampler_sample(
+                        self._sampler, self._ctx, i
+                    )
+                    if proposed == remaining_draft[i] and proposed != self._eos:
+                        accepted_tokens.append(remaining_draft[i])
+                        n_draft_accepted += 1
+                        _lib.llama_sampler_reset(self._sampler)
+                    else:
+                        if proposed != self._eos:
+                            accepted_tokens.append(proposed)
+                        rejected = True
+                        _lib.llama_sampler_reset(self._sampler)
                         break
 
-                # Add all accepted tokens
-                output_tokens.extend(accepted_tokens)
-                history.extend(accepted_tokens)
-                cur_pos += len(accepted_tokens)
+                self.spec_stats.n_draft_accepted += n_draft_accepted
 
-                # If EOS was generated
-                if accepted_tokens[-1] == self._eos:
-                    output_tokens.pop()  # don't include EOS
-                    break
-
+                # On rejection, fix KV cache by re-decoding the correction
+                # token at the correct position. The batch decode wrote KV
+                # entries for the rejected draft token — overwriting fixes it.
+                if rejected and accepted_tokens[-1] != self._eos:
+                    correction = accepted_tokens[-1]
+                    fix_pos = cur_pos + len(accepted_tokens) - 1
+                    batch.n_tokens = 1
+                    batch.token[0] = correction
+                    batch.pos[0] = fix_pos
+                    batch.n_seq_id[0] = 1
+                    batch.seq_id[0][0] = 0
+                    batch.logits[0] = 1
+                    ret_fix = _lib.llama_decode(self._ctx, batch)
+                    if ret_fix == 0:
+                        self.spec_stats.n_target_decodes += 1
+                        self.spec_stats.n_target_decode_tokens += 1
+                    _lib.llama_sampler_reset(self._sampler)
             else:
                 # No draft — standard single-token decode
-                next_token = _lib.llama_sampler_sample(self._sampler, self._ctx, -1)
-                if next_token == self._eos:
-                    break
-                if stop_tokens and next_token in stop_tokens:
-                    output_tokens.append(next_token)
-                    break
-                output_tokens.append(next_token)
-                history.append(next_token)
-                cur_pos += 1
                 self.spec_stats.n_target_decodes += 1
                 self.spec_stats.n_target_decode_tokens += 1
-                batch = self._make_batch([next_token], pos_offset=cur_pos - 1)
-                ret = _lib.llama_decode(self._ctx, batch)
+                single_batch = self._make_batch([first_token], pos_offset=cur_pos)
+                ret = _lib.llama_decode(self._ctx, single_batch)
                 if ret != 0:
                     print(f"[WARNING] decode failed: {ret}")
                     break
                 _lib.llama_sampler_reset(self._sampler)
+
+            output_tokens.extend(accepted_tokens)
+            history.extend(accepted_tokens)
+            cur_pos += len(accepted_tokens)
+
+            if accepted_tokens[-1] == self._eos:
+                output_tokens.pop()
+                break
 
         t_end = time.time()
         t_decode = t_end - t_prefill
@@ -466,3 +466,5 @@ class SpeculativeBackend(LlamaCppBackend):
             _lib.llama_batch_free(self._spec_batch)
             self._spec_batch = None
         super().free()
+
+

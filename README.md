@@ -42,11 +42,11 @@ git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .;
 
 ## Benchmarks
 
-Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. 32 tokens generated, greedy decode (temp=0.0). [Full report →](./BENCHMARK_REPORT.md)
+Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. 32 tokens generated, greedy decode (temp=0.0). **Baseline = llama.cpp** (no VibeBlade optimizations). [Full report →](./BENCHMARK_REPORT.md)
 
-### Best VibeBlade config vs baseline
+### VibeBlade vs llama.cpp
 
-| Model | Params | Baseline | VibeBlade | Speedup |
+| Model | Params | llama.cpp | VibeBlade | Speedup |
 |---|---|---|---|---|
 | **Llama-3.2-1B** | 1.0B | 0.83 t/s | **3.35 t/s** | **4.03×** |
 | **Qwen2.5-3B** | 3.0B | 0.34 t/s | **1.27 t/s** | **3.76×** |
@@ -63,14 +63,14 @@ Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. 32 tokens g
 
 | Config | Llama-3.2-1B | Qwen2.5-3B | Gemma-2-2B | Qwen3.5-MoE |
 |---|---|---|---|---|
-| Baseline | 0.83 t/s | 0.34 t/s | 0.44 t/s | 0.27 t/s |
-| TurboSparse | 0.96 t/s (1.16×) | 0.34 t/s (1.01×) | 0.41 t/s (0.94×) | 0.30 t/s (1.12×) |
-| PowerInfer | 0.82 t/s (0.98×) | 0.34 t/s (1.00×) | 0.44 t/s (1.00×) | 0.25 t/s (0.96×) |
-| **Speculative** | **3.31 t/s (3.99×)** | **1.23 t/s (3.65×)** | **1.28 t/s (2.91×)** | **0.74 t/s (2.77×)** |
-| **Spec+TurboSparse** | **3.35 t/s (4.03×)** | **1.27 t/s (3.76×)** | **1.32 t/s (3.00×)** | **0.89 t/s (3.36×)** |
+| llama.cpp (baseline) | 0.83 t/s | 0.34 t/s | 0.44 t/s | 0.27 t/s |
+| + TurboSparse | 0.96 t/s (1.16×) | 0.34 t/s (1.01×) | 0.41 t/s (0.94×) | 0.30 t/s (1.12×) |
+| + PowerInfer | 0.82 t/s (0.98×) | 0.34 t/s (1.00×) | 0.44 t/s (1.00×) | 0.25 t/s (0.96×) |
+| + **Speculative** | **3.31 t/s (3.99×)** | **1.23 t/s (3.65×)** | **1.28 t/s (2.91×)** | **0.74 t/s (2.77×)** |
+| + **Spec+TurboSparse** | **3.35 t/s (4.03×)** | **1.27 t/s (3.76×)** | **1.32 t/s (3.00×)** | **0.89 t/s (3.36×)** |
 
 **Key takeaways:**
-- **Spec+TurboSparse is the best config** across all models — 2–4× speedup when speculative acceptance is high
+- **Spec+TurboSparse is the best config** across all models — 2–4× over llama.cpp when speculative acceptance is high
 - **Speculative decoding is the dominant optimization** — responsible for nearly all speedup
 - **TurboSparse adds +5–20% on top** of speculative, especially helpful for MoE models
 - **PowerInfer shows no benefit on ARM64** — overhead exceeds sparsity gains on this platform

@@ -38,14 +38,14 @@
 
 | Config | TurboSparse | PowerInfer | Speculative Decoding |
 |--------|:-----------:|:----------:|:--------------------:|
-| **Baseline** | ✗ | ✗ | ✗ |
+| **Baseline (llama.cpp)** | ✗ | ✗ | ✗ |
 | **TurboSparse** | ✓ (5%) | ✗ | ✗ |
 | **PowerInfer** | ✗ | ✓ (10%) | ✗ |
 | **PI+TurboSparse** | ✓ (5%) | ✓ (10%) | ✗ |
 | **Speculative** | ✗ | ✗ | ✓ (n-gram) |
 | **Spec+TurboSparse** | ✓ (5%) | ✗ | ✓ (n-gram) |
 
-> **Note:** PowerInfer is automatically disabled during speculative decoding due to a known conflict — PI's row-skipping zeroes out matmul rows, breaking n-gram pattern consistency needed by the draft head.
+> **Note:** PowerInfer is automatically disabled during speculative decoding due to a known conflict — PI's row-skipping zeroes out matmul rows, breaking n-gram pattern consistency needed by the draft head. Baseline measures llama.cpp inference speed with no VibeBlade optimizations enabled.
 
 ---
 
@@ -53,9 +53,9 @@
 
 ### TinyLlama-1.1B (1.1B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.61 | 3699ms | 52825ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.61 | 3699ms | 52825ms | 32 | — | 1.00x |
 | TurboSparse | 0.57 | 3496ms | 56119ms | 32 | — | 0.94x |
 | PowerInfer | 0.63 | 3431ms | 50899ms | 32 | — | 1.04x |
 | PI+TurboSparse | 0.64 | 3835ms | 49827ms | 32 | — | 1.06x |
@@ -64,9 +64,9 @@
 
 ### Qwen2.5-0.5B (0.5B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.57 | 2969ms | 55719ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.57 | 2969ms | 55719ms | 32 | — | 1.00x |
 | TurboSparse | 0.48 | 2904ms | 66974ms | 32 | — | 0.83x |
 | PowerInfer | 0.55 | 2678ms | 58286ms | 32 | — | 0.96x |
 | PI+TurboSparse | 0.56 | 2956ms | 57433ms | 32 | — | 0.97x |
@@ -75,9 +75,9 @@
 
 ### Qwen2.5-1.5B (1.5B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.50 | 4707ms | 63429ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.50 | 4707ms | 63429ms | 32 | — | 1.00x |
 | TurboSparse | 0.46 | 4781ms | 69680ms | 32 | — | 0.91x |
 | PowerInfer | 0.43 | 4457ms | 74679ms | 32 | — | 0.85x |
 | PI+TurboSparse | 0.44 | 4645ms | 73544ms | 32 | — | 0.86x |
@@ -86,9 +86,9 @@
 
 ### Qwen2.5-3B (3.0B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.34 | 7662ms | 94686ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.34 | 7662ms | 94686ms | 32 | — | 1.00x |
 | TurboSparse | 0.34 | 8139ms | 94121ms | 32 | — | 1.01x |
 | PowerInfer | 0.34 | 7951ms | 94712ms | 32 | — | 1.00x |
 | PI+TurboSparse | 0.32 | 7936ms | 100147ms | 32 | — | 0.95x |
@@ -97,9 +97,9 @@
 
 ### Llama-3.2-1B (1.0B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.83 | 2826ms | 38536ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.83 | 2826ms | 38536ms | 32 | — | 1.00x |
 | TurboSparse | 0.96 | 2666ms | 33162ms | 32 | — | 1.16x |
 | PowerInfer | 0.82 | 2963ms | 39229ms | 32 | — | 0.98x |
 | PI+TurboSparse | 0.85 | 2629ms | 37723ms | 32 | — | 1.02x |
@@ -108,9 +108,9 @@
 
 ### Gemma-3-1B (1.0B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.39 | 4343ms | 82130ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.39 | 4343ms | 82130ms | 32 | — | 1.00x |
 | TurboSparse | 0.39 | 4143ms | 82474ms | 32 | — | 1.00x |
 | PowerInfer | 0.36 | 4008ms | 88811ms | 32 | — | 0.92x |
 | PI+TurboSparse | 0.45 | 4231ms | 70420ms | 32 | — | 1.17x |
@@ -119,9 +119,9 @@
 
 ### Gemma-2-2B (2.0B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.44 | 5833ms | 72819ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.44 | 5833ms | 72819ms | 32 | — | 1.00x |
 | TurboSparse | 0.41 | 5845ms | 77374ms | 32 | — | 0.94x |
 | PowerInfer | 0.44 | 5933ms | 72782ms | 32 | — | 1.00x |
 | PI+TurboSparse | 0.44 | 6035ms | 73078ms | 32 | — | 1.00x |
@@ -130,9 +130,9 @@
 
 ### Qwen3.5-MoE-0.87B (0.87B MoE, 2/8 experts)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.27 | 4649ms | 120298ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.27 | 4649ms | 120298ms | 32 | — | 1.00x |
 | TurboSparse | 0.30 | 4787ms | 107635ms | 32 | — | 1.12x |
 | PowerInfer | 0.25 | 4607ms | 125572ms | 32 | — | 0.96x |
 | PI+TurboSparse | 0.29 | 3791ms | 111165ms | 32 | — | 1.08x |
@@ -141,9 +141,9 @@
 
 ### Phi-3.5-mini (3.8B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.48 | 9213ms | 66366ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.48 | 9213ms | 66366ms | 32 | — | 1.00x |
 | TurboSparse | 0.49 | 9055ms | 65511ms | 32 | — | 1.01x |
 | PowerInfer | 0.49 | 8949ms | 65503ms | 32 | — | 1.01x |
 | PI+TurboSparse | 0.50 | 9026ms | 64470ms | 32 | — | 1.03x |
@@ -152,9 +152,9 @@
 
 ### Phi-3-mini-4k (3.8B Dense)
 
-| Config | t/s | Prefill | Decode | Tokens | Accept | vs Base |
-|--------|----:|--------:|-------:|-------:|-------:|--------:|
-| Baseline | 0.48 | 10547ms | 66985ms | 32 | — | 1.00x |
+| Config | t/s | Prefill | Decode | Tokens | Accept | vs llama.cpp |
+|--------|----:|--------:|-------:|-------:|-------:|-------------:|
+| Baseline (llama.cpp) | 0.48 | 10547ms | 66985ms | 32 | — | 1.00x |
 | TurboSparse | 0.48 | 9929ms | 66430ms | 32 | — | 1.01x |
 | **PowerInfer** | **0.50** | 10286ms | 63953ms | 32 | — | **1.05x** |
 | PI+TurboSparse | 0.48 | 10344ms | 67318ms | 32 | — | 1.00x |
@@ -165,7 +165,7 @@
 
 ## 5. Summary — Best Config Per Model
 
-| Model | Params | Baseline t/s | Best Config | Best t/s | Speedup |
+| Model | Params | llama.cpp t/s | Best Config | Best t/s | Speedup |
 |-------|--------|-------------:|-------------|---------:|--------:|
 | TinyLlama-1.1B | 1.1B | 0.61 | Spec+TurboSparse | 0.85 | **+41%** |
 | Qwen2.5-0.5B | 0.5B | 0.57 | Spec+TurboSparse | 0.68 | **+19%** |

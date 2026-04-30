@@ -27,8 +27,10 @@ def _find_lib(base_name: str, candidates: list[Path]) -> str:
 
 _BASE = Path(__file__).parent.parent
 _LLAMA_BIN = _BASE / "llama.cpp" / "build" / "bin"
+_VB_CPP_BUILD = _BASE / "cpp" / "build"  # VibeBlade custom build (TurboSparse, PowerInfer)
 
 _LLAMA_CANDIDATES = [
+  _VB_CPP_BUILD,  # prefer VibeBlade custom build
   _LLAMA_BIN,
   _BASE / "build" / "bin",
   Path(os.environ.get("LLAMA_BUILD_DIR", "")) / "bin",
@@ -66,6 +68,8 @@ class _LazyCDLL:
     lib.llama_model_free.restype = None
     lib.llama_model_get_vocab.argtypes = [ctypes.c_void_p]
     lib.llama_model_get_vocab.restype = ctypes.c_void_p
+    lib.llama_model_is_sparse.argtypes = [ctypes.c_void_p]
+    lib.llama_model_is_sparse.restype = ctypes.c_bool
 
     # --- Vocab ---
     lib.llama_vocab_n_tokens.argtypes = [ctypes.c_void_p]
@@ -132,6 +136,12 @@ class _LazyCDLL:
     lib.llama_sampler_init_temp.restype = ctypes.c_void_p
     lib.llama_sampler_chain_add.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.llama_sampler_chain_add.restype = None
+    lib.llama_sampler_chain_default_params.argtypes = []
+    lib.llama_sampler_chain_default_params.restype = ctypes.c_void_p  # returns struct by value
+    lib.llama_sampler_chain_init.argtypes = [ctypes.c_void_p]
+    lib.llama_sampler_chain_init.restype = ctypes.c_void_p
+    lib.llama_sampler_init_dist.argtypes = [ctypes.c_uint32]
+    lib.llama_sampler_init_dist.restype = ctypes.c_void_p
     lib.llama_sampler_sample.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32]
     lib.llama_sampler_sample.restype = ctypes.c_int32
     lib.llama_sampler_reset.argtypes = [ctypes.c_void_p]
@@ -176,7 +186,7 @@ class _LazyHelperCDLL:
 
   def __getattr__(self, name):
     if _LazyHelperCDLL._lib is None:
-      self._load([_LLAMA_BIN], "libparams_helper.so")
+      self._load([_VB_CPP_BUILD, _LLAMA_BIN], "libparams_helper.so")
     return getattr(_LazyHelperCDLL._lib, name)
 
 
@@ -329,6 +339,12 @@ class LlamaCppBackend:
         self._decode_batch.seq_id[0][0] = 0
 
         self._loaded = True
+        self._is_sparse = _lib.llama_model_is_sparse(self._model)
+
+    @property
+    def is_sparse(self) -> bool:
+        """True if model was loaded from a PowerInfer (PWRI) GGUF file."""
+        return getattr(self, '_is_sparse', False)
 
     # ----------------------------------------------------------
     # Sampling
@@ -339,21 +355,27 @@ class LlamaCppBackend:
         if self._sampler:
             _lib.llama_sampler_free(self._sampler)
 
-        if grammar:
-            self._sampler = _lib.llama_sampler_init_grammar(
-                self._vocab, grammar.encode("utf-8"), b"")
-        else:
-            self._sampler = _lib.llama_sampler_init_greedy()
+        # Always create a chain — llama_sampler_chain_add only works on chains
+        params = _lib.llama_sampler_chain_default_params()
+        chain = _lib.llama_sampler_chain_init(params)
 
-        if temperature > 0.0:
+        if grammar:
+            _lib.llama_sampler_chain_add(chain,
+                _lib.llama_sampler_init_grammar(self._vocab, grammar.encode("utf-8"), b""))
+        elif temperature > 0.0:
             t = _lib.llama_sampler_init_temp(temperature)
-            _lib.llama_sampler_chain_add(self._sampler, t)
+            _lib.llama_sampler_chain_add(chain, t)
             if top_k > 0:
-                k = _lib.llama_sampler_init_top_k(top_k)
-                _lib.llama_sampler_chain_add(self._sampler, k)
+                _lib.llama_sampler_chain_add(chain, _lib.llama_sampler_init_top_k(top_k))
             if top_p < 1.0:
-                p = _lib.llama_sampler_init_top_p(top_p, 1)
-                _lib.llama_sampler_chain_add(self._sampler, p)
+                _lib.llama_sampler_chain_add(chain, _lib.llama_sampler_init_top_p(top_p, 1))
+        else:
+            _lib.llama_sampler_chain_add(chain, _lib.llama_sampler_init_greedy())
+
+        # Seed the chain for reproducibility
+        _lib.llama_sampler_chain_add(chain, _lib.llama_sampler_init_dist(seed))
+
+        self._sampler = chain
 
     # ----------------------------------------------------------
     # Tokenize / Detokenize
