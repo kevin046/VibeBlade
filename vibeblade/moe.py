@@ -181,10 +181,11 @@ class ExpertRouter:
         if squeeze:
             x = x[np.newaxis, :]
 
-        logits = x @ self.weight  # (batch, num_experts)
+        # Cast to float32 to prevent FP16 overflow in matmul
+        x32 = np.asarray(x, dtype=np.float32)
+        logits = x32 @ self.weight  # (batch, num_experts)
         # Clamp router logits to prevent overflow in softmax
-        # FP32 safe range for exp: ~-88 to 88, but router values rarely exceed +-50
-        logits = np.clip(np.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0), -50.0, 50.0)
+        np.clip(logits, -50.0, 50.0, out=logits)
         probs = _softmax(logits, axis=-1)  # (batch, num_experts)
 
         # Top-k selection (descending)
