@@ -35,8 +35,19 @@ __all__ = [
 
 def _silu(x: np.ndarray) -> np.ndarray:
     """SiLU activation: x * sigmoid(x).  Matches transformer.silu()."""
-    x32 = np.clip(np.nan_to_num(x.astype(np.float32), nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
-    return x32 * (1.0 / (1.0 + np.exp(-x32)))
+    x32 = x.astype(np.float32)
+    # Numerically stable sigmoid: avoid overflow in exp(-x) for large negative x
+    # sigmoid(x) = where(x >= 0, 1/(1+exp(-x)), exp(x)/(1+exp(x)))
+    pos = x32 >= 0
+    neg_mask = ~pos
+    sigmoid = np.empty_like(x32)
+    exp_neg = np.exp(-x32[pos])
+    sigmoid[pos] = 1.0 / (1.0 + exp_neg)
+    exp_pos = np.exp(x32[neg_mask])
+    sigmoid[neg_mask] = exp_pos / (1.0 + exp_pos)
+    # Sanitize
+    sigmoid = np.nan_to_num(sigmoid, nan=0.0, posinf=1.0, neginf=0.0)
+    return x32 * sigmoid
 
 
 def _dense_ffn(
@@ -171,8 +182,9 @@ class ExpertRouter:
             x = x[np.newaxis, :]
 
         logits = x @ self.weight  # (batch, num_experts)
-        # Sanitize: clip preserves NaN, so use nan_to_num first
-        logits = np.clip(np.nan_to_num(logits, nan=0.0, posinf=65504.0, neginf=-65504.0), -65504.0, 65504.0)
+        # Clamp router logits to prevent overflow in softmax
+        # FP32 safe range for exp: ~-88 to 88, but router values rarely exceed +-50
+        logits = np.clip(np.nan_to_num(logits, nan=0.0, posinf=50.0, neginf=-50.0), -50.0, 50.0)
         probs = _softmax(logits, axis=-1)  # (batch, num_experts)
 
         # Top-k selection (descending)
@@ -212,9 +224,9 @@ class MoEExpertSet:
     """Holds all expert weight tensors for a single MoE layer.
 
     GGUF/llama.cpp consolidated layout (raw storage):
-        gate_weights: (num_experts, expert_dim, shared_dim)
-        up_weights:   (num_experts, expert_dim, shared_dim)
-        down_weights: (num_experts, shared_dim, expert_dim)
+        gate_weights: (num_experts, shared_dim, expert_dim)
+        up_weights:   (num_experts, shared_dim, expert_dim)
+        down_weights: (num_experts, expert_dim, shared_dim)
 
     Where shared_dim = model hidden_dim, expert_dim = expert intermediate dim.
     """
@@ -231,10 +243,10 @@ class MoEExpertSet:
 
         assert self.gate.shape == self.up.shape, \
             f"gate {self.gate.shape} != up {self.up.shape}"
-        # gate/up: (E, expert_dim, shared_dim), down: (E, shared_dim, expert_dim)
+        # gate/up: (E, shared_dim, expert_dim), down: (E, expert_dim, shared_dim)
         assert self.gate.shape[0] == self.down.shape[0] and \
-               self.gate.shape[2] == self.down.shape[1] and \
-               self.gate.shape[1] == self.down.shape[2], \
+               self.gate.shape[1] == self.down.shape[2] and \
+               self.gate.shape[2] == self.down.shape[1], \
             f"gate {self.gate.shape} incompatible with down {self.down.shape}"
 
     @property
@@ -252,12 +264,12 @@ class MoEExpertSet:
     def get_expert(self, idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return (gate_w, up_w, down_w) for expert *idx*.
 
-        Transposes GGUF layout to einsum-compatible layout:
-            gate_w: (shared_dim, expert_dim)
-            up_w:   (shared_dim, expert_dim)
-            down_w: (expert_dim, shared_dim)
+        GGUF stores gate/up as (shared_dim, expert_dim) and down as (expert_dim, shared_dim).
+        No transposition needed — already in einsum-compatible (shared_dim, expert_dim).
         """
-        return self.gate[idx].T, self.up[idx].T, self.down[idx].T
+        # gate/up: already (shared_dim, expert_dim) ✓
+        # down: already (expert_dim, shared_dim) ✓ (einsum "be,bd->d" expects this)
+        return self.gate[idx], self.up[idx], self.down[idx]
 
     def get_experts_batch(
         self, indices: np.ndarray,
@@ -268,14 +280,17 @@ class MoEExpertSet:
             indices: 1-D array of expert IDs, shape (batch,).
 
         Returns:
-            gate_w: (batch, shared_dim, expert_dim)   — transposed from GGUF
-            up_w:   (batch, shared_dim, expert_dim)   — transposed from GGUF
-            down_w: (batch, expert_dim, shared_dim)   — transposed from GGUF
+            gate_w: (batch, shared_dim, expert_dim)
+            up_w:   (batch, shared_dim, expert_dim)
+            down_w: (batch, expert_dim, shared_dim)
         """
-        # GGUF: gate/up (E, expert_dim, shared_dim) → transpose to (E, shared_dim, expert_dim)
-        gate_batch = np.transpose(self.gate[indices], (0, 2, 1))
-        up_batch   = np.transpose(self.up[indices],   (0, 2, 1))
-        # GGUF: down (E, shared_dim, expert_dim) → transpose to (E, expert_dim, shared_dim)
+        # GGUF: gate/up/down stored as (E, shared_dim, expert_dim)
+        # einsum "bs,bse->be" expects gate/up: (batch, shared_dim, expert_dim) ✓
+        # einsum "be,bed->bd" expects down: (batch, expert_dim, shared_dim)
+        # After indexing: gate_batch/up_batch already in right shape
+        # For down: transpose (batch, shared_dim, expert_dim) → (batch, expert_dim, shared_dim)
+        gate_batch = self.gate[indices]
+        up_batch   = self.up[indices]
         down_batch = np.transpose(self.down[indices], (0, 2, 1))
         return gate_batch, up_batch, down_batch
 
@@ -540,11 +555,6 @@ def load_moe_weights_from_layer(
             num_experts_from_gate = gate_w.shape[0]
             if (router_w.shape[0] == num_experts_from_gate
                     and router_w.shape[1] != num_experts_from_gate):
-                import sys as _sys
-                _sys.stderr.write(
-                    f"[MoE ROUTER] transposing router from {router_w.shape} "
-                    f"to ({router_w.shape[1]}, {router_w.shape[0]})\n"
-                )
                 router_w = router_w.T.copy()
 
         # Shared expert (DeepSeek-style "shunt" or Qwen-style "shexp")
@@ -554,10 +564,6 @@ def load_moe_weights_from_layer(
             shared_down_key = f"{pfx}.ffn_down_{shared_suffix}.weight"
             if shared_gate_key in keys:
                 extra["shared_gate"] = weights[shared_gate_key]
-                import sys as _sys
-                _sys.stderr.write(f"[LOADER SHEXP] {shared_gate_key}: {weights[shared_gate_key].shape} "
-                                  f"{shared_up_key}: {weights[shared_up_key].shape} "
-                                  f"{shared_down_key}: {weights[shared_down_key].shape}\n")
                 if shared_up_key in keys:
                     extra["shared_up"] = weights[shared_up_key]
                 if shared_down_key in keys:

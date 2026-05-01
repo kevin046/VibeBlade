@@ -27,6 +27,9 @@ import os
 import struct
 from typing import Any
 
+# Set VERBOSE=True to enable debug prints during forward pass
+VERBOSE = os.environ.get("VIBEBLADE_VERBOSE", "").lower() in ("1", "true", "yes")
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -694,34 +697,29 @@ class GGUFLoader:
             batch_fn = _BATCH_DEQUANT[tid]
             import sys
 
+            # Pre-allocate output to avoid concatenate doubling memory
+            out = np.empty(n_blocks * block_size, dtype=np.float32)
+
             # Chunk large tensors so progress bar updates between chunks
             CHUNK_SIZE = 4096
-            if n_blocks <= CHUNK_SIZE:
-                # Small tensor — process in one shot
+            for chunk_start in range(0, n_blocks, CHUNK_SIZE):
+                chunk_end = min(chunk_start + CHUNK_SIZE, n_blocks)
+                chunk_n = chunk_end - chunk_start
+                start_byte = chunk_start * block_bytes
+                end_byte = chunk_end * block_bytes
+                chunk_raw = bytes(raw[start_byte:end_byte])
+                # Write directly into pre-allocated output — no intermediate list
+                out_dst = out[chunk_start * block_size : chunk_end * block_size]
+                chunk_out = batch_fn(chunk_raw, chunk_n).ravel()
+                out_dst[:len(chunk_out)] = chunk_out
                 if progress_cb:
-                    progress_cb(tensor_name, n_blocks // 2, n_blocks, loading=True)
+                    progress_cb(tensor_name, chunk_end, n_blocks, loading=True)
                     sys.stdout.flush()
-                raw_bytes = bytes(raw[:n_blocks * block_bytes])
-                out = batch_fn(raw_bytes, n_blocks).ravel()[:n_elements]
-            else:
-                # Large tensor — chunk and report progress
-                out_parts = []
-                for chunk_start in range(0, n_blocks, CHUNK_SIZE):
-                    chunk_end = min(chunk_start + CHUNK_SIZE, n_blocks)
-                    chunk_n = chunk_end - chunk_start
-                    start_byte = chunk_start * block_bytes
-                    end_byte = chunk_end * block_bytes
-                    chunk_raw = bytes(raw[start_byte:end_byte])
-                    out_parts.append(batch_fn(chunk_raw, chunk_n))
-                    if progress_cb:
-                        progress_cb(tensor_name, chunk_end, n_blocks, loading=True)
-                        sys.stdout.flush()
-                out = np.concatenate(out_parts).ravel()[:n_elements]
 
             if progress_cb:
                 progress_cb(tensor_name, n_blocks, n_blocks, loading=True)
                 sys.stdout.flush()
-            return out
+            return out[:n_elements]
 
         # Slow path: per-block dequant for small quant types (Q4_0, Q8_0, etc.)
         fn = _DEQUANT_FN[tid]
@@ -1015,12 +1013,19 @@ class _LazyWeights:
         n_elem = 1
         for d in info.get("shape", []):
             n_elem *= d
-        estimated_bytes = n_elem * np.dtype(self._dtype).itemsize
+
+        # Use float16 for MoE expert tensors to halve memory usage
+        # (ffn_*_exps.weight are huge: 256 experts * dim * dim)
+        _is_moe_exps = any(s in key for s in (
+            "ffn_gate_exps.weight", "ffn_up_exps.weight", "ffn_down_exps.weight",
+        ))
+        load_dtype = np.float16 if _is_moe_exps else self._dtype
+        estimated_bytes = n_elem * np.dtype(load_dtype).itemsize
         self._pre_evict(estimated_bytes)
 
-        arr = self._loader.load_tensor(info["name"], self._dtype)
+        arr = self._loader.load_tensor(info["name"], load_dtype)
         # DEBUG: warn if weight shape is suspiciously large
-        if "attn_norm" in key and arr.ndim == 1 and arr.shape[0] > 4098:
+        if VERBOSE and "attn_norm" in key and arr.ndim == 1 and arr.shape[0] > 4098:
             import sys as _sys
             _sys.stderr.write(f"[LOADER DEBUG] {key}: shape={arr.shape}, nbytes={arr.nbytes}, GGUF_shape={info['shape']}\n")
 
@@ -1166,16 +1171,18 @@ class _LazyWeights:
             # Validate the corrected dims against actual tensor shape
             expected_rows = (n_heads + 2 * n_kv_heads) * head_dim
             if expected_rows == qkv_rows:
-                _sys.stderr.write(
-                    f"[QKV] split with probe dims: heads={n_heads}, "
-                    f"kv={n_kv_heads}, hd={head_dim}, qkv=({qkv_rows},{hidden_dim})\n"
-                )
+                if VERBOSE:
+                    _sys.stderr.write(
+                        f"[QKV] split with probe dims: heads={n_heads}, "
+                        f"kv={n_kv_heads}, hd={head_dim}, qkv=({qkv_rows},{hidden_dim})\n"
+                    )
             else:
-                _sys.stderr.write(
-                    f"[QKV] probe dims mismatch: heads={n_heads}, kv={n_kv_heads}, "
-                    f"hd={head_dim} → expected {expected_rows} rows != {qkv_rows}, "
-                    f"falling back\n"
-                )
+                if VERBOSE:
+                    _sys.stderr.write(
+                        f"[QKV] probe dims mismatch: heads={n_heads}, kv={n_kv_heads}, "
+                        f"hd={head_dim} → expected {expected_rows} rows != {qkv_rows}, "
+                        f"falling back\n"
+                    )
                 # Fall back to independent inference
                 n_heads = n_kv_heads = head_dim = None
 
@@ -1231,9 +1238,10 @@ class _LazyWeights:
             self._access_order.append(name)
 
         # DEBUG: print actual split sizes
-        import sys as _sys
-        _sys.stderr.write(f"[QKV SPLIT DEBUG] {q_key}: n_heads={n_heads}, n_kv={n_kv_heads}, hd={head_dim} → "
-                          f"q_size={q_size}, k_size={k_size}, q_arr.shape={q_arr.shape}\n")
+        if VERBOSE:
+            import sys as _sys
+            _sys.stderr.write(f"[QKV SPLIT DEBUG] {q_key}: n_heads={n_heads}, n_kv={n_kv_heads}, hd={head_dim} → "
+                              f"q_size={q_size}, k_size={k_size}, q_arr.shape={q_arr.shape}\n")
         self._evict()
         self._touch(q_key)
         return self._cache[q_key]
