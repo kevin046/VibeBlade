@@ -7,6 +7,12 @@
 #include <cstring>
 #include <algorithm>
 
+#ifdef TS_AVX512F
+#include <immintrin.h>
+#elif defined(TS_AVX2)
+#include <immintrin.h>
+#endif
+
 namespace vibeblade {
 
 

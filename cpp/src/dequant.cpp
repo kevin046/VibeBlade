@@ -247,7 +247,14 @@ void dequantize_row_q8_K(const void* row, float* out, int64_t n) {
 //  Q4_K dequant: 256 values per super-block, 6-bit packed scales
 // ════════════════════════════════════════════════════════════════
 
-static inline void get_scale_min_k4(int j, const uint8_t* __restrict__ q, uint8_t* __restrict__ d, uint8_t* __restrict__ m) {
+// __restrict__ is GCC/Clang; MSVC uses __restrict
+#ifdef _MSC_VER
+#define VB_RESTRICT __restrict
+#else
+#define VB_RESTRICT __restrict__
+#endif
+
+static inline void get_scale_min_k4(int j, const uint8_t* VB_RESTRICT q, uint8_t* VB_RESTRICT d, uint8_t* VB_RESTRICT m) {
     if (j < 4) {
         *d = q[j] & 63;
         *m = q[j + 4] & 63;
@@ -296,7 +303,7 @@ void dequantize_row_q4_K(const void* row, float* out, int64_t n) {
 //  Q5_K dequant: 256 values, 6-bit scales, 5th bit in qh
 // ════════════════════════════════════════════════════════════════
 
-static inline void get_scale_min_k5(int j, const uint8_t* __restrict__ q, uint8_t* __restrict__ d, uint8_t* __restrict__ m) {
+static inline void get_scale_min_k5(int j, const uint8_t* VB_RESTRICT q, uint8_t* VB_RESTRICT d, uint8_t* VB_RESTRICT m) {
     if (j < 4) {
         *d = q[j] & 63;
         *m = q[j + 4] & 63;

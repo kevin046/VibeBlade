@@ -18,7 +18,7 @@
     #define read _read
     #define fstat _fstat64
     #define ssize_t int64_t
-    #define EINTR 0  // Windows read() doesn't set EINTR
+    // EINTR already defined in errno.h on Windows
 
     struct win_stat {
         int64_t st_size;
