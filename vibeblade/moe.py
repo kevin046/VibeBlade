@@ -259,22 +259,12 @@ class MoEExpertSet:
 
     @property
     def shared_dim(self) -> int:
-        # Detect layout: if dim1 > dim2, gate is (E, expert_dim, shared_dim)
-        # Otherwise gate is (E, shared_dim, expert_dim)
-        if self.gate.shape[1] > self.gate.shape[2]:
-            return int(self.gate.shape[2])
-        return int(self.gate.shape[1])
+        return int(self.gate.shape[2])
 
     @property
     def expert_dim_real(self) -> int:
-        """Expert intermediate dim, regardless of storage layout."""
-        if self.gate.shape[1] > self.gate.shape[2]:
-            return int(self.gate.shape[1])
-        return int(self.gate.shape[2])
-
-    def _is_layout_expert_first(self) -> bool:
-        """True if gate/up stored as (E, expert_dim, shared_dim)."""
-        return self.gate.shape[1] > self.gate.shape[2]
+        """Expert intermediate dim."""
+        return int(self.gate.shape[1])
 
     def get_expert(self, idx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return (gate_w, up_w, down_w) for expert *idx*.
@@ -284,15 +274,9 @@ class MoEExpertSet:
             up_w:   (shared_dim, expert_dim)
             down_w: (expert_dim, shared_dim)
         """
-        g = self.gate[idx]
-        u = self.up[idx]
-        d = self.down[idx]
-        if self._is_layout_expert_first():
-            g = g.T  # (expert_dim, shared_dim) → (shared_dim, expert_dim)
-            u = u.T
-            # d is (shared_dim, expert_dim), need (expert_dim, shared_dim)
-            d = d.T
-        return g, u, d
+        # GGUF layout: gate/up=(expert_dim, shared_dim), down=(shared_dim, expert_dim)
+        # Dense FFN needs: gate/up=(shared_dim, expert_dim), down=(expert_dim, shared_dim)
+        return self.gate[idx].T, self.up[idx].T, self.down[idx].T
 
     def get_experts_batch(
         self, indices: np.ndarray,
@@ -307,20 +291,11 @@ class MoEExpertSet:
             up_w:   (batch, shared_dim, expert_dim)
             down_w: (batch, expert_dim, shared_dim)
         """
-        gate_batch = self.gate[indices]
-        up_batch   = self.up[indices]
-        down_batch = self.down[indices]
-
-        if self._is_layout_expert_first():
-            # GGUF stored as (E, expert_dim, shared_dim) → transpose to (batch, shared_dim, expert_dim)
-            gate_batch = np.transpose(gate_batch, (0, 2, 1))
-            up_batch   = np.transpose(up_batch, (0, 2, 1))
-            # down stored as (E, shared_dim, expert_dim) → transpose to (batch, expert_dim, shared_dim)
-            down_batch = np.transpose(down_batch, (0, 2, 1))
-        else:
-            # down stored as (E, expert_dim, shared_dim) → already correct after indexing
-            pass
-
+        # GGUF layout: gate/up=(E, expert_dim, shared_dim), down=(E, shared_dim, expert_dim)
+        # einsum needs:  gate/up=(batch, shared_dim, expert_dim), down=(batch, expert_dim, shared_dim)
+        gate_batch = np.transpose(self.gate[indices], (0, 2, 1))
+        up_batch   = np.transpose(self.up[indices], (0, 2, 1))
+        down_batch = np.transpose(self.down[indices], (0, 2, 1))
         return gate_batch, up_batch, down_batch
 
 
