@@ -133,37 +133,53 @@ target_include_directories(_vibeblade_native PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# Set optimization flags — Release uses -O3 + LTO + OpenMP
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_options(_vibeblade_native PRIVATE -g -O0 -fno-lto)
+# Set optimization flags — cross-compiler (GCC/Clang/MSVC)
+if(MSVC)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(_vibeblade_native PRIVATE /Od /Zi)
+    else()
+        target_compile_options(_vibeblade_native PRIVATE /O2 /DNDEBUG)
+    endif()
 else()
-    target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG -fno-lto)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(_vibeblade_native PRIVATE -g -O0 -fno-lto)
+    else()
+        target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG -fno-lto)
+    endif()
     # LTO disabled — causes ODR violations with pybind11's std::string ABI
     # on ARM64, leading to segfaults in std::map operations.
     message(STATUS "LTO:             NO (pybind11 ODR)")
+    target_link_options(_vibeblade_native PRIVATE -fno-lto)
+    add_compile_options(-fno-lto)
 endif()
-
-# Ensure no LTO at link time (ODR violation with pybind11)
-target_link_options(_vibeblade_native PRIVATE -fno-lto)
-# Also override any LTO in compile flags
-add_compile_options(-fno-lto)
 
 # OpenMP removed — see note above
 
 # Add SIMD flags
 set(SIMD_FLAGS "")
-if(HAS_AVX512FP16)
-    list(APPEND SIMD_FLAGS "-mavx512f" "-mavx512vl" "-mavx512fp16")
-    target_compile_definitions(_vibeblade_native PRIVATE TS_AVX512FP16)
-elseif(HAS_AVX512F)
-    list(APPEND SIMD_FLAGS "-mavx512f" "-mavx512vl")
-    target_compile_definitions(_vibeblade_native PRIVATE TS_AVX512F)
-elseif(HAS_AVX2)
-    list(APPEND SIMD_FLAGS "-mavx2" "-mfma")
-    target_compile_definitions(_vibeblade_native PRIVATE TS_AVX2)
-elseif(HAS_NEON_FP16)
-    list(APPEND SIMD_FLAGS "-march=native")
-    target_compile_definitions(_vibeblade_native PRIVATE TS_NEON_FP16)
+if(MSVC)
+    # MSVC: /arch:AVX2 or /arch:AVX512
+    if(HAS_AVX512F)
+        list(APPEND SIMD_FLAGS "/arch:AVX512")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_AVX512F)
+    elseif(HAS_AVX2)
+        list(APPEND SIMD_FLAGS "/arch:AVX2")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_AVX2)
+    endif()
+else()
+    if(HAS_AVX512FP16)
+        list(APPEND SIMD_FLAGS "-mavx512f" "-mavx512vl" "-mavx512fp16")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_AVX512FP16)
+    elseif(HAS_AVX512F)
+        list(APPEND SIMD_FLAGS "-mavx512f" "-mavx512vl")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_AVX512F)
+    elseif(HAS_AVX2)
+        list(APPEND SIMD_FLAGS "-mavx2" "-mfma")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_AVX2)
+    elseif(HAS_NEON_FP16)
+        list(APPEND SIMD_FLAGS "-march=native")
+        target_compile_definitions(_vibeblade_native PRIVATE TS_NEON_FP16)
+    endif()
 endif()
 
 if(SIMD_FLAGS)
@@ -174,7 +190,7 @@ else()
 endif()
 
 # On aarch64, -march=native is usually sufficient for NEON
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     target_compile_options(_vibeblade_native PRIVATE -march=native)
 endif()
 
