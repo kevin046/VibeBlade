@@ -6,14 +6,32 @@
 [![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
 [Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
 
+**Prerequisites** — C++ build tools (required for the fast engine):
+
+| OS | Install |
+|---|---|
+| **Ubuntu/Debian** | `sudo apt install build-essential cmake` |
+| **macOS** | `xcode-select --install && brew install cmake` |
+| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/) |
+
+Python dependencies (`pip install -e .` handles these):
+- Python 3.10+
+- `numpy`, `pybind11`, `cmake`, `psutil`
+
 **Linux / macOS**
 ```bash
-git clone https://github.com/kevin046/VibeBlade && cd VibeBlade && pip install -e . && python cpp/build_cpp.py && python -m vibeblade wizard
+git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
+pip install -e .                # Python deps (numpy, pybind11, etc.)
+python cpp/build_cpp.py         # Build C++ engine (needs cmake + C++17 compiler)
+python -m vibeblade wizard      # Guided setup
 ```
 
 **Windows (PowerShell)**
 ```powershell
-git clone https://github.com/kevin046/VibeBlade; cd VibeBlade; pip install -e .; python cpp/build_cpp.py; python -m vibeblade wizard
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
+pip install -e .
+python cpp/build_cpp.py
+python -m vibeblade wizard
 ```
 
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
