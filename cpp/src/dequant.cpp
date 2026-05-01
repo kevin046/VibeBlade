@@ -1,5 +1,6 @@
 #include "dequant.h"
 #include "ggml_types.h"
+#include "fp16_compat.h"
 #include "win_compat.h"
 #include <cstdint>
 #include <string>

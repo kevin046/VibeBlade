@@ -188,29 +188,8 @@ inline uint16_t f32_to_bf16(float val) {
     return (uint16_t)((f + bias) >> 16);
 }
 
-// ── F16 ↔ F32 (inline, already in fp16_compat.h but duplicated here for independence) ──
-inline float f16_to_f32(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1f;
-    uint32_t frac = h & 0x3ff;
-    uint32_t f;
-    if (exp == 0) {
-        if (frac == 0) { f = sign << 31; }
-        else {
-            exp = 1;
-            while (!(frac & 0x400)) { frac <<= 1; exp--; }
-            frac &= 0x3ff;
-            f = (sign << 31) | ((exp + 127 - 15 + 1) << 23) | (frac << 13);
-        }
-    } else if (exp == 31) {
-        f = (sign << 31) | 0x7f800000u | (frac << 13);
-    } else {
-        f = (sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13);
-    }
-    float ret;
-    memcpy(&ret, &f, 4);
-    return ret;
-}
+// ── F16 -> F32: use fp16_compat.h implementation ──
+// (declaration is in fp16_compat.h, included by most .cpp files that need it)
 
 // ── Total tensor data size in bytes ──
 inline size_t tensor_nbytes(ggml_type type, int64_t n_values) {
