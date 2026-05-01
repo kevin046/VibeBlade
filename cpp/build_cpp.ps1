@@ -37,7 +37,7 @@ if ($LASTEXITCODE -ne 0) {
 $PydFile = Get-ChildItem -Path $BuildDir -Recurse -Filter "_vibeblade_native*.pyd" | Select-Object -First 1
 if (!$PydFile) {
     Pop-Location
-    Write-Host "  No .pyd found — build may have failed" -ForegroundColor Red
+    Write-Host "  No .pyd found - build may have failed" -ForegroundColor Red
     exit 1
 }
 
