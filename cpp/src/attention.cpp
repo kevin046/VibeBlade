@@ -108,7 +108,7 @@ void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
         // Normalize
         if (row_sum > 0.0f) {
             float inv_sum = 1.0f / row_sum;
-            for (i = 0; i < d; i++) o_row[i] *= inv_sum;
+            for (int j = 0; j < d; j++) o_row[j] *= inv_sum;
         }
 
         // Store output
