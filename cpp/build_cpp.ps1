@@ -56,6 +56,8 @@ python -c "import vibeblade._vibeblade_native as nat; print(f'  SIMD: {nat.SIMD_
 if ($LASTEXITCODE -eq 0) {
     Write-Host "  Native backend ready!" -ForegroundColor Green
 } else {
-    Write-Host "  Import failed" -ForegroundColor Red
+    Write-Host "  Import failed - checking error..." -ForegroundColor Yellow
+    python -c "import traceback; traceback.print_exc()" 2>&1 | ForEach-Object { Write-Host "    $_" }
+    python -c "try:`n import vibeblade._vibeblade_native as nat`n print('OK:', dir(nat))`nexcept Exception as e:`n print('ERROR:', type(e).__name__, e)" 2>&1 | ForEach-Object { Write-Host "    $_" }
 }
 Pop-Location
