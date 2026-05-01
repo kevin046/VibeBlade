@@ -27,10 +27,10 @@ import os
 import struct
 from typing import Any
 
+import numpy as np
+
 # Set VERBOSE=True to enable debug prints during forward pass
 VERBOSE = os.environ.get("VIBEBLADE_VERBOSE", "").lower() in ("1", "true", "yes")
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
