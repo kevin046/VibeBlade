@@ -645,7 +645,13 @@ class GGUFLoader:
         if tid in _DEQUANT_FN or tid in _BATCH_DEQUANT:
             arr = self._dequant_blocks(raw, tid, n_elements,
                                       progress_cb=progress_cb, tensor_name=name)
-            return arr.reshape(shape).astype(dtype)
+            shaped = arr.reshape(shape)
+            if dtype == np.float16:
+                # Clip to float16 range to avoid overflow warning on large tensors
+                shaped = np.clip(shaped, -65504.0, 65504.0).astype(dtype)
+            else:
+                shaped = shaped.astype(dtype)
+            return shaped
 
         # Unsupported quant — return raw bytes as best-effort
         raise ValueError(
