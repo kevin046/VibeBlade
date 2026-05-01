@@ -14,29 +14,10 @@ if (!(Test-Path $BuildDir)) { New-Item -ItemType Directory -Path $BuildDir | Out
 $Python = (Get-Command python).Path
 Write-Host "  Python: $Python"
 
-# Find cmake (pip-installed cmake puts it in Scripts/)
-$Cmake = $null
-$CmakeCandidates = @(
-    (Join-Path (Split-Path -Parent $Python) "Scripts\cmake.exe"),
-    (Join-Path (Split-Path -Parent $Python) "cmake.exe"),
-    (Get-Command cmake -ErrorAction SilentlyContinue).Path
-)
-foreach ($c in $CmakeCandidates) {
-    if ($c -and (Test-Path $c)) {
-        $Cmake = $c
-        break
-    }
-}
-if (!$Cmake) {
-    Write-Host "  cmake not found. Run: pip install cmake" -ForegroundColor Red
-    exit 1
-}
-Write-Host "  CMake: $Cmake"
-
-# Configure
+# Configure using python -m cmake (pip cmake may not put cmake.exe on PATH)
 Push-Location $BuildDir
 Write-Host "  Configuring..."
-& $Cmake .. -DCMAKE_BUILD_TYPE=Release "-DPython3_EXECUTABLE=$Python" -DPYBIND11_FINDPYTHON=ON 2>&1 | ForEach-Object { $_ }
+python -m cmake .. -DCMAKE_BUILD_TYPE=Release "-DPython3_EXECUTABLE=$Python" -DPYBIND11_FINDPYTHON=ON 2>&1 | ForEach-Object { $_ }
 if ($LASTEXITCODE -ne 0) {
     Pop-Location
     Write-Host "  Configure failed" -ForegroundColor Red
@@ -45,7 +26,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # Build
 Write-Host "  Building..."
-& $Cmake --build . --config Release 2>&1 | ForEach-Object { $_ }
+python -m cmake --build . --config Release 2>&1 | ForEach-Object { $_ }
 if ($LASTEXITCODE -ne 0) {
     Pop-Location
     Write-Host "  Build failed" -ForegroundColor Red
