@@ -131,6 +131,7 @@ pybind11_add_module(_vibeblade_native
 
 target_include_directories(_vibeblade_native PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 # Set optimization flags — cross-compiler (GCC/Clang/MSVC)

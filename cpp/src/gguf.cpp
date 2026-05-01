@@ -1,6 +1,5 @@
 #include "gguf.h"
-#include <sys/stat.h>
-#include <fcntl.h>
+#include "win_compat.h"
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
@@ -8,7 +7,7 @@
 #include <vector>
 #include <memory>
 #include <cstdlib>
-#include <unistd.h>
+#include <string>
 
 namespace vibeblade {
 
@@ -114,7 +113,7 @@ void GGUFFile::parse_metadata(const uint8_t* ptr, size_t& offset) {
                         (*meta_string_arrays_)[k] = std::move(arr);
                         break;
                     }
-                    case 4: case 5: { // INT32/UINT32 → int64
+                    case 4: case 5: { // INT32/UINT32 -> int64
                         std::vector<int64_t> arr(elen);
                         for (uint64_t j = 0; j < elen; j++) {
                             arr[j] = read_i32(ptr + offset); offset += 4;
@@ -197,10 +196,34 @@ void GGUFFile::parse_tensor_infos(const uint8_t* ptr, size_t& offset) {
         throw std::runtime_error("GGUF: data section starts past end of file");
 }
 
-// Read entire file via malloc+read (avoids mmap which corrupts glibc
-// allocator metadata on certain ARM64 kernels).
 void GGUFFile::load_file(const char* path) {
-    fd_ = open(path, O_RDONLY);
+#ifdef _WIN32
+    // Windows: use _open with binary flag
+    fd_ = _open(path, _O_RDONLY | _O_BINARY);
+    if (fd_ < 0) throw std::runtime_error(std::string("Cannot open GGUF: ") + path);
+
+    struct _stat64 st;
+    if (_fstat64(fd_, &st) < 0) { _close(fd_); throw std::runtime_error("Cannot stat GGUF"); }
+    file_size_ = st.st_size;
+
+    data_ = (uint8_t*)std::malloc(file_size_);
+    if (!data_) { _close(fd_); throw std::runtime_error("GGUF: malloc failed for " + std::to_string(file_size_) + " bytes"); }
+
+    size_t total = 0;
+    while (total < file_size_) {
+        int r = _read(fd_, data_ + total, (unsigned int)(file_size_ - total));
+        if (r <= 0) {
+            if (r == 0) { std::free(data_); data_ = nullptr; _close(fd_); throw std::runtime_error("GGUF: unexpected EOF"); }
+            std::free(data_); data_ = nullptr;
+            _close(fd_);
+            throw std::runtime_error(std::string("GGUF: read error"));
+        }
+        total += r;
+    }
+    _close(fd_);
+    fd_ = -1;
+#else
+    fd_ = ::open(path, O_RDONLY);
     if (fd_ < 0) throw std::runtime_error(std::string("Cannot open GGUF: ") + path);
 
     struct stat st;
@@ -224,6 +247,7 @@ void GGUFFile::load_file(const char* path) {
     }
     close(fd_);
     fd_ = -1;
+#endif
 }
 
 GGUFFile::GGUFFile(const char* path) {
@@ -237,7 +261,13 @@ GGUFFile::GGUFFile(const char* path) {
 }
 
 GGUFFile::~GGUFFile() {
-    if (fd_ >= 0) close(fd_);
+    if (fd_ >= 0) {
+#ifdef _WIN32
+        _close(fd_);
+#else
+        close(fd_);
+#endif
+    }
     if (data_) std::free(data_);
 }
 

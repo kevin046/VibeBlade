@@ -1,5 +1,8 @@
 #include "dequant.h"
 #include "ggml_types.h"
+#include "win_compat.h"
+#include <cstdint>
+#include <string>
 #include <cmath>
 #include <cstring>
 #include <algorithm>

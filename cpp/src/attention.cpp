@@ -1,5 +1,6 @@
 #include "kernels.h"
 #include "fp16_compat.h"
+#include "win_compat.h"
 #include <new>
 #include <cmath>
 #include <cstdlib>
@@ -15,7 +16,7 @@ namespace vibeblade {
 //
 //  Uses online softmax algorithm (flash-attention style):
 //    For each query row, iterate over K/V rows and maintain
-//    running max and sum — O(d) memory per query row, not O(N*d).
+//    running max and sum -- O(d) memory per query row, not O(N*d).
 // ════════════════════════════════════════════════════════════════
 
 void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
@@ -28,7 +29,8 @@ void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
     float* K_f32 = (float*)aligned_alloc(64, (size_t)N * d * sizeof(float));
     float* V_f32 = (float*)aligned_alloc(64, (size_t)N * d * sizeof(float));
     if (!q_row || !k_row || !v_row || !o_row || !K_f32 || !V_f32) {
-        free(q_row); free(k_row); free(v_row); free(o_row); free(K_f32); free(V_f32);
+        aligned_free(q_row); aligned_free(k_row); aligned_free(v_row);
+        aligned_free(o_row); aligned_free(K_f32); aligned_free(V_f32);
         throw std::bad_alloc();
     }
     f16_to_f32_batch(K, K_f32, N * d);
@@ -49,29 +51,34 @@ void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
 
             // Compute dot(Q[m], K[n]) * scale
             float dot = 0.0f;
+            int i;
 #ifdef TS_AVX512F
-            int i = 0;
-            __m512 acc = _mm512_setzero_ps();
-            for (; i + 16 <= d; i += 16) {
-                __m512 vq = _mm512_loadu_ps(q_row + i);
-                __m512 vk = _mm512_loadu_ps(k + i);
-                acc = _mm512_fmadd_ps(vq, vk, acc);
+            {
+                __m512 acc_v = _mm512_setzero_ps();
+                i = 0;
+                for (; i + 16 <= d; i += 16) {
+                    __m512 vq = _mm512_loadu_ps(q_row + i);
+                    __m512 vk = _mm512_loadu_ps(k + i);
+                    acc_v = _mm512_fmadd_ps(vq, vk, acc_v);
+                }
+                dot = _mm512_reduce_add_ps(acc_v);
+                for (; i < d; i++) dot += q_row[i] * k[i];
             }
-            dot = _mm512_reduce_add_ps(acc);
-            for (; i < d; i++) dot += q_row[i] * k[i];
 #elif defined(TS_AVX2)
-            int i = 0;
-            __m256 acc = _mm256_setzero_ps();
-            for (; i + 8 <= d; i += 8) {
-                __m256 vq = _mm256_loadu_ps(q_row + i);
-                __m256 vk = _mm256_loadu_ps(k + i);
-                acc = _mm256_fmadd_ps(vq, vk, acc);
+            {
+                __m256 acc_v = _mm256_setzero_ps();
+                i = 0;
+                for (; i + 8 <= d; i += 8) {
+                    __m256 vq = _mm256_loadu_ps(q_row + i);
+                    __m256 vk = _mm256_loadu_ps(k + i);
+                    acc_v = _mm256_fmadd_ps(vq, vk, acc_v);
+                }
+                dot = acc_v[0] + acc_v[1] + acc_v[2] + acc_v[3] +
+                      acc_v[4] + acc_v[5] + acc_v[6] + acc_v[7];
+                for (; i < d; i++) dot += q_row[i] * k[i];
             }
-            dot = acc[0] + acc[1] + acc[2] + acc[3] +
-                  acc[4] + acc[5] + acc[6] + acc[7];
-            for (; i < d; i++) dot += q_row[i] * k[i];
 #else
-            for (int i = 0; i < d; i++) dot += q_row[i] * k[i];
+            for (i = 0; i < d; i++) dot += q_row[i] * k[i];
 #endif
             float attn = dot * scale;
 
@@ -82,11 +89,11 @@ void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
 
             // Rescale running accumulator
             if (row_max != -INFINITY) {
-                for (int i = 0; i < d; i++) o_row[i] *= exp_diff;
+                for (i = 0; i < d; i++) o_row[i] *= exp_diff;
             }
 
             // Accumulate V weighted by attention
-            for (int i = 0; i < d; i++) o_row[i] += exp_attn * v[i];
+            for (i = 0; i < d; i++) o_row[i] += exp_attn * v[i];
 
             row_sum = row_sum * exp_diff + exp_attn;
             row_max = new_max;
@@ -95,19 +102,19 @@ void fused_sdpa(const uint16_t* Q, const uint16_t* K, const uint16_t* V,
         // Normalize
         if (row_sum > 0.0f) {
             float inv_sum = 1.0f / row_sum;
-            for (int i = 0; i < d; i++) o_row[i] *= inv_sum;
+            for (i = 0; i < d; i++) o_row[i] *= inv_sum;
         }
 
         // Store output
         f32_to_f16_batch(o_row, O + m * d, d);
     }
 
-    free(q_row);
-    free(k_row);
-    free(v_row);
-    free(o_row);
-    free(K_f32);
-    free(V_f32);
+    aligned_free(q_row);
+    aligned_free(k_row);
+    aligned_free(v_row);
+    aligned_free(o_row);
+    aligned_free(K_f32);
+    aligned_free(V_f32);
 }
 
 }  // namespace vibeblade
