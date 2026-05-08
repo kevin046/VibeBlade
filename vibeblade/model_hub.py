@@ -401,8 +401,9 @@ def resolve_model_path(
         ]
         if name_match:
             found = name_match
-        elif found:
-            pass  # return all found
+        else:
+            # No local file matches the requested model — don't return a random file
+            found = []
     if found:
         return found[0].resolve()
 
