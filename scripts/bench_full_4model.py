@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
-"""Full 4-model benchmark: 6-config sweep + auto-tune verification.
+"""Full 4-model benchmark: 6-config sweep + auto-tune.
 
-Runs sequentially (one model at a time) to avoid cross-contamination.
-Each model gets its own subprocess for clean C library state.
+Runs configs sequentially within each model. Uses os.execv for process
+isolation between models (cleanest C library state reset).
 """
-import subprocess, sys, os, json, time
+import sys, os, time, json, ctypes
 
 sys.path.insert(0, '/home/ubuntu/VibeBlade')
 os.environ['LD_LIBRARY_PATH'] = '/home/ubuntu/VibeBlade/cpp/build'
 
-MODELS = {
-    'TinyLlama-1.1B': 'models/tinyllama-1.1b-q4km.gguf',
-    'Llama-3.2-1B':   'models/llama-3.2-1b-q4ks.gguf',
-    'Phi-2-2.7B':     'models/phi-2-2.7b-q4km.gguf',
-    'Qwen2.5-MoE-2x1.5B': 'models/qwen25-moe-2x1.5b-q4km.gguf',
-}
-
-BENCH_SCRIPT = '''
-import sys, os, ctypes, time, gc
-sys.path.insert(0, '/home/ubuntu/VibeBlade')
-os.environ['LD_LIBRARY_PATH'] = '/home/ubuntu/VibeBlade/cpp/build'
-
-import ctypes
 _lib = ctypes.CDLL('/home/ubuntu/VibeBlade/cpp/build/libllama.so')
 _lib.turbosparse_set_enabled.argtypes = [ctypes.c_bool]
 _lib.turbosparse_is_enabled.restype = ctypes.c_bool
@@ -34,201 +21,155 @@ from vibeblade.llama_backend import _helper, LlamaCppBackend
 from vibeblade.speculative import SpeculativeBackend
 from vibeblade.auto_tune import auto_tune, disable_all
 
-MODEL = sys.argv[1]
+_helper.override_model_params.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
+
 CTX = 256
 THREADS = 4
 MAX_TOKENS = 32
 PROMPT = "The quick brown fox jumps over the lazy dog. In 2025, AI"
-WARMUP_RUNS = 1
 BENCH_RUNS = 3
-
-_helper.override_model_params.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
 
 def reset_all():
     _lib.turbosparse_set_enabled(False)
     _lib.powerinfer_set_enabled(False)
     _lib.powerinfer_set_hot_budget(ctypes.c_float(0.1))
     _helper.override_model_params(1, 0, 0)
+    disable_all()
 
-def bench_config(name, setup_fn, gen_fn):
-    """Run a config with warmup + N bench runs, return median t/s."""
-    # Warmup
-    for _ in range(WARMUP_RUNS):
-        setup_fn()
-        try:
-            gen_fn()
-        except Exception as e:
-            print(f"  {name}: WARMUP ERROR: {e}")
-            return None
-    
+def bench(model_path, setup_fn, gen_fn, runs=BENCH_RUNS):
+    """Run setup+gen N times, return median t/s."""
     results = []
-    for i in range(BENCH_RUNS):
-        setup_fn()
+    for i in range(runs):
         try:
+            setup_fn()
             out = gen_fn()
             results.append(out.tokens_per_second)
         except Exception as e:
-            print(f"  {name}: RUN {i} ERROR: {e}")
-            return None
-    
+            print(f"    ERROR run {i}: {e}")
+            results.append(0)
+    if not results or all(r == 0 for r in results):
+        return None
     results.sort()
-    median = results[len(results)//2]
-    return median
+    return results[len(results)//2]
 
-def make_bench():
-    configs = []
+def run_model(model_name, model_path):
+    print(f"\n{'='*60}")
+    print(f"  {model_name} ({os.path.basename(model_path)})")
+    print(f"{'='*60}")
     
-    # 1. Baseline
-    def setup_base():
+    results = {}
+    baseline_tps = None
+    
+    # Config 1: Baseline
+    def setup():
         reset_all()
-        b = LlamaCppBackend()
-        b.load(MODEL, n_ctx=CTX, n_threads=THREADS)
-        setup_base.backend = b
-    def gen_base():
-        return setup_base.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
-    configs.append(("Baseline", setup_base, gen_base))
+        setup.b = LlamaCppBackend()
+        setup.b.load(model_path, n_ctx=CTX, n_threads=THREADS)
+    def gen():
+        return setup.b.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
+    tps = bench(model_path, setup, gen)
+    if tps:
+        baseline_tps = tps
+        results['Baseline'] = tps
+        print(f"  Baseline       : {tps:8.2f} t/s  (1.00×)")
     
-    # 2. TurboSparse
-    def setup_ts():
+    # Config 2: TurboSparse
+    def setup():
         reset_all()
         _lib.turbosparse_set_enabled(True)
         _lib.turbosparse_set_threshold(ctypes.c_float(0.05))
-        b = LlamaCppBackend()
-        b.load(MODEL, n_ctx=CTX, n_threads=THREADS)
-        setup_ts.backend = b
-    def gen_ts():
-        return setup_ts.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
-    configs.append(("TurboSparse", setup_ts, gen_ts))
+        setup.b = LlamaCppBackend()
+        setup.b.load(model_path, n_ctx=CTX, n_threads=THREADS)
+    tps = bench(model_path, setup, gen)
+    if tps and baseline_tps:
+        results['TurboSparse'] = tps
+        print(f"  TurboSparse    : {tps:8.2f} t/s  ({tps/baseline_tps:.2f}×)")
     
-    # 3. Speculative (n-gram)
-    def setup_spec():
+    # Config 3: Speculative
+    def setup():
         reset_all()
-        s = SpeculativeBackend(draft_n=4, draft_max=5)
-        s.load(MODEL, n_ctx=CTX, n_threads=THREADS)
-        setup_spec.backend = s
-    def gen_spec():
-        return setup_spec.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0, speculative=True)
-    configs.append(("Speculative", setup_spec, gen_spec))
+        setup.s = SpeculativeBackend(draft_n=4, draft_max=5)
+        setup.s.load(model_path, n_ctx=CTX, n_threads=THREADS)
+    def gen():
+        return setup.s.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0, speculative=True)
+    tps = bench(model_path, setup, gen)
+    if tps and baseline_tps:
+        results['Speculative'] = tps
+        print(f"  Speculative    : {tps:8.2f} t/s  ({tps/baseline_tps:.2f}×)")
     
-    # 4. PowerInfer
-    def setup_pi():
+    # Config 4: PowerInfer
+    def setup():
         reset_all()
         _lib.powerinfer_set_enabled(True)
         _lib.powerinfer_set_hot_budget(ctypes.c_float(0.15))
-        b = LlamaCppBackend()
-        b.load(MODEL, n_ctx=CTX, n_threads=THREADS)
-        setup_pi.backend = b
-    def gen_pi():
-        return setup_pi.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
-    configs.append(("PowerInfer", setup_pi, gen_pi))
+        setup.b = LlamaCppBackend()
+        setup.b.load(model_path, n_ctx=CTX, n_threads=THREADS)
+    def gen():
+        return setup.b.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
+    tps = bench(model_path, setup, gen)
+    if tps and baseline_tps:
+        results['PowerInfer'] = tps
+        print(f"  PowerInfer     : {tps:8.2f} t/s  ({tps/baseline_tps:.2f}×)")
     
-    # 5. PI+TS (optimized)
-    def setup_pits():
+    # Config 5: PI+TS
+    def setup():
         reset_all()
         _lib.powerinfer_set_enabled(True)
         _lib.powerinfer_set_hot_budget(ctypes.c_float(0.15))
         _lib.turbosparse_set_enabled(True)
         _lib.turbosparse_set_threshold(ctypes.c_float(0.05))
-        b = LlamaCppBackend()
-        b.load(MODEL, n_ctx=CTX, n_threads=THREADS)
-        setup_pits.backend = b
-    def gen_pits():
-        return setup_pits.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
-    configs.append(("PI+TS", setup_pits, gen_pits))
+        setup.b = LlamaCppBackend()
+        setup.b.load(model_path, n_ctx=CTX, n_threads=THREADS)
+    tps = bench(model_path, setup, gen)
+    if tps and baseline_tps:
+        results['PI+TS'] = tps
+        print(f"  PI+TS          : {tps:8.2f} t/s  ({tps/baseline_tps:.2f}×)")
     
-    # 6. Auto-Tune
-    def setup_at():
+    # Config 6: Auto-Tune
+    def setup():
         reset_all()
-        auto_tune(MODEL)
-        b = LlamaCppBackend()
-        b.load(MODEL, n_ctx=CTX, n_threads=THREADS, auto_tune=True)
-        setup_at.backend = b
-    def gen_at():
-        return setup_at.backend.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
-    configs.append(("Auto-Tune", setup_at, gen_at))
+        setup.b = LlamaCppBackend()
+        setup.b.load(model_path, n_ctx=CTX, n_threads=THREADS, auto_tune=True)
+    def gen():
+        return setup.b.generate(PROMPT, max_tokens=MAX_TOKENS, temperature=0.0)
+    tps = bench(model_path, setup, gen)
+    if tps and baseline_tps:
+        results['Auto-Tune'] = tps
+        print(f"  Auto-Tune      : {tps:8.2f} t/s  ({tps/baseline_tps:.2f}×)")
     
-    return configs
+    return results
 
-print(f"\\n{'='*60}")
-print(f"  {os.path.basename(MODEL)}")
-print(f"{'='*60}")
+# ── Main ──
+MODELS = [
+    ('TinyLlama-1.1B', 'models/tinyllama-1.1b-q4km.gguf'),
+    ('Llama-3.2-1B',   'models/llama-3.2-1b-q4ks.gguf'),
+    ('Phi-2-2.7B',     'models/phi-2-2.7b-q4km.gguf'),
+    ('Qwen2.5-MoE-2x1.5B', 'models/qwen25-moe-2x1.5b-q4km.gguf'),
+]
 
-configs = make_bench()
-baseline_tps = None
-results = {}
+print("VibeBlade Full 4-Model Benchmark")
+print(f"Config: {CTX} ctx, {THREADS} threads, {MAX_TOKENS} tokens, median of {BENCH_RUNS} runs")
+print(f"Prompt: \"{PROMPT[:50]}...\"")
 
-for name, setup_fn, gen_fn in configs:
-    t0 = time.time()
-    tps = bench_config(name, setup_fn, gen_fn)
-    elapsed = time.time() - t0
-    
-    if tps is not None:
-        if baseline_tps is None:
-            baseline_tps = tps
-            speedup = 1.0
-        else:
-            speedup = tps / baseline_tps
-        results[name] = {'tps': tps, 'speedup': speedup}
-        print(f"  {name:15s}: {tps:8.2f} t/s  ({speedup:.2f}×)  [{elapsed:.1f}s]")
-    else:
-        results[name] = {'tps': 0, 'speedup': 0}
-        print(f"  {name:15s}: FAILED  [{elapsed:.1f}s]")
-
-# Output JSON for aggregation
-print(f"\\n__JSON__{json.dumps(results)}")
-'''
-
-# Run each model in its own subprocess
 all_results = {}
+for name, path in MODELS:
+    full_path = os.path.join('/home/ubuntu/VibeBlade', path)
+    if os.path.exists(full_path):
+        all_results[name] = run_model(name, full_path)
+    else:
+        print(f"\n⚠️  {name}: not found at {path}, skipping")
 
-for model_name, model_path in MODELS.items():
-    full_path = os.path.join('/home/ubuntu/VibeBlade', model_path)
-    if not os.path.exists(full_path):
-        print(f"\n⚠️  {model_name}: model not found at {full_path}, skipping")
-        continue
-    
-    print(f"\n{'#'*60}")
-    print(f"# {model_name}")
-    print(f"{'#'*60}")
-    
-    result = subprocess.run(
-        [sys.executable, '-c', BENCH_SCRIPT, full_path],
-        capture_output=True, text=True, timeout=300,
-        cwd='/home/ubuntu/VibeBlade',
-        env={**os.environ, 'LD_LIBRARY_PATH': '/home/ubuntu/VibeBlade/cpp/build'}
-    )
-    
-    # Print stdout
-    for line in result.stdout.splitlines():
-        if line.startswith('__JSON__'):
-            json_str = line[8:]
-            all_results[model_name] = json.loads(json_str)
-        else:
-            print(line)
-    
-    if result.stderr:
-        for line in result.stderr.splitlines():
-            if 'warning' in line.lower() or 'error' in line.lower():
-                print(f"  ⚠ {line}")
-    
-    if result.returncode != 0:
-        print(f"  ❌ Process exited with code {result.returncode}")
-
-# Final summary table
-print(f"\n{'='*80}")
-print(f"  FULL BENCHMARK SUMMARY")
-print(f"{'='*80}")
-print(f"{'Model':<22} {'Base':>8} {'TS':>8} {'Spec':>8} {'PI':>8} {'PI+TS':>8} {'AutoTune':>8}")
-print(f"{'-'*80}")
-
-for model_name, data in all_results.items():
-    base = data.get('Baseline', {}).get('tps', 0)
-    ts = data.get('TurboSparse', {}).get('speedup', 0)
-    spec = data.get('Speculative', {}).get('speedup', 0)
-    pi = data.get('PowerInfer', {}).get('speedup', 0)
-    pits = data.get('PI+TS', {}).get('speedup', 0)
-    at = data.get('Auto-Tune', {}).get('speedup', 0)
-    print(f"{model_name:<22} {base:>7.1f}t/s {ts:>7.2f}× {spec:>7.2f}× {pi:>7.2f}× {pits:>7.2f}× {at:>7.2f}×")
-
-print(f"\nConfig: 256 ctx, 4 threads, 32 tokens, median of 3 runs")
-print(f"Hardware: Oracle A1 ARM64 (4 cores, NEON SIMD)")
+# Summary table
+print(f"\n{'='*75}")
+print(f"  SUMMARY (speedup vs baseline)")
+print(f"{'='*75}")
+print(f"{'Model':<22} {'Base t/s':>8} {'TS':>6} {'Spec':>6} {'PI':>6} {'PI+TS':>6} {'AutoT':>6}")
+print(f"{'-'*75}")
+for name, data in all_results.items():
+    base = data.get('Baseline', 0)
+    def sx(k): 
+        v = data.get(k, 0)
+        return f"{v/base:.2f}×" if base and v else "  -  "
+    print(f"{name:<22} {base:>7.1f}  {sx('TurboSparse'):>6} {sx('Speculative'):>6} {sx('PowerInfer'):>6} {sx('PI+TS'):>6} {sx('Auto-Tune'):>6}")
+print(f"\n{'-'*75}")
+print("Done.")
