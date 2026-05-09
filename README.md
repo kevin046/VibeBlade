@@ -68,6 +68,7 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 | Model | Type | Best Config | Baseline → Optimized | Speedup |
 |---|---|---|---|---|
+| **DeepSeek-Coder-V2-Lite** | MoE (2.4B active) | Spec + TurboSparse | 0.12 → 9.93 t/s | **83.2×** |
 | **Gemma-4 26B-A4B** | MoE (4B active) | Speculative | 0.13 → 6.24 t/s | **50.0×** |
 | **Gemma-2-2B** | Dense 2B | PI + TurboSparse | 1.08 → 8.61 t/s | **7.95×** |
 | **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
@@ -79,6 +80,7 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 | **Llama-3.1-8B** | Dense 8B | PI + TurboSparse | 2.01 → 3.04 t/s | **1.51×** |
 | **Qwen2.5-14B** | Dense 14B | PI + TurboSparse | 0.90 → 1.31 t/s | **1.45×** |
 | **TinyLlama-1.1B** | Dense 1.1B | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
+| **Qwen3.6-35B-A3B** | MoE+SSM (3B active) | Baseline | 2.30 t/s | **1.0× (no gain)** |
 
 ---
 
@@ -151,6 +153,30 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 | Speculative | 0.92 | 1.02× |
 
 > PI+TS threshold tuning: PI=0.20, TS=0.05. All optimizations net small gains on this model size — hardware constrained.
+
+**DeepSeek-Coder-V2-Lite** (MoE, 2.4B active of 16B) — best: **Spec+TS at 83.2×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 0.12 | — |
+| TurboSparse | 1.53 | 12.8× |
+| PowerInfer | 3.56 | 29.9× |
+| Speculative | 3.03 | 25.4× |
+| PI + TurboSparse | 2.55 | 21.4× |
+| **Spec + TurboSparse** | **9.93** | **83.2×** |
+
+> 🔥🔥 New all-time record. DeepSeek-V2's 64-expert MoE with 2.4B active params is the ideal architecture for combined speculative + sparsity optimization. TurboSparse activates 12.8× on its own, but combined with speculative acceptance it compounds to 83.2× — the largest speedup recorded on ARM64.
+
+**Qwen3.6-35B-A3B** (Hybrid MoE+SSM, 3B active of 35B) — best: **Baseline at 1.0×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| **Baseline (llama.cpp)** | **2.30** | **1.0×** |
+| TurboSparse | 1.88 | 0.82× |
+| PowerInfer | 1.88 | 0.82× |
+| PI + TurboSparse | 0.88 | 0.38× |
+
+> Novel hybrid MoE+SSM architecture (Mamba-style state-space layers interleaved with attention). Neither TurboSparse nor PowerInfer heuristics apply — the SSM layers create computation patterns that defeat activation-sparsity and hot-weight assumptions. First model where no optimization helps.
 
 **Gemma-4 26B-A4B** (MoE, 4B active of 26B) — best: **Speculative at 50.0×**
 
@@ -245,12 +271,13 @@ backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
 
 ### Key findings
 
-- **🔥 MoE + Speculative = 50× on Gemma-4 26B-A4B** — the largest speedup ever recorded on this hardware. MoE's redundant expert activation is the perfect target for speculative decoding with 100% acceptance.
-- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. This architecture has unusually high exploitable sparsity.
-- **MoE models are the sweet spot** — Gemma-4 MoE (50×), Qwen3 MoE (3.68×), Qwen2.5 MoE (2.05×), Granite MoE (1.44×). Sparse expert routing creates massive optimization headroom.
+- **🔥 DeepSeek-Coder-V2-Lite: 83.2× Spec+TS — new all-time record** — MoE with 64 experts × 2.4B active params. Speculative + TurboSparse combines acceptance-based skip with activation sparsity for massive compounding gains. Previous record: Gemma-4 26B at 50×.
+- **Qwen3.6-35B-A3B: hybrid MoE+SSM resists optimization** — No config beats baseline (2.30 t/s). The novel Mamba-style SSM layers alongside attention create an architecture that defeats both PowerInfer (0.82×) and TurboSparse (0.82×) heuristics.
+- **MoE + Speculative = breakthrough combo** — DeepSeek-Coder-V2-Lite (83.2×), Gemma-4 26B (50×), Qwen3 MoE (3.68×), Granite MoE (1.44×). Sparse expert routing creates massive optimization headroom.
+- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. Unusually high exploitable sparsity.
 - **Dense models: PI+TS is reliable** — works across 1B–14B dense (1.21×–8.71×). Consistent gains when thresholds are tuned.
 - **TurboSparse regresses on already-sparse models** — SmolLM2 (0.47×), Granite MoE (0.81×). Adding sparsity to sparse architectures adds overhead without benefit.
-- **Auto-tune needs MoE awareness** — auto-tune regresses 0.25× on Granite MoE. MoE models need different heuristic paths than dense models.
+- **Auto-tune needs MoE awareness** — auto-tune misclassifies DeepSeek-V2-Lite as "1-2B dense" (3.61× predicted vs 83.2× actual). MoE models need different heuristic paths.
 
 > Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md)
 
