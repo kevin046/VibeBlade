@@ -307,6 +307,8 @@ class SpeculativeBackend(LlamaCppBackend):
         mem = _lib.llama_get_memory(self._ctx)
         _lib.llama_memory_clear(mem, True)
         _lib.llama_synchronize(self._ctx)
+        # Also reset KV cache slot tracking to avoid stale positions
+        _lib.llama_perf_context_reset(self._ctx)
 
         self._set_sampler(temperature=temperature, top_k=top_k, top_p=top_p,
                           seed=seed, grammar=grammar)

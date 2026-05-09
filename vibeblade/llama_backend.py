@@ -167,6 +167,22 @@ class _LazyCDLL:
     lib.llama_turbosparse_get_threshold.argtypes = [ctypes.c_void_p]
     lib.llama_turbosparse_get_threshold.restype = ctypes.c_float
 
+    # --- KV cache / memory ---
+    lib.llama_get_memory.argtypes = [ctypes.c_void_p]
+    lib.llama_get_memory.restype = ctypes.c_void_p
+    lib.llama_memory_clear.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+    lib.llama_memory_clear.restype = None
+    lib.llama_perf_context_reset.argtypes = [ctypes.c_void_p]
+    lib.llama_perf_context_reset.restype = None
+
+    # --- State save/restore (for KV cache reset) ---
+    lib.llama_state_get_size.argtypes = [ctypes.c_void_p]
+    lib.llama_state_get_size.restype = ctypes.c_size_t
+    lib.llama_state_get_data.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    lib.llama_state_get_data.restype = ctypes.c_size_t
+    lib.llama_state_set_data.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    lib.llama_state_set_data.restype = ctypes.c_size_t
+
   def __getattr__(self, name):
     if _LazyCDLL._lib is None:
       lib = self._load(_LLAMA_CANDIDATES, "libllama.so")
@@ -724,6 +740,24 @@ class LlamaCppBackend:
 
     def turbosparse_get_threshold(self) -> float:
         return float(_lib.llama_turbosparse_get_threshold(self._ctx))
+
+    # ----------------------------------------------------------
+    # KV cache management
+    # ----------------------------------------------------------
+    def reset_kv_cache(self) -> None:
+        """Clear the KV cache for a fresh generation — required between
+        independent generation calls when reusing a context, or when
+        speculative decoding fails and needs to restart cleanly."""
+        if not self._ctx:
+            raise RuntimeError("No context loaded")
+        # Save and restore context state so the memory is cleared but
+        # model weights / KV cell allocations persist (avoids reload).
+        buf_size = _lib.llama_state_get_size(self._ctx)
+        buf = ctypes.create_string_buffer(buf_size)
+        written = _lib.llama_state_get_data(self._ctx, buf, buf_size)
+        if written > 0:
+            _lib.llama_state_set_data(self._ctx, buf, written)
+        _lib.llama_synchronize(self._ctx)
 
     # ----------------------------------------------------------
     # Cleanup
