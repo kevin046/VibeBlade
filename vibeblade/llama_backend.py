@@ -600,7 +600,7 @@ class LlamaCppBackend:
         t0 = _time.time()
 
         # Prefill
-        logits = self.prefill(prompt_tokens)  # runs decode on full prompt
+        self.prefill(prompt_tokens)  # runs decode on full prompt
         t_prefill = _time.time()
 
         output_tokens: list[int] = []

@@ -107,7 +107,7 @@ def _read_gguf_moe_info(path: str) -> tuple[float, int, int] | None:
             if version < 2:
                 return None
 
-            n_tensors = struct.unpack('<Q', f.read(8))[0]
+            _n_tensors = struct.unpack('<Q', f.read(8))[0]  # noqa: F841
             n_kv = struct.unpack('<Q', f.read(8))[0]
 
             # GGUF v3 uses uint64 string lengths; v2 uses uint32
