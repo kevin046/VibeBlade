@@ -69,9 +69,10 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 | Model | Arch | Best Config | Baseline → Optimized | Speedup |
 |---|---|---|---|---|
 | **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
+| **Llama-3.2-3B** | Dense 3B | Speculative | 3.18 → 4.80 t/s | **1.51×** |
+| **Phi-3.5-mini** | Dense 3.8B | PI + TurboSparse | 3.08 → 5.87 t/s | **1.91×** |
+| **Qwen2.5-3B** | Dense 3B | PI + TurboSparse | 3.84 → 4.52 t/s | **1.18×** |
 | **Qwen2.5-MoE** | MoE 2×1.5B | PowerInfer | 2.64 → 5.41 t/s | **2.05×** |
-| **Phi-2-2.7B** | Dense 2.7B | Spec + TurboSparse | 5.09 → 9.92 t/s | **1.95×** |
-| **TinyLlama-1.1B** | Dense 1.1B | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
 
 ---
 
@@ -88,36 +89,48 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 | Spec + TurboSparse | 20.91 | 7.77× |
 | **PI + TurboSparse** | **23.43** | **8.71×** |
 
+**Llama-3.2-3B** (Dense 3B) — best: **Speculative at 1.51×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 3.18 | — |
+| TurboSparse | 2.89 | 0.91× |
+| **Speculative** | **4.80** | **1.51×** |
+| Spec + TurboSparse | 3.86 | 1.21× |
+| PowerInfer | 2.80 | 0.88× |
+| PI + TurboSparse | 2.94 | 0.93× |
+
+**Phi-3.5-mini** (Dense 3.8B) — best: **PI+TS at 1.91×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 3.08 | — |
+| **PowerInfer** | **3.32** | **1.08×** |
+| **PI + TurboSparse** | **5.87** | **1.91×** |
+| TurboSparse | 2.97 | 0.97× |
+| Speculative | 2.92 | 0.95× |
+| Spec + TurboSparse | 2.68 | 0.87× |
+
+**Qwen2.5-3B** (Dense 3B) — best: **PI+TS at 1.18×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 3.84 | — |
+| **PI + TurboSparse** | **4.52** | **1.18×** |
+| Spec + TurboSparse | 3.81 | 0.99× |
+| Speculative | 1.89 | 0.49× |
+| TurboSparse | 1.54 | 0.40× |
+| PowerInfer | 1.60 | 0.42× |
+
 **Qwen2.5-MoE** (MoE 2×1.5B) — best: **PowerInfer at 2.05×**
 
 | Config | t/s | vs Baseline |
 |---|---:|---:|
 | Baseline (llama.cpp) | 2.64 | — |
-| TurboSparse | 2.88 | 1.09× |
 | **PowerInfer** | **5.41** | **2.05×** |
-| Speculative | 2.39 | 0.90× |
+| TurboSparse | 2.88 | 1.09× |
 | PI + TurboSparse | 4.13 | 1.57× |
-
-**Phi-2-2.7B** (Dense 2.7B) — best: **Spec+TS at 1.95×**
-
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 5.09 | — |
-| TurboSparse | 3.67 | 0.72× |
-| PowerInfer | 3.34 | 0.66× |
-| Speculative (100% accept) | 5.28 | 1.04× |
-| **Spec + TurboSparse** | **9.92** | **1.95×** |
-| PI + TurboSparse | 9.39 | 1.84× |
-
-**TinyLlama-1.1B** (Dense 1.1B) — best: **PI+TS at 1.21×**
-
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 26.16 | — |
-| TurboSparse | 26.01 | 0.99× |
-| **PowerInfer** | **31.47** | **1.20×** |
-| **PI + TurboSparse** | **31.53** | **1.21×** |
-| Speculative | 16.75 | 0.64× |
+| Speculative | 2.39 | 0.90× |
 
 ---
 
@@ -133,19 +146,22 @@ backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
 | Model | Baseline | Auto-Tune | Speedup |
 |---|---:|---:|---:|
 | Llama-3.2-1B | 5.09 t/s | 6.05 t/s | 1.19× |
-| TinyLlama-1.1B | 24.90 t/s | 28.32 t/s | 1.14× |
+| Llama-3.2-3B | 4.27 t/s | 4.16 t/s | 0.97× |
+| Phi-3.5-mini | 3.11 t/s | 2.39 t/s | 0.77× |
+| Qwen2.5-3B | 4.43 t/s | 3.58 t/s | 0.81× |
 | Qwen2.5-MoE | 3.64 t/s | 3.82 t/s | 1.05× |
 
 ---
 
 ### Key findings
 
-- **Llama-3.2-1B + PI+TS = 8.71×** — highest speedup recorded. PowerInfer row-skipping and TurboSparse sparsity compound on this architecture.
+- **Llama-3.2-1B + PI+TS = 8.71×** — highest speedup recorded on this hardware. PowerInfer row-skipping and TurboSparse sparsity compound on small dense models.
+- **PI+TS works on larger dense models too** — Phi-3.5-mini (3.8B) gets 1.91×, Qwen2.5-3B (3B) gets 1.18×.
+- **Speculative decoding favors mid-size dense models** — Llama-3.2-3B gets 1.51× from spec alone, but gains disappear on smaller (TinyLlama 0.64×) models.
 - **MoE + PowerInfer = 2.05×** — sparse expert activation aligns naturally with PowerInfer's hot/cold neuron classification.
-- **Spec+TS is architecture-dependent** — 0.17× regression on TinyLlama vs 7.77× gain on Llama-3.2. Not universally safe.
-- **Phi-2 speculative acceptance = 100%** — only model with full draft token acceptance.
+- **Auto-Tune is conservative** — safe gains on 1B/ MoE, but can regress on larger models where manual tuning beats the auto-select heuristic.
 
-> Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) · [4-model detailed analysis](./references/full-4model-benchmark-may2026.md)
+> Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) · [Detailed analysis](./references/benchmark-may2026-large-models.md)
 
 ---
 
