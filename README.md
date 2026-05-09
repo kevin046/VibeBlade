@@ -66,14 +66,19 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 ### 🏆 Best speedup by model
 
-| Model | Params | Best Config | Baseline → Optimized | Speedup |
+| Model | Type | Best Config | Baseline → Optimized | Speedup |
 |---|---|---|---|---|
-| **Llama-3.2-1B** | 1B dense | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
-| **Qwen2.5-MoE** | 2×1.5B MoE | PowerInfer | 2.64 → 5.41 t/s | **2.05×** |
-| **Phi-2-2.7B** | 2.7B dense | Spec + TurboSparse | 5.09 → 9.92 t/s | **1.95×** |
-| **TinyLlama-1.1B** | 1.1B dense | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
-| **Llama-3.1-8B** | 8B dense | PI + TurboSparse | 2.01 → 3.04 t/s | **1.51×** |
-| **Qwen2.5-14B** | 14B dense | PI + TurboSparse | 0.90 → 1.31 t/s | **1.45×** |
+| **Gemma-4 26B-A4B** | MoE (4B active) | Speculative | 0.13 → 6.24 t/s | **50.0×** |
+| **Gemma-2-2B** | Dense 2B | PI + TurboSparse | 1.08 → 8.61 t/s | **7.95×** |
+| **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
+| **Qwen3-30B-A3B** | MoE (3B active) | Speculative | 2.11 → 7.75 t/s | **3.68×** |
+| **Gemma-4-E4B** | Dense 4B | PI + TurboSparse | 2.44 → 5.40 t/s | **2.21×** |
+| **Qwen2.5-MoE** | MoE 2×1.5B | PowerInfer | 2.64 → 5.41 t/s | **2.05×** |
+| **Phi-2-2.7B** | Dense 2.7B | Spec + TurboSparse | 5.09 → 9.92 t/s | **1.95×** |
+| **Granite-3B-A800M** | MoE (800M active) | Speculative | 18.20 → 26.26 t/s | **1.44×** |
+| **Llama-3.1-8B** | Dense 8B | PI + TurboSparse | 2.01 → 3.04 t/s | **1.51×** |
+| **Qwen2.5-14B** | Dense 14B | PI + TurboSparse | 0.90 → 1.31 t/s | **1.45×** |
+| **TinyLlama-1.1B** | Dense 1.1B | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
 
 ---
 
@@ -147,6 +152,76 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 > PI+TS threshold tuning: PI=0.20, TS=0.05. All optimizations net small gains on this model size — hardware constrained.
 
+**Gemma-4 26B-A4B** (MoE, 4B active of 26B) — best: **Speculative at 50.0×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 0.13 | — |
+| TurboSparse | 3.16 | 25.3× |
+| **PowerInfer** | **4.35** | **34.9×** |
+| **Speculative** | **6.24** | **50.0×** |
+| Spec + TurboSparse | 4.35 | 34.9× |
+| PI + TurboSparse | 2.48 | 19.9× |
+
+> 🔥 MoE breakthrough. Baseline is extremely slow (0.13 t/s) due to full-expert FFN compute on 26B params. Speculative decoding with 100% acceptance skips redundant expert evaluations, achieving 50× speedup.
+
+**Gemma-2-2B** (Dense 2B) — best: **PI+TS at 7.95×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 1.08 | — |
+| TurboSparse | 6.98 | 6.45× |
+| Speculative (100% accept) | 7.94 | 7.33× |
+| PowerInfer | 7.53 | 6.95× |
+| **PI + TurboSparse** | **8.61** | **7.95×** |
+
+> Every optimization helps. Gemma-2 architecture has high activation sparsity — TurboSparse alone gives 6.45×.
+
+**Qwen3-30B-A3B** (MoE, 3B active of 30B) — best: **Speculative at 3.68×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 2.11 | — |
+| **TurboSparse** | **3.96** | **1.88×** |
+| **Speculative** | **7.75** | **3.68×** |
+| PowerInfer | 3.45 | 1.64× |
+| PI + TurboSparse | 3.30 | 1.57× |
+
+> Spec decoding dominates on large MoE. TurboSparse also effective (1.88×) — the sparse expert routing leaves many neurons cold.
+
+**Gemma-4-E4B** (Dense 4B) — best: **PI+TS at 2.21×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 2.44 | — |
+| TurboSparse | 4.37 | 1.79× |
+| PowerInfer | 2.57 | 1.05× |
+| **PI + TurboSparse** | **5.40** | **2.21×** |
+| Speculative (62% accept) | 2.65 | 1.09× |
+
+> TurboSparse shines on Gemma-4 (1.79× alone). PI amplifies the gain when combined. Speculative has partial decode failures.
+
+**Granite-3B-A800M** (MoE, 800M active of 3B) — best: **Speculative at 1.44×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 18.20 | — |
+| **Speculative** | **26.26** | **1.44×** |
+| PI + TurboSparse | 24.54 | 1.35× |
+| TurboSparse | 14.70 | 0.81× |
+| PowerInfer | 15.72 | 0.86× |
+
+> Baseline is already fast (800M active params). Speculative adds 44%. All other optimizations regress — model is too sparse for sparsity exploitation to help.
+
+**SmolLM2-1.7B** (Dense 1.7B) — baseline already fast, no optimization helps
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 14.55 | — |
+| Speculative | 14.60 | 1.00× |
+| PI + TurboSparse | 7.23 | 0.50× |
+| TurboSparse | 6.89 | 0.47× |
+
 ---
 
 ### Auto-Tune
@@ -170,12 +245,12 @@ backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
 
 ### Key findings
 
-- **Llama-3.2-1B + PI+TS = 8.71×** — highest speedup on this hardware. PowerInfer row-skipping and TurboSparse sparsity compound on small dense models.
-- **PI+TS scales to 8B** — Llama-3.1-8B gets 1.51× with manual threshold tuning (PI=0.10, TS=0.01). Auto-tune underperforms on larger models.
-- **MoE + PowerInfer = 2.05×** — sparse expert activation aligns naturally with PowerInfer's hot/cold neuron classification.
-- **Phi-2 speculative acceptance = 100%** — only model with full draft token acceptance, Spec+TS hits 1.95×.
-- **14B models are hardware-constrained** — only PI+TS offers meaningful gain (1.45×), all other optimizations regress.
-- **Auto-tune gap widens with model size** — safe at 1B, needs manual override at 8B+.
+- **🔥 MoE + Speculative = 50× on Gemma-4 26B-A4B** — the largest speedup ever recorded on this hardware. MoE's redundant expert activation is the perfect target for speculative decoding with 100% acceptance.
+- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. This architecture has unusually high exploitable sparsity.
+- **MoE models are the sweet spot** — Gemma-4 MoE (50×), Qwen3 MoE (3.68×), Qwen2.5 MoE (2.05×), Granite MoE (1.44×). Sparse expert routing creates massive optimization headroom.
+- **Dense models: PI+TS is reliable** — works across 1B–14B dense (1.21×–8.71×). Consistent gains when thresholds are tuned.
+- **TurboSparse regresses on already-sparse models** — SmolLM2 (0.47×), Granite MoE (0.81×). Adding sparsity to sparse architectures adds overhead without benefit.
+- **Auto-tune needs MoE awareness** — auto-tune regresses 0.25× on Granite MoE. MoE models need different heuristic paths than dense models.
 
 > Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md)
 
