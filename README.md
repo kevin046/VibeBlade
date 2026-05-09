@@ -60,38 +60,92 @@ python -m vibeblade wizard
 
 ## Benchmarks
 
-Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. [Full report →](./BENCHMARK_REPORT.md)
+ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Baseline = llama.cpp**
 
-### Full 4-model optimization sweep (May 2026)
+---
 
-6 optimization configs tested across dense and MoE architectures. 256 ctx, 4 threads, temp=0.0. **Baseline = llama.cpp** (no VibeBlade optimizations).
+### 🏆 Best speedup by model
 
-|| Model | Arch | Baseline | TurboSparse | PowerInfer | PI+TS | Best Config | **Best Speedup** |
-|---|---|---|---|---|---|---|---|
-|| **Llama-3.2-1B** | Dense 1B | 2.69 t/s | 3.12× | 1.48× | **8.71×** | PI+TS | **8.71×** |
-|| **Qwen2.5-MoE** | MoE 2×1.5B | 2.64 t/s | 1.09× | **2.05×** | 1.57× | PowerInfer | **2.05×** |
-|| **Phi-2-2.7B** | Dense 2.7B | 5.09 t/s | 0.72× | 0.66× | 1.84× | Spec+TS | **1.95×** |
-|| **TinyLlama-1.1B** | Dense 1.1B | 26.16 t/s | 0.99× | 1.20× | **1.21×** | PI+TS | **1.21×** |
+| Model | Arch | Best Config | Baseline → Optimized | Speedup |
+|---|---|---|---|---|
+| **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
+| **Qwen2.5-MoE** | MoE 2×1.5B | PowerInfer | 2.64 → 5.41 t/s | **2.05×** |
+| **Phi-2-2.7B** | Dense 2.7B | Spec + TurboSparse | 5.09 → 9.92 t/s | **1.95×** |
+| **TinyLlama-1.1B** | Dense 1.1B | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
 
-### Auto-Tune results
+---
 
-VibeBlade's auto-tuner automatically selects the best optimization config per model:
+### Optimization breakdown
 
-|| Model | Baseline | Auto-Tune | Speedup |
-|---|---|---|---|
-|| TinyLlama-1.1B | 24.90 t/s | 28.32 t/s | 1.14× |
-|| Llama-3.2-1B | 5.09 t/s | 6.05 t/s | 1.19× |
-|| Qwen2.5-MoE | 3.64 t/s | 3.82 t/s | 1.05× |
-|| Phi-2-2.7B | 6.09 t/s | 4.98 t/s | 0.82× |
+**Llama-3.2-1B** (Dense 1B) — best: **PI+TS at 8.71×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 2.69 | — |
+| TurboSparse | 8.40 | 3.12× |
+| PowerInfer | 3.99 | 1.48× |
+| Speculative | 3.04 | 1.13× |
+| Spec + TurboSparse | 20.91 | 7.77× |
+| **PI + TurboSparse** | **23.43** | **8.71×** |
+
+**Qwen2.5-MoE** (MoE 2×1.5B) — best: **PowerInfer at 2.05×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 2.64 | — |
+| TurboSparse | 2.88 | 1.09× |
+| **PowerInfer** | **5.41** | **2.05×** |
+| Speculative | 2.39 | 0.90× |
+| PI + TurboSparse | 4.13 | 1.57× |
+
+**Phi-2-2.7B** (Dense 2.7B) — best: **Spec+TS at 1.95×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 5.09 | — |
+| TurboSparse | 3.67 | 0.72× |
+| PowerInfer | 3.34 | 0.66× |
+| Speculative (100% accept) | 5.28 | 1.04× |
+| **Spec + TurboSparse** | **9.92** | **1.95×** |
+| PI + TurboSparse | 9.39 | 1.84× |
+
+**TinyLlama-1.1B** (Dense 1.1B) — best: **PI+TS at 1.21×**
+
+| Config | t/s | vs Baseline |
+|---|---:|---:|
+| Baseline (llama.cpp) | 26.16 | — |
+| TurboSparse | 26.01 | 0.99× |
+| **PowerInfer** | **31.47** | **1.20×** |
+| **PI + TurboSparse** | **31.53** | **1.21×** |
+| Speculative | 16.75 | 0.64× |
+
+---
+
+### Auto-Tune
+
+VibeBlade's auto-tuner selects the optimal config per model automatically:
+
+```python
+backend = LlamaCppBackend()
+backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
+```
+
+| Model | Baseline | Auto-Tune | Speedup |
+|---|---:|---:|---:|
+| Llama-3.2-1B | 5.09 t/s | 6.05 t/s | 1.19× |
+| TinyLlama-1.1B | 24.90 t/s | 28.32 t/s | 1.14× |
+| Qwen2.5-MoE | 3.64 t/s | 3.82 t/s | 1.05× |
+
+---
 
 ### Key findings
 
-- **Llama-3.2-1B + PI+TS = 8.71× speedup** — highest ever recorded on this hardware. PowerInfer's row-skipping combined with TurboSparse activation sparsity creates a compounding effect on this architecture.
-- **MoE + PowerInfer = 2.05×** — MoE's sparse expert activation aligns naturally with PowerInfer's cold/hot neuron classification. TurboSparse adds overhead on top.
-- **Spec+TS is architecture-dependent** — devastating on TinyLlama (0.17×), amazing on Llama-3.2 (7.77×). The interaction between speculative batch decode and TurboSparse sparsity is unpredictable.
-- **Phi-2 speculative acceptance = 100%** — the only model where n-gram draft tokens are fully accepted, confirming speculative decoding works when text patterns are repetitive.
+- **Llama-3.2-1B + PI+TS = 8.71×** — highest speedup recorded. PowerInfer row-skipping and TurboSparse sparsity compound on this architecture.
+- **MoE + PowerInfer = 2.05×** — sparse expert activation aligns naturally with PowerInfer's hot/cold neuron classification.
+- **Spec+TS is architecture-dependent** — 0.17× regression on TinyLlama vs 7.77× gain on Llama-3.2. Not universally safe.
+- **Phi-2 speculative acceptance = 100%** — only model with full draft token acceptance.
 
-> See [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) and [references/full-4model-benchmark-may2026.md](./references/full-4model-benchmark-may2026.md) for full methodology, raw data, and per-model analysis.
+> Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) · [4-model detailed analysis](./references/full-4model-benchmark-may2026.md)
 
 ---
 
