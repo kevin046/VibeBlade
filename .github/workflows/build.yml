@@ -22,8 +22,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest tests/ -v --tb=long
-        continue-on-error: true
+        run: pytest tests/ -v --tb=short
 
       - name: Test import
         run: python -c "from vibeblade import VibeBladeModel, UnifiedMemoryPool, KVCache; print('OK')"
