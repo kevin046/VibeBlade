@@ -12,13 +12,18 @@ from vibeblade.auto_tune import (
     GGUF_MAGIC,
 )
 
+# Skip tests that need real model files when models/ doesn't exist
+_HAS_MODELS = os.path.isdir("models") and os.path.exists("models/tinyllama-1.1b-q4km.gguf")
+
 
 class TestEstimateParams:
+    @pytest.mark.skipif(not _HAS_MODELS, reason="no model files in CI")
     def test_tinyllama_size(self):
         # TinyLlama Q4_K_M = 638MB → ~1.06B params (dense)
         est = estimate_params_from_file("models/tinyllama-1.1b-q4km.gguf")
         assert 0.8 < est < 1.5
 
+    @pytest.mark.skipif(not _HAS_MODELS, reason="no model files in CI")
     def test_phi2_size(self):
         # Phi-2 Q4_K_M = 1.8GB → ~3.0B params (dense)
         est = estimate_params_from_file("models/phi-2.Q4_K_M.gguf")
@@ -35,6 +40,7 @@ class TestEstimateParams:
         finally:
             os.unlink(path)
 
+    @pytest.mark.skipif(not _HAS_MODELS, reason="no model files in CI")
     def test_moe_model_active_params(self):
         # Qwen2.5-MoE: 2.34GB file, 2/2 experts → active ratio = 1.0
         # Estimated ~4.2B → lands in 2-5B bucket (PI=0.15, TS=0.05)
@@ -155,6 +161,7 @@ class TestGetProfile:
 
 
 class TestAutoTuneIntegration:
+    @pytest.mark.skipif(not _HAS_MODELS, reason="no model files in CI")
     def test_auto_tune_returns_profile(self):
         """Integration test: auto_tune returns valid profile for real model."""
         from vibeblade.auto_tune import auto_tune, disable_all
@@ -167,13 +174,14 @@ class TestAutoTuneIntegration:
         # Clean up
         disable_all()
 
+    @pytest.mark.skipif(not _HAS_MODELS, reason="no model files in CI")
     def test_auto_tune_moe_model(self):
         """Auto-tune on MoE model should detect MoE and select appropriate profile."""
         from vibeblade.auto_tune import auto_tune, disable_all
 
         profile = auto_tune("models/qwen25-moe-2x1.5b-q4km.gguf")
         assert isinstance(profile, OptimizationProfile)
-        # MoE with 2/2 experts → active params ≈ total ≈ 3.9B → 2-4B bucket
+        # MoE with 2/2 experts → active params ≈ total ≈ 3.9B → 2-5B bucket
         assert profile.pi_budget > 0
         assert profile.ts_threshold > 0
 

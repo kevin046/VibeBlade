@@ -294,12 +294,20 @@ class LlamaCppBackend:
     # Load
     # ----------------------------------------------------------
     def load(self, model_path: str, n_ctx: int = 2048, n_threads: int = 4,
-             n_threads_batch: int = None) -> None:
+             n_threads_batch: int = None, auto_tune: bool = False) -> None:
         if n_threads_batch is None:
             n_threads_batch = n_threads
         self._n_ctx = n_ctx
         self._n_threads = n_threads
         self._n_threads_batch = n_threads_batch
+
+        # Auto-tune PI+TS optimization flags before model load.
+        # Must be called BEFORE llama_model_load_from_file because
+        # the C library reads global optimization flags at load time.
+        self._auto_tune_profile = None
+        if auto_tune:
+            from vibeblade.auto_tune import auto_tune as _auto_tune
+            self._auto_tune_profile = _auto_tune(model_path)
 
         # Set params via C helper (avoids ctypes struct mismatch).
         # The helper stores structs in static buffers; we memmove the raw bytes

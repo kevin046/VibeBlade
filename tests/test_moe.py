@@ -5,9 +5,6 @@ All tests use numpy only, no GPU required.
 
 import numpy as np
 import pytest
-import sys
-
-sys.path.insert(0, "/home/ubuntu/vibeblade")
 
 from vibeblade.moe import (
     MoEConfig,
