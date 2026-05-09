@@ -61,6 +61,7 @@ python -m vibeblade wizard
 ## Benchmarks
 
 ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Baseline = llama.cpp**
+**Single-run numbers (marked ⚡) have high variance — validated 5-run averages (marked ✅) are more reliable.**
 
 ---
 
@@ -68,8 +69,8 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 | Model | Type | Best Config | Baseline → Optimized | Speedup |
 |---|---|---|---|---|
-| **DeepSeek-Coder-V2-Lite** | MoE (2.4B active) | Spec + TurboSparse | 0.12 → 9.93 t/s | **83.2×** |
-| **Gemma-4 26B-A4B** | MoE (4B active) | Speculative | 0.13 → 6.24 t/s | **50.0×** |
+| **DeepSeek-Coder-V2-Lite** ✅ | MoE (2.4B active) | PI=0.01 + 3 threads | 4.56 → 7.47 t/s | **1.64×** |
+| **Gemma-4 26B-A4B** ✅ | MoE (4B active) | PI=0.20 + 3 threads | 3.12 → 3.86 t/s | **1.24×** |
 | **Gemma-2-2B** | Dense 2B | PI + TurboSparse | 1.08 → 8.61 t/s | **7.95×** |
 | **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
 | **Qwen3-30B-A3B** | MoE (3B active) | Speculative | 2.11 → 7.75 t/s | **3.68×** |
@@ -154,18 +155,23 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 > PI+TS threshold tuning: PI=0.20, TS=0.05. All optimizations net small gains on this model size — hardware constrained.
 
-**DeepSeek-Coder-V2-Lite** (MoE, 2.4B active of 16B) — best: **Spec+TS at 83.2×**
+**DeepSeek-Coder-V2-Lite** (MoE, 2.4B active of 16B) ✅ — best: **PI=0.01 + 3 threads at 1.64×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 0.12 | — |
-| TurboSparse | 1.53 | 12.8× |
-| PowerInfer | 3.56 | 29.9× |
-| Speculative | 3.03 | 25.4× |
-| PI + TurboSparse | 2.55 | 21.4× |
-| **Spec + TurboSparse** | **9.93** | **83.2×** |
+*5-run validated (64 tokens, CV ≤ 7.2%)*
 
-> 🔥🔥 New all-time record. DeepSeek-V2's 64-expert MoE with 2.4B active params is the ideal architecture for combined speculative + sparsity optimization. TurboSparse activates 12.8× on its own, but combined with speculative acceptance it compounds to 83.2× — the largest speedup recorded on ARM64.
+| Config | Mean t/s | ± Std | CV | vs Baseline |
+|---|---:|---:|---:|---:|
+| Baseline (4thr, 256ctx) | 4.563 | 1.387 | 30.4% | — |
+| TS=0.08 (4thr) | 4.708 | 1.390 | 29.5% | 1.03× |
+| **PI=0.01 (3thr)** | **7.461** | **0.474** | **6.3%** | **1.64×** |
+| **PI=0.01 + TS=0.05 (3thr)** | **7.472** | **0.540** | **7.2%** | **1.64×** |
+
+> ✅ Validated with 5-run × 64-token sweep. PowerInfer at extremely low budget (0.01) with 3 threads gives the best result. 3 threads beats 4 due to less cache thrashing on ARM. Baseline has 30% CV — single-run numbers are unreliable. Previous 83.2× claim was an artifact of a baseline outlier on a 16-token run.
+
+*Parameter sweep results (32 tok, single run per config):*
+- TS threshold sweep: best at 0.08 (4.65 t/s)
+- PI budget sweep: best at 0.01 (10.94 t/s single-run, 7.46 t/s 5-run mean)
+- PI+TS grid: PI=0.01+TS=0.05 compound slightly above PI alone
 
 **Qwen3.6-35B-A3B** (Hybrid MoE+SSM, 3B active of 35B) — best: **Baseline at 1.0×**
 
@@ -178,18 +184,25 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 > Novel hybrid MoE+SSM architecture (Mamba-style state-space layers interleaved with attention). Neither TurboSparse nor PowerInfer heuristics apply — the SSM layers create computation patterns that defeat activation-sparsity and hot-weight assumptions. First model where no optimization helps.
 
-**Gemma-4 26B-A4B** (MoE, 4B active of 26B) — best: **Speculative at 50.0×**
+**Gemma-4 26B-A4B** (MoE, 4B active of 26B) ✅ — best: **PI=0.20 + 3 threads at 1.24×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 0.13 | — |
-| TurboSparse | 3.16 | 25.3× |
-| **PowerInfer** | **4.35** | **34.9×** |
-| **Speculative** | **6.24** | **50.0×** |
-| Spec + TurboSparse | 4.35 | 34.9× |
-| PI + TurboSparse | 2.48 | 19.9× |
+*5-run validated (64 tokens, CV ≤ 5.4%)*
 
-> 🔥 MoE breakthrough. Baseline is extremely slow (0.13 t/s) due to full-expert FFN compute on 26B params. Speculative decoding with 100% acceptance skips redundant expert evaluations, achieving 50× speedup.
+| Config | Mean t/s | ± Std | CV | vs Baseline |
+|---|---:|---:|---:|---:|
+| Baseline (4thr, 256ctx) | 3.118 | 0.029 | 0.9% | — |
+| TS=0.05 (4thr) | 2.554 | 0.315 | 12.3% | 0.82× |
+| Speculative (4thr) | 2.889 | 0.088 | 3.0% | 0.93× |
+| **PowerInfer=0.20 (3thr, 512ctx)** | **3.860** | **0.207** | **5.4%** | **1.24×** |
+
+> ✅ Validated with 5-run × 64-token sweep. Baseline is remarkably stable (0.9% CV). 3 threads outperforms 4 for this model due to cache behavior on ARM. PowerInfer with ctx=512 gives a consistent 1.24× gain. Previous 50× claim was an artifact of an extreme baseline outlier on a 16-token run.
+
+*Parameter sweep results (32 tok, single run per config):*
+- TS threshold sweep: best at 0.05 (3.73 t/s)
+- PI budget sweep: best at 0.20 (3.41 t/s)
+- PI+TS grid: PI=0.05+TS=0.20 (3.50 t/s)
+- Thread sweep: 3 threads optimal (4.28 t/s vs 1.51 at 4thr)
+- Context sweep: 512ctx best (3.31 t/s)
 
 **Gemma-2-2B** (Dense 2B) — best: **PI+TS at 7.95×**
 
@@ -271,13 +284,14 @@ backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
 
 ### Key findings
 
-- **🔥 DeepSeek-Coder-V2-Lite: 83.2× Spec+TS — new all-time record** — MoE with 64 experts × 2.4B active params. Speculative + TurboSparse combines acceptance-based skip with activation sparsity for massive compounding gains. Previous record: Gemma-4 26B at 50×.
-- **Qwen3.6-35B-A3B: hybrid MoE+SSM resists optimization** — No config beats baseline (2.30 t/s). The novel Mamba-style SSM layers alongside attention create an architecture that defeats both PowerInfer (0.82×) and TurboSparse (0.82×) heuristics.
-- **MoE + Speculative = breakthrough combo** — DeepSeek-Coder-V2-Lite (83.2×), Gemma-4 26B (50×), Qwen3 MoE (3.68×), Granite MoE (1.44×). Sparse expert routing creates massive optimization headroom.
-- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. Unusually high exploitable sparsity.
-- **Dense models: PI+TS is reliable** — works across 1B–14B dense (1.21×–8.71×). Consistent gains when thresholds are tuned.
-- **TurboSparse regresses on already-sparse models** — SmolLM2 (0.47×), Granite MoE (0.81×). Adding sparsity to sparse architectures adds overhead without benefit.
-- **Auto-tune needs MoE awareness** — auto-tune misclassifies DeepSeek-V2-Lite as "1-2B dense" (3.61× predicted vs 83.2× actual). MoE models need different heuristic paths.
+- **✅ Validated benchmarks reveal true speedups are 1.24×–1.64× for MoE models** — Previous single-run claims of 50× and 83.2× were artifacts of extreme baseline outliers on short 16-token runs. 5-run × 64-token validation with proper statistics shows real gains.
+- **3 threads beats 4 for large MoE on ARM** — Both DeepSeek-Coder-V2-Lite and Gemma-4 26B-A4B perform best at 3 threads. Less cache thrashing on NEON cores.
+- **PowerInfer budget tuning is critical** — DeepSeek-V2-Lite needs PI=0.01 (near-zero), Gemma-4 26B needs PI=0.20. Wrong budget can regress performance.
+- **Baseline variance is the real enemy** — DeepSeek baseline has 30% CV across 5 runs. Any single-run comparison is unreliable. Always use multi-run averages.
+- **Qwen3.6-35B-A3B: hybrid MoE+SSM resists all optimization** — No config beats baseline (2.30 t/s). Mamba-style SSM layers defeat both PowerInfer and TurboSparse heuristics.
+- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. Unusually high exploitable sparsity (⚡ single-run, needs validation).
+- **Dense models: PI+TS is reliable** — works across 1B–14B dense (1.21×–8.71×). Consistent gains when thresholds are tuned (⚡ single-run).
+- **Auto-tune needs MoE awareness** — auto-tune misclassifies DeepSeek-V2-Lite as "1-2B dense". MoE models need different heuristic paths.
 
 > Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md)
 
