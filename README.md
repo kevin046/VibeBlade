@@ -8,11 +8,11 @@
 
 **Prerequisites** — C++ build tools (required for the fast engine):
 
-| OS | Install |
+|| OS | Install |
 |---|---|
-| **Ubuntu/Debian** | `sudo apt install build-essential cmake` |
-| **macOS** | `xcode-select --install && brew install cmake` |
-| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/) |
+|| **Ubuntu/Debian** | `sudo apt install build-essential cmake` |
+|| **macOS** | `xcode-select --install && brew install cmake` |
+|| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/) |
 
 Python dependencies (`pip install -e .` handles these):
 - Python 3.10+
@@ -37,7 +37,7 @@ python -m vibeblade wizard
 [![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 791 passed](https://img.shields.io/badge/tests-791%20passed-brightgreen.svg)]()
+[![Tests: 794 passed](https://img.shields.io/badge/tests-794%20passed-brightgreen.svg)]()
 
 📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./BENCHMARK_REPORT.md) · 🔒 [Security](./WHITEPAPER.md#security)
 
@@ -45,14 +45,14 @@ python -m vibeblade wizard
 
 ## CLI commands
 
-| Command | What it does |
+|| Command | What it does |
 |---|---|
-| `python -m vibeblade wizard` | Guided setup — hardware detection, install, config, model download |
-| `python -m vibeblade chat --model model.gguf` | Interactive chat (C++ fast engine, auto-detected for .gguf) |
-| `python -m vibeblade chat --model model.gguf --backend numpy` | Force pure NumPy inference (slow, for debugging) |
-| `python -m vibeblade serve` | Start local inference API server (OpenAI-compatible) |
-| `python -m vibeblade bench` | Benchmark suite |
-| `python -m vibeblade bench --quick` | Quick benchmark (single prompt, ~30s) |
+|| `python -m vibeblade wizard` | Guided setup — hardware detection, install, config, model download |
+|| `python -m vibeblade chat --model model.gguf` | Interactive chat (C++ fast engine, auto-detected for .gguf) |
+|| `python -m vibeblade chat --model model.gguf --backend numpy` | Force pure NumPy inference (slow, for debugging) |
+|| `python -m vibeblade serve` | Start local inference API server (OpenAI-compatible) |
+|| `python -m vibeblade bench` | Benchmark suite |
+|| `python -m vibeblade bench --quick` | Quick benchmark (single prompt, ~30s) |
 
 > **Dashboard & Model Browser** are part of VibeBlade Pro (commercial license). Contact [kevin.lin@vibedrift.com](mailto:kevin.lin@vibedrift.com) for access.
 
@@ -60,40 +60,38 @@ python -m vibeblade wizard
 
 ## Benchmarks
 
-Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. 32 tokens generated, greedy decode (temp=0.0). **Baseline = llama.cpp** (no VibeBlade optimizations). [Full report →](./BENCHMARK_REPORT.md)
+Measured on ARM NEON (aarch64), 4 cores, 4 threads, Q4 quantization. [Full report →](./BENCHMARK_REPORT.md)
 
-### VibeBlade vs llama.cpp
+### Full 4-model optimization sweep (May 2026)
 
-| Model | Params | llama.cpp | VibeBlade | Speedup |
-|---|---|---|---|---|
-| **Llama-3.2-1B** | 1.0B | 0.83 t/s | **3.35 t/s** | **4.03×** |
-| **Qwen2.5-3B** | 3.0B | 0.34 t/s | **1.27 t/s** | **3.76×** |
-| **Qwen3.5-MoE-0.87B** | 0.87B MoE | 0.27 t/s | **0.89 t/s** | **3.36×** |
-| **Phi-3.5-mini** | 3.8B | 0.48 t/s | **1.46 t/s** | **3.04×** |
-| **Gemma-2-2B** | 2.0B | 0.44 t/s | **1.32 t/s** | **3.00×** |
-| Gemma-3-1B | 1.0B | 0.39 t/s | 0.79 t/s | 2.02× |
-| Qwen2.5-1.5B | 1.5B | 0.50 t/s | 0.55 t/s | 1.09× |
-| TinyLlama-1.1B | 1.1B | 0.61 t/s | 0.85 t/s | 1.41× |
-| Phi-3-mini-4k | 3.8B | 0.48 t/s | 0.50 t/s | 1.05× |
-| Qwen2.5-0.5B | 0.5B | 0.57 t/s | 0.68 t/s | 1.19× |
+6 optimization configs tested across dense and MoE architectures. 256 ctx, 4 threads, temp=0.0. **Baseline = llama.cpp** (no VibeBlade optimizations).
 
-### Optimization breakdown (top models)
+|| Model | Arch | Baseline | TurboSparse | PowerInfer | PI+TS | Best Config | **Best Speedup** |
+|---|---|---|---|---|---|---|---|
+|| **Llama-3.2-1B** | Dense 1B | 2.69 t/s | 3.12× | 1.48× | **8.71×** | PI+TS | **8.71×** |
+|| **Qwen2.5-MoE** | MoE 2×1.5B | 2.64 t/s | 1.09× | **2.05×** | 1.57× | PowerInfer | **2.05×** |
+|| **Phi-2-2.7B** | Dense 2.7B | 5.09 t/s | 0.72× | 0.66× | 1.84× | Spec+TS | **1.95×** |
+|| **TinyLlama-1.1B** | Dense 1.1B | 26.16 t/s | 0.99× | 1.20× | **1.21×** | PI+TS | **1.21×** |
 
-| Config | Llama-3.2-1B | Qwen2.5-3B | Gemma-2-2B | Qwen3.5-MoE |
-|---|---|---|---|---|
-| llama.cpp (baseline) | 0.83 t/s | 0.34 t/s | 0.44 t/s | 0.27 t/s |
-| + TurboSparse | 0.96 t/s (1.16×) | 0.34 t/s (1.01×) | 0.41 t/s (0.94×) | 0.30 t/s (1.12×) |
-| + PowerInfer | 0.82 t/s (0.98×) | 0.34 t/s (1.00×) | 0.44 t/s (1.00×) | 0.25 t/s (0.96×) |
-| + **Speculative** | **3.31 t/s (3.99×)** | **1.23 t/s (3.65×)** | **1.28 t/s (2.91×)** | **0.74 t/s (2.77×)** |
-| + **Spec+TurboSparse** | **3.35 t/s (4.03×)** | **1.27 t/s (3.76×)** | **1.32 t/s (3.00×)** | **0.89 t/s (3.36×)** |
+### Auto-Tune results
 
-**Key takeaways:**
-- **Spec+TurboSparse is the best config** across all models — 2–4× over llama.cpp when speculative acceptance is high
-- **Speculative decoding is the dominant optimization** — responsible for nearly all speedup
-- **TurboSparse adds +5–20% on top** of speculative, especially helpful for MoE models
-- **PowerInfer shows no benefit on ARM64** — overhead exceeds sparsity gains on this platform
+VibeBlade's auto-tuner automatically selects the best optimization config per model:
 
-> See [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) for full methodology, per-model tables, and raw data.
+|| Model | Baseline | Auto-Tune | Speedup |
+|---|---|---|---|
+|| TinyLlama-1.1B | 24.90 t/s | 28.32 t/s | 1.14× |
+|| Llama-3.2-1B | 5.09 t/s | 6.05 t/s | 1.19× |
+|| Qwen2.5-MoE | 3.64 t/s | 3.82 t/s | 1.05× |
+|| Phi-2-2.7B | 6.09 t/s | 4.98 t/s | 0.82× |
+
+### Key findings
+
+- **Llama-3.2-1B + PI+TS = 8.71× speedup** — highest ever recorded on this hardware. PowerInfer's row-skipping combined with TurboSparse activation sparsity creates a compounding effect on this architecture.
+- **MoE + PowerInfer = 2.05×** — MoE's sparse expert activation aligns naturally with PowerInfer's cold/hot neuron classification. TurboSparse adds overhead on top.
+- **Spec+TS is architecture-dependent** — devastating on TinyLlama (0.17×), amazing on Llama-3.2 (7.77×). The interaction between speculative batch decode and TurboSparse sparsity is unpredictable.
+- **Phi-2 speculative acceptance = 100%** — the only model where n-gram draft tokens are fully accepted, confirming speculative decoding works when text patterns are repetitive.
+
+> See [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md) and [references/full-4model-benchmark-may2026.md](./references/full-4model-benchmark-may2026.md) for full methodology, raw data, and per-model analysis.
 
 ---
 
@@ -154,14 +152,14 @@ python -m vibeblade chat --model model.gguf --backend numpy  # force NumPy
 
 SIMD optimizations are auto-detected at build time:
 
-| Hardware detected | SIMD backend |
+|| Hardware detected | SIMD backend |
 |---|---|
-| AVX-512 + FP16 (Sapphire Rapids+) | AVX-512-FP16 |
-| AVX-512 (Ice Lake+) | AVX-512-F (fp32 path) |
-| AVX2 (Haswell+) | AVX2+FMA |
-| NEON FP16 (ARM) | NEON-FP16 |
-| Apple Silicon (M1–M4) | NEON (Metal/CoreML extras) |
-| Anything else | Scalar fallback |
+|| AVX-512 + FP16 (Sapphire Rapids+) | AVX-512-FP16 |
+|| AVX-512 (Ice Lake+) | AVX-512-F (fp32 path) |
+|| AVX2 (Haswell+) | AVX2+FMA |
+|| NEON FP16 (ARM) | NEON-FP16 |
+|| Apple Silicon (M1–M4) | NEON (Metal/CoreML extras) |
+|| Anything else | Scalar fallback |
 
 ---
 
@@ -177,6 +175,17 @@ print(model.generate("Hello world", max_tokens=128))
 ```
 
 For GGUF files, VibeBlade auto-detects and uses the native C++ engine — the entire pipeline runs in a single C++ call with zero Python in the decode loop.
+
+### Auto-tuned inference
+
+```python
+from vibeblade.llama_backend import LlamaCppBackend
+
+backend = LlamaCppBackend()
+backend.load("model.gguf", n_ctx=256, n_threads=4, auto_tune=True)
+result = backend.generate("Explain quantum computing", max_tokens=128)
+print(f"{result.text} ({result.tokens_per_second:.1f} t/s)")
+```
 
 ### Direct C++ engine access
 
@@ -257,6 +266,10 @@ vibeblade/              # Python package
   ├── sarathi.py        # SARATHI chunked prefill scheduler
   ├── sagesched.py      # SageSched uncertainty-aware scheduler
   ├── moe.py            # MoE router + expert loader
+  ├── auto_tune.py      # Automatic optimization config selection
+  ├── llama_backend.py  # llama.cpp C++ backend with PI/TS/Spec support
+  ├── neural_draft.py   # Neural speculative drafting head
+  ├── speculative.py    # Speculative decoding pipeline
   ├── phase_scheduler.py # Phase-aware prefill/decode scheduling
   ├── tiered_memory.py  # VRAM/RAM/SSD 3-tier memory manager
   ├── eviction.py       # LRU-K / frequency / cost-benefit / bandit policies
@@ -281,14 +294,14 @@ cpp/                    # Native C++ inference engine
       ├── fast_model.cpp # Full inference: prefill, decode, generate
       └── bindings.cpp  # pybind11 Python bindings
 
-tests/                 # 791 tests covering all modules
+tests/                 # 794 tests covering all modules
 ```
 
 ---
 
 ## Powered by
 
-GGUF format · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllM) (PagedAttention) · [SARATHI](https://arxiv.org/abs/2403.07219) (chunked prefill) · [EAGLE](https://arxiv.org/abs/2401.15077) (speculative decoding) · [RotateKV](https://arxiv.org/abs/2408.00784) (KV quantization)
+GGUF format · [ONNX Runtime](https://github.com/microsoft/onnxruntime) (cross-platform acceleration) · [TensorRT](https://github.com/NVIDIA/TensorRT) (NVIDIA GPU) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) (sparse inference) · [vLLM](https://github.com/vllm-project/vllm) (PagedAttention) · [SARATHI](https://arxiv.org/abs/2403.07219) (chunked prefill) · [EAGLE](https://arxiv.org/abs/2401.15077) (speculative decoding) · [RotateKV](https://arxiv.org/abs/2408.00784) (KV quantization)
 
 ---
 
