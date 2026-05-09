@@ -228,13 +228,15 @@ class SpeculativeBackend(LlamaCppBackend):
 
     def __init__(self, draft_n: int = 4, draft_max: int = 8):
         super().__init__()
-        self._draft_head = NgramDraftHead(
-            hidden_dim=0, vocab_size=0, n=draft_n, max_draft_tokens=draft_max
-        )
+        self._draft_head = None  # set by set_draft_model or lazy to ngram
+        self._draft_model_path: Optional[str] = None
+        self._use_neural_draft = False
         self.spec_stats = SpeculativeStats()
         self._spec_enabled = False
         self._draft_max = draft_max
-
+        self._ngram_draft = NgramDraftHead(
+            hidden_dim=0, vocab_size=0, n=draft_n, max_draft_tokens=draft_max
+        )
         # Pre-allocate speculative batch (large enough for max draft)
         self._spec_batch: Optional[LLamaBatch] = None
 
@@ -244,6 +246,20 @@ class SpeculativeBackend(LlamaCppBackend):
                      n_threads_batch=n_threads_batch)
         # Pre-allocate batch for speculative verification (1 + draft_max tokens)
         self._spec_batch = _lib.llama_batch_init(1 + self._draft_max, 0, 1)
+
+    def set_draft_model(self, draft_model_path: str) -> None:
+        """Enable neural draft model for speculative decoding."""
+        from .neural_draft import NeuralDraftHead
+        self._draft_model_path = draft_model_path
+        self._use_neural_draft = True
+        self._neural_draft = NeuralDraftHead(draft_model_path, n_threads=4)
+        self._draft_head = self._neural_draft
+
+    def _get_draft_head(self):
+        """Lazy-init default n-gram draft head if no neural model set."""
+        if self._draft_head is None:
+            self._draft_head = self._ngram_draft
+        return self._draft_head
 
     def generate(
         self,
@@ -320,15 +336,12 @@ class SpeculativeBackend(LlamaCppBackend):
                 output_tokens.append(first_token)
                 break
 
-            # --- N-gram draft (for repetitive text) ---
-            # Only effective when token history contains repeated n-grams.
-            # On non-repetitive text, this returns empty and we fall through
-            # to standard single-token decode.
-            ngram_draft = self._draft_head.draft(history, self._draft_max)
+            # --- Draft from either n-gram or neural draft head ---
+            # Returns list of predicted next tokens (may be empty).
+            draft_tokens = self._get_draft_head().draft(history, self._draft_max)
 
-            if ngram_draft and first_token == ngram_draft[0]:
-                # N-gram first token matched — verify remaining drafts
-                remaining_draft = ngram_draft[1:]
+            if draft_tokens and first_token == draft_tokens[0]:
+                remaining_draft = draft_tokens[1:]
             else:
                 remaining_draft = []
 

@@ -532,6 +532,99 @@ class LlamaCppBackend:
             time_prefill=t_prefill - t0, time_decode=t_decode, time_total=t_end - t0,
         )
 
+    def generate_from_tokens(
+        self,
+        prompt_tokens: list[int],
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+        stop_tokens: Optional[list[int]] = None,
+    ) -> GenerateResult:
+        """Generate starting from a pre-tokenized prompt.
+
+        Similar to ``generate`` but accepts token IDs directly instead of
+        raw text. Used internally by NeuralDraftHead to run the draft model.
+
+        Parameters
+        ----------
+        prompt_tokens : list[int]
+            Token IDs (including BOS if desired).
+        max_tokens : int
+            Maximum new tokens to generate.
+        temperature : float
+            Sampling temperature (0 = greedy).
+        stop_tokens : list[int] or None
+            Optional early stopping token IDs.
+
+        Returns
+        -------
+        GenerateResult
+        """
+        if not self._loaded:
+            raise RuntimeError("Model not loaded")
+
+        n_prompt = len(prompt_tokens)
+        if n_prompt >= self._n_ctx:
+            raise RuntimeError(f"Prompt ({n_prompt}) exceeds context ({self._n_ctx})")
+
+        # Clear KV cache — required because draft model reuses the same context
+        # across multiple draft() calls. Without this, positions conflict.
+        mem = _lib.llama_get_memory(self._ctx)
+        _lib.llama_memory_clear(mem, True)
+        _lib.llama_synchronize(self._ctx)
+
+        self._set_sampler(temperature=temperature)
+        t0 = _time.time()
+
+        # Prefill
+        logits = self.prefill(prompt_tokens)  # runs decode on full prompt
+        t_prefill = _time.time()
+
+        output_tokens: list[int] = []
+        cur_pos = n_prompt
+
+        while len(output_tokens) < max_tokens:
+            if cur_pos >= self._n_ctx:
+                break
+
+            next_token = _lib.llama_sampler_sample(self._sampler, self._ctx, -1)
+            if next_token == self._eos:
+                break
+            if stop_tokens and next_token in stop_tokens:
+                output_tokens.append(next_token)
+                break
+
+            output_tokens.append(next_token)
+            cur_pos += 1
+
+            batch = self._make_batch([next_token], pos_offset=cur_pos - 1)
+            ret = _lib.llama_decode(self._ctx, batch)
+            if ret != 0:
+                print(f"[WARNING] llama_decode failed: {ret}")
+                break
+            _lib.llama_sampler_reset(self._sampler)
+
+        t_end = _time.time()
+        t_decode = t_end - t_prefill
+        text = self.detokenize_batch(output_tokens) if output_tokens else ""
+        tps = len(output_tokens) / t_decode if t_decode > 0 else 0.0
+
+        stop_reason = "max_tokens"
+        if output_tokens and output_tokens[-1] == self._eos:
+            stop_reason = "eos"
+        elif stop_tokens and output_tokens and output_tokens[-1] in stop_tokens:
+            stop_reason = "stop_token"
+
+        return GenerateResult(
+            text=text,
+            tokens=output_tokens,
+            tokens_per_second=tps,
+            prompt_tokens=n_prompt,
+            stop_reason=stop_reason,
+            time_prefill=t_prefill - t0,
+            time_decode=t_decode,
+            time_total=t_end - t0,
+        )
+
     # ----------------------------------------------------------
     # Stream
     # ----------------------------------------------------------
