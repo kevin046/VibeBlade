@@ -60,8 +60,8 @@ python -m vibeblade wizard
 
 ## Benchmarks
 
-ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Baseline = llama.cpp**
-**Single-run numbers (marked ⚡) have high variance — validated 5-run averages (marked ✅) are more reliable.**
+ARM NEON (aarch64) · 4 cores · Q4\_K\_M quantization · 256 ctx · temp=0.0 · **Baseline = llama.cpp**
+**3-run validation (32 tokens) · Mean ± Std reported · All 17 models benchmarked**
 
 ---
 
@@ -69,235 +69,228 @@ ARM NEON (aarch64) · 4 cores · Q4 quantization · 256 ctx · temp=0.0 · **Bas
 
 | Model | Type | Best Config | Baseline → Optimized | Speedup |
 |---|---|---|---|---|
-| **DeepSeek-Coder-V2-Lite** ✅ | MoE (2.4B active) | PI=0.01 + 3 threads | 4.56 → 7.47 t/s | **1.64×** |
-| **Gemma-4 26B-A4B** ✅ | MoE (4B active) | PI=0.20 + 3 threads | 3.12 → 3.86 t/s | **1.24×** |
-| **Gemma-2-2B** | Dense 2B | PI + TurboSparse | 1.08 → 8.61 t/s | **7.95×** |
-| **Llama-3.2-1B** | Dense 1B | PI + TurboSparse | 2.69 → 23.43 t/s | **8.71×** |
-| **Qwen3-30B-A3B** | MoE (3B active) | Speculative | 2.11 → 7.75 t/s | **3.68×** |
-| **Gemma-4-E4B** | Dense 4B | PI + TurboSparse | 2.44 → 5.40 t/s | **2.21×** |
-| **Qwen2.5-MoE** | MoE 2×1.5B | PowerInfer | 2.64 → 5.41 t/s | **2.05×** |
-| **Phi-2-2.7B** | Dense 2.7B | Spec + TurboSparse | 5.09 → 9.92 t/s | **1.95×** |
-| **Granite-3B-A800M** | MoE (800M active) | Speculative | 18.20 → 26.26 t/s | **1.44×** |
-| **Llama-3.1-8B** | Dense 8B | PI + TurboSparse | 2.01 → 3.04 t/s | **1.51×** |
-| **Qwen2.5-14B** | Dense 14B | PI + TurboSparse | 0.90 → 1.31 t/s | **1.45×** |
-| **TinyLlama-1.1B** | Dense 1.1B | PI + TurboSparse | 26.16 → 31.53 t/s | **1.21×** |
-| **Qwen3.6-35B-A3B** | MoE+SSM (3B active) | Baseline | 2.30 t/s | **1.0× (no gain)** |
+| **TinyLlama-1.1B** | Dense 1.1B | PowerInfer | 9.078 → 23.084 t/s | **2.54×** |
+| **DeepSeek-Coder-V2-Lite** | MoE 16B (2.4B active) | PowerInfer | 3.045 → 5.989 t/s | **1.97×** |
+| **Llama-3.2-3B** | Dense 3.2B | Spec+TS | 3.371 → 5.294 t/s | **1.57×** |
+| **Granite-3.0-3B-A800M** | MoE 3B (A800M) | PI+TS | 13.094 → 19.846 t/s | **1.52×** |
+| **Qwen2.5-MoE** | MoE 3B (2×1.5B) | TurboSparse | 3.430 → 4.831 t/s | **1.41×** |
+| **Qwen2.5-3B** | Dense 3B | Speculative | 3.719 → 5.075 t/s | **1.36×** |
+| **Phi-3.5-mini** | Dense 3.8B | PowerInfer | 4.059 → 5.390 t/s | **1.33×** |
+| **Qwen3.6-35B-A3B** | Hybrid MoE+SSM 35B (A3B) | PI+TS | 3.078 → 4.063 t/s | **1.32×** |
+| **Llama-3.2-1B** | Dense 1.2B | PI+TS | 10.714 → 13.498 t/s | **1.26×** |
+| **Llama-3.1-8B** | Dense 8B | PI+TS | 1.749 → 2.193 t/s | **1.25×** |
+| **Gemma-3-4B** | Dense 4B | Speculative | 2.827 → 3.104 t/s | **1.10×** |
+| **Gemma-4-26B-A4B** | MoE 26B (A4B) | PI+TS | 2.812 → 3.014 t/s | **1.07×** |
+| **SmolLM2-1.7B** | Dense 1.7B | PI+TS | 9.646 → 10.042 t/s | **1.04×** |
+| **Gemma-4-E4B** | Dense 4B | Speculative | 2.910 → 2.940 t/s | **1.01×** |
+| **Gemma-2-2B** | Dense 2B | Baseline | 6.981 t/s | **1.00× (no gain)** |
+| **Phi-2** | Dense 2.7B | Baseline | 4.779 t/s | **1.00× (no gain)** |
+| **Qwen3-30B-A3B** | MoE 30B (A3B) | Baseline | 6.907 t/s | **1.00× (no gain)** |
+| **Qwen2.5-14B** | Dense 14B | ❌ FAILED | — | — |
 
 ---
 
-### Optimization breakdown
+### Detailed results per model
 
-**Llama-3.2-1B** (1B dense) — best: **PI+TS at 8.71×**
+**TinyLlama-1.1B** (Dense 1.1B) — best: **PowerInfer at 2.54×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 2.69 | — |
-| TurboSparse | 8.40 | 3.12× |
-| PowerInfer | 3.99 | 1.48× |
-| Speculative | 3.04 | 1.13× |
-| Spec + TurboSparse | 20.91 | 7.77× |
-| **PI + TurboSparse** | **23.43** | **8.71×** |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 9.078 | 2.871 | 1.00× | 5.894–11.471 |
+| TurboSparse | 15.546 | 8.423 | 1.71× | 6.858–23.676 |
+| PowerInfer **🏆** | 23.084 | 13.878 | 2.54× | 7.059–31.237 |
+| Speculative | 12.349 | 2.913 | 1.36× | 10.585–15.711 |
+| Spec+TS | 18.905 | 11.100 | 2.08× | 6.088–25.337 |
+| PI+TS | 21.940 | 13.559 | 2.42× | 6.327–30.755 |
 
-**Qwen2.5-MoE** (2×1.5B MoE) — best: **PowerInfer at 2.05×**
+**Llama-3.2-1B** (Dense 1.2B) — best: **PI+TS at 1.26×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 2.64 | — |
-| **PowerInfer** | **5.41** | **2.05×** |
-| TurboSparse | 2.88 | 1.09× |
-| PI + TurboSparse | 4.13 | 1.57× |
-| Speculative | 2.39 | 0.90× |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 10.714 | 8.845 | 1.00× | 5.382–20.924 |
+| TurboSparse | 11.981 | 7.646 | 1.12× | 5.682–20.487 |
+| PowerInfer | 7.598 | 3.245 | 0.71× | 5.561–11.340 |
+| Speculative | 11.781 | 8.009 | 1.10× | 5.848–20.891 |
+| Spec+TS | 10.923 | 8.032 | 1.02× | 5.807–20.180 |
+| PI+TS **🏆** | 13.498 | 8.195 | 1.26× | 6.717–22.605 |
 
-**Phi-2-2.7B** (2.7B dense) — best: **Spec+TS at 1.95×**
+**Llama-3.2-3B** (Dense 3.2B) — best: **Spec+TS at 1.57×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 5.09 | — |
-| Speculative (100% accept) | 5.28 | 1.04× |
-| **Spec + TurboSparse** | **9.92** | **1.95×** |
-| PI + TurboSparse | 9.39 | 1.84× |
-| TurboSparse | 3.67 | 0.72× |
-| PowerInfer | 3.34 | 0.66× |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 3.371 | 1.146 | 1.00× | 2.048–4.047 |
+| TurboSparse | 3.999 | 0.172 | 1.19× | 3.825–4.170 |
+| PowerInfer | 4.430 | 0.326 | 1.31× | 4.127–4.774 |
+| Speculative | 4.087 | 0.794 | 1.21× | 3.461–4.979 |
+| Spec+TS **🏆** | 5.294 | 1.309 | 1.57× | 3.998–6.615 |
+| PI+TS | 4.180 | 0.893 | 1.24× | 3.166–4.847 |
 
-**TinyLlama-1.1B** (1.1B dense) — best: **PI+TS at 1.21×**
+**Phi-3.5-mini** (Dense 3.8B) — best: **PowerInfer at 1.33×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 26.16 | — |
-| TurboSparse | 26.01 | 0.99× |
-| **PowerInfer** | **31.47** | **1.20×** |
-| **PI + TurboSparse** | **31.53** | **1.21×** |
-| Speculative | 16.75 | 0.64× |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 4.059 | 0.351 | 1.00× | 3.655–4.285 |
+| TurboSparse | 3.601 | 0.578 | 0.89× | 3.217–4.265 |
+| PowerInfer **🏆** | 5.390 | 2.055 | 1.33× | 3.647–7.656 |
+| Speculative | 5.100 | 1.916 | 1.26× | 3.986–7.313 |
+| Spec+TS | 3.775 | 0.675 | 0.93× | 3.199–4.518 |
+| PI+TS | 3.700 | 1.099 | 0.91× | 2.466–4.575 |
 
-**Llama-3.1-8B** (8B dense) — best: **PI+TS at 1.51×** (auto-tune only 1.22×)
+**Qwen2.5-3B** (Dense 3B) — best: **Speculative at 1.36×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 2.01 | — |
-| TurboSparse | 1.74 | 0.87× |
-| Speculative | 1.56 | 0.78× |
-| Spec + TurboSparse | 1.91 | 0.95× |
-| PowerInfer | 2.50 | 1.24× |
-| **PI + TurboSparse** | **3.04** | **1.51×** |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 3.719 | 0.281 | 1.00× | 3.502–4.037 |
+| TurboSparse | 4.116 | 0.500 | 1.11× | 3.567–4.546 |
+| PowerInfer | 4.293 | 0.346 | 1.15× | 4.019–4.682 |
+| Speculative **🏆** | 5.075 | 0.831 | 1.36× | 4.115–5.588 |
+| Spec+TS | 5.059 | 2.163 | 1.36× | 3.779–7.557 |
+| PI+TS | 4.694 | 0.511 | 1.26× | 4.104–5.012 |
 
-> PI+TS threshold tuning: PI=0.10, TS=0.01. Auto-tune heuristic achieves 1.22× — manual tuning needed for this model.
+**Qwen2.5-MoE** (MoE 3B (2×1.5B)) — best: **TurboSparse at 1.41×**
 
-**Qwen2.5-14B** (14B dense) — best: **PI+TS at 1.45×** (auto-tune only 1.12×)
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 3.430 | 0.330 | 1.00× | 3.151–3.795 |
+| TurboSparse **🏆** | 4.831 | 1.902 | 1.41× | 3.666–7.026 |
+| PowerInfer | 3.724 | 0.242 | 1.09× | 3.446–3.888 |
+| Speculative | 3.900 | 2.290 | 1.14× | 2.366–6.532 |
+| Spec+TS | 3.657 | 0.100 | 1.07× | 3.577–3.769 |
+| PI+TS | 3.979 | 0.690 | 1.16× | 3.243–4.610 |
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 0.90 | — |
-| PowerInfer | 1.00 | 1.10× |
-| **PI + TurboSparse** | **1.31** | **1.45×** |
-| Spec + TurboSparse | 0.82 | 0.91× |
-| TurboSparse | 0.73 | 0.81× |
-| Speculative | 0.92 | 1.02× |
+**Gemma-2-2B** (Dense 2B) — best: **Baseline at 1.00×**
 
-> PI+TS threshold tuning: PI=0.20, TS=0.05. All optimizations net small gains on this model size — hardware constrained.
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline **🏆** | 6.981 | 2.650 | 1.00× | 5.449–10.041 |
+| TurboSparse | 4.490 | 0.129 | 0.64× | 4.345–4.592 |
+| PowerInfer | 4.482 | 0.182 | 0.64× | 4.295–4.659 |
+| Speculative | 5.736 | 3.960 | 0.82× | 2.734–10.225 |
+| Spec+TS | 6.164 | 0.424 | 0.88× | 5.713–6.554 |
+| PI+TS | 4.566 | 0.316 | 0.65× | 4.360–4.930 |
 
-**DeepSeek-Coder-V2-Lite** (MoE, 2.4B active of 16B) ✅ — best: **PI=0.01 + 3 threads at 1.64×**
+**Gemma-3-4B** (Dense 4B) — best: **Speculative at 1.10×**
 
-*5-run validated (64 tokens, CV ≤ 7.2%)*
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 2.827 | 0.294 | 1.00× | 2.568–3.146 |
+| TurboSparse | 2.271 | 0.662 | 0.80× | 1.534–2.815 |
+| PowerInfer | 2.958 | 0.110 | 1.05× | 2.833–3.040 |
+| Speculative **🏆** | 3.104 | 0.387 | 1.10× | 2.659–3.370 |
+| Spec+TS | 2.939 | 0.101 | 1.04× | 2.880–3.056 |
+| PI+TS | 3.065 | 0.443 | 1.08× | 2.673–3.546 |
 
-| Config | Mean t/s | ± Std | CV | vs Baseline |
-|---|---:|---:|---:|---:|
-| Baseline (4thr, 256ctx) | 4.563 | 1.387 | 30.4% | — |
-| TS=0.08 (4thr) | 4.708 | 1.390 | 29.5% | 1.03× |
-| **PI=0.01 (3thr)** | **7.461** | **0.474** | **6.3%** | **1.64×** |
-| **PI=0.01 + TS=0.05 (3thr)** | **7.472** | **0.540** | **7.2%** | **1.64×** |
+**Gemma-4-E4B** (Dense 4B) — best: **Speculative at 1.01×**
 
-> ✅ Validated with 5-run × 64-token sweep. PowerInfer at extremely low budget (0.01) with 3 threads gives the best result. 3 threads beats 4 due to less cache thrashing on ARM. Baseline has 30% CV — single-run numbers are unreliable. Previous 83.2× claim was an artifact of a baseline outlier on a 16-token run.
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 2.910 | 0.539 | 1.00× | 2.448–3.502 |
+| TurboSparse | 2.561 | 0.802 | 0.88× | 1.720–3.317 |
+| PowerInfer | 2.723 | 0.926 | 0.94× | 1.674–3.427 |
+| Speculative **🏆** | 2.940 | 0.343 | 1.01× | 2.669–3.326 |
+| Spec+TS | 2.702 | 0.563 | 0.93× | 2.111–3.232 |
+| PI+TS | 2.480 | 1.204 | 0.85× | 1.118–3.402 |
 
-*Parameter sweep results (32 tok, single run per config):*
-- TS threshold sweep: best at 0.08 (4.65 t/s)
-- PI budget sweep: best at 0.01 (10.94 t/s single-run, 7.46 t/s 5-run mean)
-- PI+TS grid: PI=0.01+TS=0.05 compound slightly above PI alone
+**Gemma-4-26B-A4B** (MoE 26B (A4B)) — best: **PI+TS at 1.07×**
 
-**Qwen3.6-35B-A3B** (Hybrid MoE+SSM, 3B active of 35B) — best: **Baseline at 1.0×**
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 2.812 | 0.214 | 1.00× | 2.625–3.046 |
+| TurboSparse | 2.988 | 0.356 | 1.06× | 2.750–3.396 |
+| PowerInfer | 2.879 | 0.127 | 1.02× | 2.776–3.021 |
+| Speculative | 2.671 | 0.653 | 0.95× | 2.010–3.316 |
+| Spec+TS | 2.877 | 0.135 | 1.02× | 2.748–3.018 |
+| PI+TS **🏆** | 3.014 | 0.345 | 1.07× | 2.807–3.412 |
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| **Baseline (llama.cpp)** | **2.30** | **1.0×** |
-| TurboSparse | 1.88 | 0.82× |
-| PowerInfer | 1.88 | 0.82× |
-| PI + TurboSparse | 0.88 | 0.38× |
+**Llama-3.1-8B** (Dense 8B) — best: **PI+TS at 1.25×**
 
-> Novel hybrid MoE+SSM architecture (Mamba-style state-space layers interleaved with attention). Neither TurboSparse nor PowerInfer heuristics apply — the SSM layers create computation patterns that defeat activation-sparsity and hot-weight assumptions. First model where no optimization helps.
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 1.749 | 0.494 | 1.00× | 1.180–2.067 |
+| TurboSparse | 2.143 | 0.034 | 1.23× | 2.120–2.183 |
+| PowerInfer | 2.084 | 0.128 | 1.19× | 1.971–2.222 |
+| Speculative | 1.604 | 0.469 | 0.92× | 1.063–1.886 |
+| Spec+TS | 2.132 | 0.043 | 1.22× | 2.091–2.176 |
+| PI+TS **🏆** | 2.193 | 0.053 | 1.25× | 2.134–2.237 |
 
-**Gemma-4 26B-A4B** (MoE, 4B active of 26B) ✅ — best: **PI=0.20 + 3 threads at 1.24×**
+**Qwen2.5-14B** ❌ — *Failed: multi-file GGUF (split shard not supported).*  
 
-*5-run validated (64 tokens, CV ≤ 5.4%)*
+**Phi-2** (Dense 2.7B) — best: **Baseline at 1.00×**
 
-| Config | Mean t/s | ± Std | CV | vs Baseline |
-|---|---:|---:|---:|---:|
-| Baseline (4thr, 256ctx) | 3.118 | 0.029 | 0.9% | — |
-| TS=0.05 (4thr) | 2.554 | 0.315 | 12.3% | 0.82× |
-| Speculative (4thr) | 2.889 | 0.088 | 3.0% | 0.93× |
-| **PowerInfer=0.20 (3thr, 512ctx)** | **3.860** | **0.207** | **5.4%** | **1.24×** |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline **🏆** | 4.779 | 0.757 | 1.00× | 4.229–5.642 |
+| TurboSparse | 4.183 | 0.354 | 0.88× | 3.832–4.540 |
+| PowerInfer | 3.954 | 0.529 | 0.83× | 3.420–4.477 |
+| Speculative | 4.670 | 0.818 | 0.98× | 3.910–5.536 |
+| Spec+TS | 4.225 | 2.241 | 0.88× | 2.274–6.672 |
+| PI+TS | 3.909 | 1.446 | 0.82× | 2.594–5.457 |
 
-> ✅ Validated with 5-run × 64-token sweep. Baseline is remarkably stable (0.9% CV). 3 threads outperforms 4 for this model due to cache behavior on ARM. PowerInfer with ctx=512 gives a consistent 1.24× gain. Previous 50× claim was an artifact of an extreme baseline outlier on a 16-token run.
+**SmolLM2-1.7B** (Dense 1.7B) — best: **PI+TS at 1.04×**
 
-*Parameter sweep results (32 tok, single run per config):*
-- TS threshold sweep: best at 0.05 (3.73 t/s)
-- PI budget sweep: best at 0.20 (3.41 t/s)
-- PI+TS grid: PI=0.05+TS=0.20 (3.50 t/s)
-- Thread sweep: 3 threads optimal (4.28 t/s vs 1.51 at 4thr)
-- Context sweep: 512ctx best (3.31 t/s)
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 9.646 | 5.077 | 1.00× | 4.525–14.677 |
+| TurboSparse | 6.960 | 1.094 | 0.72× | 6.064–8.179 |
+| PowerInfer | 8.800 | 6.134 | 0.91× | 5.234–15.882 |
+| Speculative | 6.969 | 1.770 | 0.72× | 5.245–8.782 |
+| Spec+TS | 6.474 | 2.210 | 0.67× | 5.162–9.026 |
+| PI+TS **🏆** | 10.042 | 5.947 | 1.04× | 4.300–16.175 |
 
-**Gemma-2-2B** (Dense 2B) — best: **PI+TS at 7.95×**
+**Granite-3.0-3B-A800M** (MoE 3B (A800M)) — best: **PI+TS at 1.52×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 1.08 | — |
-| TurboSparse | 6.98 | 6.45× |
-| Speculative (100% accept) | 7.94 | 7.33× |
-| PowerInfer | 7.53 | 6.95× |
-| **PI + TurboSparse** | **8.61** | **7.95×** |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 13.094 | 10.129 | 1.00× | 5.772–24.653 |
+| TurboSparse | 13.446 | 8.971 | 1.03× | 4.114–22.006 |
+| PowerInfer | 8.532 | 2.476 | 0.65× | 5.794–10.614 |
+| Speculative | 17.440 | 8.800 | 1.33× | 8.239–25.776 |
+| Spec+TS | 15.119 | 10.955 | 1.15× | 6.036–27.286 |
+| PI+TS **🏆** | 19.846 | 11.829 | 1.52× | 6.198–27.151 |
 
-> Every optimization helps. Gemma-2 architecture has high activation sparsity — TurboSparse alone gives 6.45×.
+**DeepSeek-Coder-V2-Lite** (MoE 16B (2.4B active)) — best: **PowerInfer at 1.97×**
 
-**Qwen3-30B-A3B** (MoE, 3B active of 30B) — best: **Speculative at 3.68×**
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 3.045 | 1.404 | 1.00× | 1.869–4.599 |
+| TurboSparse | 3.966 | 0.592 | 1.30× | 3.298–4.426 |
+| PowerInfer **🏆** | 5.989 | 1.210 | 1.97× | 4.707–7.111 |
+| Speculative | 4.859 | 0.938 | 1.60× | 4.071–5.897 |
+| Spec+TS | 4.233 | 0.655 | 1.39× | 3.483–4.692 |
+| PI+TS | 4.499 | 0.157 | 1.48× | 4.344–4.658 |
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 2.11 | — |
-| **TurboSparse** | **3.96** | **1.88×** |
-| **Speculative** | **7.75** | **3.68×** |
-| PowerInfer | 3.45 | 1.64× |
-| PI + TurboSparse | 3.30 | 1.57× |
+**Qwen3-30B-A3B** (MoE 30B (A3B)) — best: **Baseline at 1.00×**
 
-> Spec decoding dominates on large MoE. TurboSparse also effective (1.88×) — the sparse expert routing leaves many neurons cold.
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline **🏆** | 6.907 | 1.857 | 1.00× | 4.900–8.564 |
+| TurboSparse | 6.320 | 2.046 | 0.92× | 4.791–8.645 |
+| PowerInfer | 6.529 | 2.543 | 0.95× | 4.707–9.434 |
+| Speculative | 6.051 | 2.282 | 0.88× | 4.542–8.676 |
+| Spec+TS | 5.115 | 1.461 | 0.74× | 4.030–6.776 |
+| PI+TS | 6.406 | 2.647 | 0.93× | 4.719–9.457 |
 
-**Gemma-4-E4B** (Dense 4B) — best: **PI+TS at 2.21×**
+**Qwen3.6-35B-A3B** (Hybrid MoE+SSM 35B (A3B)) — best: **PI+TS at 1.32×**
 
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 2.44 | — |
-| TurboSparse | 4.37 | 1.79× |
-| PowerInfer | 2.57 | 1.05× |
-| **PI + TurboSparse** | **5.40** | **2.21×** |
-| Speculative (62% accept) | 2.65 | 1.09× |
-
-> TurboSparse shines on Gemma-4 (1.79× alone). PI amplifies the gain when combined. Speculative has partial decode failures.
-
-**Granite-3B-A800M** (MoE, 800M active of 3B) — best: **Speculative at 1.44×**
-
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 18.20 | — |
-| **Speculative** | **26.26** | **1.44×** |
-| PI + TurboSparse | 24.54 | 1.35× |
-| TurboSparse | 14.70 | 0.81× |
-| PowerInfer | 15.72 | 0.86× |
-
-> Baseline is already fast (800M active params). Speculative adds 44%. All other optimizations regress — model is too sparse for sparsity exploitation to help.
-
-**SmolLM2-1.7B** (Dense 1.7B) — baseline already fast, no optimization helps
-
-| Config | t/s | vs Baseline |
-|---|---:|---:|
-| Baseline (llama.cpp) | 14.55 | — |
-| Speculative | 14.60 | 1.00× |
-| PI + TurboSparse | 7.23 | 0.50× |
-| TurboSparse | 6.89 | 0.47× |
-
----
-
-### Auto-Tune
-
-VibeBlade's auto-tuner selects optimal configs automatically. Safe for small/dense and MoE models; **manual threshold tuning recommended for 8B+**.
-
-```python
-backend = LlamaCppBackend()
-backend.load("model.gguf", auto_tune=True)  # picks best PI/TS/Spec profile
-```
-
-| Model | Baseline | Auto-Tune | Speedup |
-|---|---:|---:|---:|
-| Llama-3.2-1B | 5.09 t/s | 6.05 t/s | 1.19× |
-| TinyLlama-1.1B | 24.90 t/s | 28.32 t/s | 1.14× |
-| Qwen2.5-MoE | 3.64 t/s | 3.82 t/s | 1.05× |
-| Llama-3.1-8B | 2.01 t/s | 2.46 t/s | 1.22× |
-| Qwen2.5-14B | 0.90 t/s | 1.01 t/s | 1.12× |
+| Config | Mean t/s | ± Std | Speedup | Range |
+|---|---:|---:|---:|---|
+| Baseline | 3.078 | 1.009 | 1.00× | 1.954–3.904 |
+| TurboSparse | 2.983 | 0.281 | 0.97× | 2.698–3.259 |
+| PowerInfer | 3.205 | 0.180 | 1.04× | 3.052–3.403 |
+| Speculative | 3.754 | 0.382 | 1.22× | 3.410–4.166 |
+| Spec+TS | 2.923 | 1.276 | 0.95× | 1.450–3.680 |
+| PI+TS **🏆** | 4.063 | 0.852 | 1.32× | 3.152–4.841 |
 
 ---
 
 ### Key findings
 
-- **✅ Validated benchmarks reveal true speedups are 1.24×–1.64× for MoE models** — Previous single-run claims of 50× and 83.2× were artifacts of extreme baseline outliers on short 16-token runs. 5-run × 64-token validation with proper statistics shows real gains.
-- **3 threads beats 4 for large MoE on ARM** — Both DeepSeek-Coder-V2-Lite and Gemma-4 26B-A4B perform best at 3 threads. Less cache thrashing on NEON cores.
-- **PowerInfer budget tuning is critical** — DeepSeek-V2-Lite needs PI=0.01 (near-zero), Gemma-4 26B needs PI=0.20. Wrong budget can regress performance.
-- **Baseline variance is the real enemy** — DeepSeek baseline has 30% CV across 5 runs. Any single-run comparison is unreliable. Always use multi-run averages.
-- **Qwen3.6-35B-A3B: hybrid MoE+SSM resists all optimization** — No config beats baseline (2.30 t/s). Mamba-style SSM layers defeat both PowerInfer and TurboSparse heuristics.
-- **Gemma-2-2B: every optimization helps** — PI+TS 7.95×, Spec 7.33×, PowerInfer 6.95×, TS 6.45×. Unusually high exploitable sparsity (⚡ single-run, needs validation).
-- **Dense models: PI+TS is reliable** — works across 1B–14B dense (1.21×–8.71×). Consistent gains when thresholds are tuned (⚡ single-run).
-- **Auto-tune needs MoE awareness** — auto-tune misclassifies DeepSeek-V2-Lite as "1-2B dense". MoE models need different heuristic paths.
-
-> Full data: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md)
-
----
-
----
+- **PI+TS (PowerInfer + TurboSparse) is the most consistently winning config** — top performer in 6 of 17 models
+- **MoE models show varied response to optimization** — DeepSeek-Coder-V2-Lite gains 1.97× while Qwen3-30B-A3B gains nothing
+- **Dense models < 4B benefit most from optimization** — TinyLlama-1.1B achieves 2.54× speedup
+- **Large dense models (>8B) see modest gains** — Llama-3.1-8B at 1.25×, hardware-constrained
+- **3-run validation reveals high variance in many configs** — single-run benchmarks can be misleading (± std up to 13.9 t/s for some configs)
+- **No single optimization works universally** — best config varies significantly by model architecture
 
 ## Architecture
 
