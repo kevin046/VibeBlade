@@ -78,6 +78,11 @@ from .sarathi import (
     SarathiRequest,
     SarathiScheduler,
 )
+from .dflash import (
+    DFlashDraftHead,
+    DFlashStats,
+    dflash_generate,
+)
 from .sagesched import (
     SageConfig,
     SageRequest,
@@ -158,6 +163,8 @@ __all__ = [
     "ContemplateTokenLayer", "ConFuDraftModel", "ConFuSpeculator", "ConFuStats",
     # SARATHI — chunked prefill scheduler (§4)
     "SarathiConfig", "SarathiRequest", "SarathiScheduler",
+    # DFlash — block diffusion parallel speculative decoding (arxiv:2602.06036)
+    "DFlashDraftHead", "DFlashStats", "dflash_generate",
     # SageSched — uncertainty-aware scheduler (§4)
     "SageConfig", "SageRequest", "SageSched", "entropy_from_logits", "entropy_from_probs",
     # TurboSparse — EMA neuron prediction + dReLU gating (§1)

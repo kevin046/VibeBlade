@@ -293,6 +293,74 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
             return out;
         }, py::arg("token_id"),
             R"doc(Decode: process one token, return full vocab logits.)doc")
+        .def("decode_with_hidden", [](VibeBladeFast& self,
+                                       int token_id,
+                                       const std::vector<int>& layer_indices)
+                                       -> std::tuple<py::array_t<float>, std::vector<py::array_t<float>>> {
+            auto result = self.decode_with_hidden(token_id, layer_indices);
+            py::array_t<float> logits_out(result[0].size());
+            std::memcpy(logits_out.mutable_data(), result[0].data(), result[0].size() * sizeof(float));
+            std::vector<py::array_t<float>> hidden_outs;
+            hidden_outs.reserve(result.size() - 1);
+            for (size_t i = 1; i < result.size(); i++) {
+                py::array_t<float> h_out(result[i].size());
+                std::memcpy(h_out.mutable_data(), result[i].data(), result[i].size() * sizeof(float));
+                hidden_outs.push_back(std::move(h_out));
+            }
+            return std::make_tuple(logits_out, hidden_outs);
+        }, py::arg("token_id"), py::arg("layer_indices"),
+            "Decode + extract hidden states at specified layer indices.\n"
+            "Returns (logits, [hidden_0, ...]). Each hidden vector has shape (hidden_dim,).")
+        .def("embedding", [](VibeBladeFast& self, int token_id) -> py::array_t<float> {
+            std::vector<float> emb = self.embedding(token_id);
+            return py::array_t<float>(
+                {emb.size()},  // shape
+                {sizeof(float)},  // strides
+                emb.data(),  // buffer
+                py::cast(&emb)  // keep alive
+            );
+        }, py::arg("token_id"),
+            "Return the token embedding vector (float32) for a token ID.")
+
+        .def("lm_head", [](VibeBladeFast& self, py::array_t<float> hidden) -> py::array_t<float> {
+            py::buffer_info info = hidden.request();
+            if (info.ndim != 1) {
+                throw std::runtime_error("lm_head expects 1D hidden vector");
+            }
+            size_t dim = (size_t)info.shape[0];
+            if (dim != self.config().hidden_dim) {
+                throw std::runtime_error("lm_head: hidden dim mismatch, expected " +
+                                         std::to_string(self.config().hidden_dim) +
+                                         ", got " + std::to_string(dim));
+            }
+            const float* ptr = static_cast<const float*>(info.ptr);
+            std::vector<float> hvec(ptr, ptr + dim);
+            std::vector<float> logits = self.lm_head(hvec);
+            return py::array_t<float>(logits.size(), logits.data());
+        }, py::arg("hidden"),
+            "Compute logits from a hidden-state vector (final norm + output layer).")
+
+
+
+        .def("prefill_with_hidden", [](VibeBladeFast& self,
+                                        const std::vector<int>& token_ids,
+                                        const std::vector<int>& layer_indices)
+                                        -> std::tuple<py::array_t<float>, std::vector<py::array_t<float>>> {
+            auto result = self.prefill_with_hidden(token_ids, layer_indices);
+            py::array_t<float> logits_out(result[0].size());
+            std::memcpy(logits_out.mutable_data(), result[0].data(), result[0].size() * sizeof(float));
+            std::vector<py::array_t<float>> hidden_outs;
+            hidden_outs.reserve(result.size() - 1);
+            for (size_t i = 1; i < result.size(); i++) {
+                py::array_t<float> h_out(result[i].size());
+                std::memcpy(h_out.mutable_data(), result[i].data(), result[i].size() * sizeof(float));
+                hidden_outs.push_back(std::move(h_out));
+            }
+            return std::make_tuple(logits_out, hidden_outs);
+        }, py::arg("token_ids"), py::arg("layer_indices"),
+            "Prefill + extract hidden states at specified layer indices.\n"
+            "Returns (logits, [hidden_layer_0, ...]). Each hidden is row-major (seq_len*hidden_dim).")
+
 .def("reset", &VibeBladeFast::reset,
  R"doc(Reset KV cache and position to start a new conversation.)doc")
 

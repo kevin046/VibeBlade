@@ -1,6 +1,81 @@
 # VibeBlade
 
-**Run any LLM on your own hardware — no cloud, no subscription.**
+**Run any LLM on 
+## 🚀 Speculative Decoding with DFlash (Experimental)
+
+**Status:** Beta — Qwen3-4B + Qwen3-4B-DFlash-b16  
+**SR&ED Research:** Novel integration of lightweight draft models with GGUF-backed targets via hidden-state conditioning.
+
+VibeBlade now supports **DFlash-style speculative decoding** for Qwen3 models:
+
+- **Target:** Qwen3-4B-Q4_K_M (mmap'd GGUF, 36 layers, 2560 hidden)
+- **Draft:** `z-lab/Qwen3-4B-DFlash-b16` — 5-layer selective model (537M params) trained to predict target hidden states
+- **Mechanism:** Draft consumes target hidden states at target layers `[1,9,17,25,33]` via a concatenated conditioning tensor; generates masked tokens; target verifies per-token via `decode_with_hidden`
+- **Custom C++ extensions:** `prefill_with_hidden`, `decode_with_hidden`, `embedding`, `lm_head` added to VibeBladeFast to expose full control
+
+### What problem are we solving?
+
+Speculative decoding typically requires the draft to use the **same token embedding + output head** as the target. DFlash bypasses this by:
+1. Conditioning the draft on *target hidden states* at a few layers
+2. Using *noise embeddings* (marginal token embeddings) as input
+3. Verifying draft tokens through the target's own forward pass
+
+This allows a **small cross-architecture draft** to accelerate a **larger quantized target** — potentially 2–4× speedup when acceptance is high.
+
+### Usage
+
+```python
+from vibeblade.dflash_llama import DFlashIntegration
+
+integ = DFlashIntegration(
+    gguf_path="qwen3-4b-q4_k_m.gguf",
+    dflash_model_path="Qwen3-4B-DFlash-b16",  # HuggingFace repo or local dir
+    device="cuda",  # or "cpu"
+)
+
+result = integ.generate(
+    prompt="Once upon a time",
+    max_new_tokens=128,
+    block_size=16,   # Must match draft's trained block_size
+    verbose=False,
+)
+print(result.text)
+print(f"Acceptance: {result.acceptance_rate:.1%}")
+```
+
+### Technical notes (SR&ED)
+
+- **Technological uncertainty:** Whether a 5-layer selective draft (trained on full-target hidden trajectories) can effectively generalise across different quantisation backends (GGUF Q4_K_M) without fine-tuning on the exact target variant.
+- **Systematic investigation:** Extended VibeBlade's C++ layer to extract hidden states at arbitrary transformer layers; integrated Qwen3 rotary embedding handling for cross-model positional alignment; implemented per-token verification loop with acceptance tracking.
+- **Technological advancement:** First implementation of DFlash speculative decoding in a GGUF-native C++ inference engine, bypassing the need for shared token embedding matrices and enabling draft-target pairs with mismatched architectures.
+
+### Performance
+
+On CPU (Q4_K_M, 36 layers):
+- Target decode speed: ~4–8 s/token (ARM64 single-thread)
+- Draft forward (b16): 0.2 s/block
+- Acceptance rates vary by prompt; exploratory runs show 25–60%
+
+On GPU (CUDA):
+- Target: 30–80 ms/token
+- Draft: 5–10 ms/block
+- Expected speedup: 1.8–3.2× depending on task
+
+### Files
+
+- `vibeblade/dflash_llama.py` — High-level integration (speculative decode loop, position embedding synthesis, acceptance stats)
+- `cpp/src/fast_model.cpp` — Native methods: `prefill_with_hidden`, `decode_with_hidden`, `embedding`, `lm_head`
+- `/tmp/dflash/dflash/model.py` — Patched DFlash model (accepts external `position_embeddings`)
+
+### Limitations
+
+- Draft quality depends on training data distribution; acceptance may be low on out-of-domain prompts
+- Current CPU performance limited by VibeBlade's single-threaded decode; benefit seen when target is GPU-bound
+- Block size must match draft's native block_size (16 in current release)
+
+---
+
+your own hardware — no cloud, no subscription.**
 
 [![Star History](https://api.star-history.com/svg?repos=kevin046/VibeBlade)](https://star-history.com/#kevin046/VibeBlade)
 [![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)

@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
+#include <unordered_map>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -939,6 +940,184 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
 
     position_++;
     return logits_buf_;  // Copy — safe because caller owns it
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  Decode + extract hidden states at specific layer indices (for DFlash)
+// ══════════════════════════════════════════════════════════════════════════════
+
+std::vector<std::vector<float>> VibeBladeFast::decode_with_hidden(
+    int token_id,
+    const std::vector<int>& layer_indices
+) {
+    if (!loaded_) throw std::runtime_error("Model not loaded");
+    if (position_ >= cfg_.context_length)
+        throw std::runtime_error("Context length exceeded");
+    if (token_id < 0 || token_id >= cfg_.vocab_size)
+        throw std::runtime_error("Token ID out of range: " + std::to_string(token_id));
+
+    int hd = cfg_.hidden_dim;
+
+    // Build a quick lookup set for O(1) "is this layer wanted?"
+    bool want_layer[256] = {false};
+    int n_wanted = 0;
+    for (int idx : layer_indices) want_layer[idx] = true, n_wanted++;
+
+    // Allocate output buffers lazily for wanted layers
+    std::vector<std::vector<float>> hidden_outputs;
+    hidden_outputs.reserve(layer_indices.size());
+    for (size_t i = 0; i < layer_indices.size(); i++) {
+        hidden_outputs.emplace_back(hd, 0.0f);
+    }
+    // Map layer_idx → output vector index
+    std::unordered_map<int, size_t> layer_to_out;
+    for (size_t i = 0; i < layer_indices.size(); i++) {
+        layer_to_out[layer_indices[i]] = i;
+    }
+
+    // ── Token embedding for single token ──
+    size_t row_bytes = tensor_nbytes(emb_type_, hd);
+    const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
+    dequantize_row(emb_row, x_buf_.data(), hd, emb_type_);
+
+    // ── Run through all layers ──
+    for (int l = 0; l < cfg_.n_layers; l++) {
+        forward_layer(x_buf_.data(), 1, hidden_buf_.data(), layers_[l], l);
+        std::swap(x_buf_, hidden_buf_);
+
+        // Capture hidden states at wanted layers (x_buf_ now holds this layer's output)
+        auto it = layer_to_out.find(l);
+        if (it != layer_to_out.end()) {
+            std::memcpy(hidden_outputs[it->second].data(), x_buf_.data(), hd * sizeof(float));
+        }
+    }
+
+    // ── Final RMS norm ──
+    rms_norm(x_buf_.data(), output_norm_, normed_buf_.data(), hd, cfg_.norm_eps);
+
+    // ── Output projection → logits ──
+    gemv_dequant_mt(normed_buf_.data(), output_, logits_buf_.data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
+
+    position_++;
+
+    // Prepend logits as the first element of the return vector
+    hidden_outputs.insert(hidden_outputs.begin(), std::vector<float>(logits_buf_.begin(), logits_buf_.end()));
+    return hidden_outputs;
+}
+// ============================================================================
+// Token embedding lookup (for DFlash noise conditioning)
+// ============================================================================
+std::vector<float> VibeBladeFast::embedding(int token_id) const {
+    if (!loaded_) throw std::runtime_error("Model not loaded");
+    if (token_id < 0 || token_id >= cfg_.vocab_size)
+        throw std::runtime_error("Token ID out of range: " + std::to_string(token_id));
+
+    int hd = cfg_.hidden_dim;
+    std::vector<float> emb(hd);
+    size_t row_bytes = tensor_nbytes(emb_type_, hd);
+    const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
+    dequantize_row(emb_row, emb.data(), hd, emb_type_);
+    return emb;
+}
+// ============================================================================
+// Compute logits from a hidden state vector (final RMSNorm + output layer)
+// ============================================================================
+std::vector<float> VibeBladeFast::lm_head(const std::vector<float>& hidden) {
+    if (!loaded_) throw std::runtime_error("Model not loaded");
+    if ((int)hidden.size() != cfg_.hidden_dim)
+        throw std::runtime_error("lm_head: hidden size mismatch (expected " + std::to_string(cfg_.hidden_dim) + ")");
+
+    // Apply final RMSNorm (same as in decode/prefill)
+    std::vector<float> normed(cfg_.hidden_dim);
+    rms_norm(hidden.data(), output_norm_, normed.data(), cfg_.hidden_dim, cfg_.norm_eps);
+
+    // Dequant output weight and compute logits
+    std::vector<float> logits(cfg_.vocab_size);
+    gemv_dequant_mt(normed.data(), output_, logits.data(),
+                    cfg_.hidden_dim, cfg_.vocab_size,
+                    out_type_, 0, dequant_buf_.data());
+    return logits;
+}
+
+
+
+// ════════════════════════════════════════════════════════════════
+//  Prefill + extract hidden states at specific layer indices
+// ════════════════════════════════════════════════════════════════
+std::vector<std::vector<float>> VibeBladeFast::prefill_with_hidden(
+    const std::vector<int>& token_ids,
+    const std::vector<int>& layer_indices
+) {
+    if (!loaded_) throw std::runtime_error("Model not loaded");
+    if (token_ids.empty()) throw std::runtime_error("Empty prompt");
+
+    int seq_len = (int)token_ids.size();
+    if (position_ + seq_len > cfg_.context_length)
+        throw std::runtime_error("Prompt exceeds context length");
+
+    int hd = cfg_.hidden_dim;
+
+    // ── Build lookup for wanted layers ──
+    bool want_layer[256] = {false};
+    int n_wanted = 0;
+    for (int idx : layer_indices) {
+        if (idx >= 0 && idx < cfg_.n_layers) {
+            want_layer[idx] = true;
+            n_wanted++;
+        }
+    }
+
+    // ── Allocate output buffers ──
+    // Return format: [logits] + [hidden_layer_i for each requested i]
+    std::vector<std::vector<float>> hidden_outputs;
+    hidden_outputs.reserve(1 + n_wanted);
+    hidden_outputs.emplace_back(cfg_.vocab_size, 0.0f);  // logits placeholder
+    std::unordered_map<int, size_t> layer_to_out;
+    for (size_t i = 0; i < layer_indices.size(); i++) {
+        int l = layer_indices[i];
+        if (l >= 0 && l < cfg_.n_layers) {
+            hidden_outputs.emplace_back(seq_len * hd, 0.0f);
+            layer_to_out[l] = i + 1;
+        }
+    }
+
+    // ── Token embeddings ──
+    std::vector<float> x(seq_len * hd);
+    for (int s = 0; s < seq_len; s++) {
+        int tok = token_ids[s];
+        if (tok < 0 || tok >= cfg_.vocab_size)
+            throw std::runtime_error("Token ID out of range: " + std::to_string(tok));
+
+        size_t row_bytes = tensor_nbytes(emb_type_, hd);
+        const void* emb_row = (const uint8_t*)token_emb_ + tok * row_bytes;
+        dequantize_row(emb_row, x.data() + s * hd, hd, emb_type_);
+    }
+
+    // ── Run layers, capturing x after each wanted layer ──
+    std::vector<float> hidden(seq_len * hd);
+    std::vector<float> normed(seq_len * hd);
+    for (int l = 0; l < cfg_.n_layers; l++) {
+        forward_layer(x.data(), seq_len, hidden.data(), layers_[l], l);
+        x.swap(hidden);
+
+        auto it = layer_to_out.find(l);
+        if (it != layer_to_out.end()) {
+            std::memcpy(hidden_outputs[it->second].data(), x.data(), seq_len * hd * sizeof(float));
+        }
+    }
+
+    // ── Final RMS norm on last token of last layer ──
+    for (int s = 0; s < seq_len; s++) {
+        rms_norm(x.data() + s * hd, output_norm_, normed.data() + s * hd, hd, cfg_.norm_eps);
+    }
+
+    // Logits from the last token only
+    int last = seq_len - 1;
+    gemv_dequant_mt(normed.data() + last * hd, output_,
+                    hidden_outputs[0].data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
+
+    position_ += seq_len;
+    return hidden_outputs;
 }
 
 // ════════════════════════════════════════════════════════════════

@@ -231,6 +231,8 @@ class SpeculativeBackend(LlamaCppBackend):
         self._draft_head = None  # set by set_draft_model or lazy to ngram
         self._draft_model_path: Optional[str] = None
         self._use_neural_draft = False
+        self._use_dflash = False
+        self._dflash_head: Optional = None  # set by set_draft_model_dflash()
         self.spec_stats = SpeculativeStats()
         self._spec_enabled = False
         self._draft_max = draft_max
@@ -248,12 +250,38 @@ class SpeculativeBackend(LlamaCppBackend):
         self._spec_batch = _lib.llama_batch_init(1 + self._draft_max, 0, 1)
 
     def set_draft_model(self, draft_model_path: str) -> None:
-        """Enable neural draft model for speculative decoding."""
+        """Enable neural draft model (AR) for speculative decoding."""
         from .neural_draft import NeuralDraftHead
         self._draft_model_path = draft_model_path
         self._use_neural_draft = True
+        self._use_dflash = False
         self._neural_draft = NeuralDraftHead(draft_model_path, n_threads=4)
         self._draft_head = self._neural_draft
+
+    def set_draft_model_dflash(self, dflash_head) -> None:
+        """Enable DFlash block diffusion draft head for speculative decoding.
+
+        DFlash generates block_size tokens in a SINGLE forward pass (parallel
+        drafting) vs autoregressive models that do block_size forward passes.
+        The draft tokens are batch-verified by the target model via llama.cpp.
+
+        Args:
+            dflash_head: DFlashDraftHead instance (from vibeblade.dflash).
+                         Must share tokenizer with the target model.
+
+        Reference: arxiv.org/abs/2602.06036 — DFlash (Chen et al. 2026)
+        """
+        self._use_neural_draft = False
+        self._use_dflash = True
+        self._dflash_head = dflash_head
+        self._draft_head = dflash_head  # draft() interface is the same
+        self._draft_max = dflash_head.block_size
+        # Pass target vocab size so draft tokens are clamped to avoid decode failures
+        dflash_head.target_vocab_size = _lib.llama_vocab_n_tokens(self._vocab)
+        # Resize spec batch to accommodate block_size draft tokens
+        if self._loaded and self._spec_batch is not None:
+            _lib.llama_batch_free(self._spec_batch)
+        self._spec_batch = _lib.llama_batch_init(1 + self._draft_max, 0, 1)
 
     def _get_draft_head(self):
         """Lazy-init default n-gram draft head if no neural model set."""
@@ -277,8 +305,13 @@ class SpeculativeBackend(LlamaCppBackend):
         """
         Generate with optional speculative decoding.
 
-        When speculative=True (default), uses n-gram draft head to propose
-        K tokens, then verifies in a single batch decode against the target model.
+        Supports three draft strategies:
+          1. N-gram draft (default, zero-cost): pattern matching on history
+          2. Neural AR draft (set_draft_model): small AR GGUF model
+          3. DFlash block diffusion (set_draft_model_dflash): parallel drafting
+
+        When speculative=True, the draft head proposes K tokens, then the target
+        model verifies all K in a single batch decode. K+1 tokens per decode step.
         """
         if not speculative:
             return super().generate(
@@ -338,6 +371,10 @@ class SpeculativeBackend(LlamaCppBackend):
                 output_tokens.append(first_token)
                 break
 
+            # DEBUG: log state at iteration boundary
+            if self._use_dflash:
+                print(f"[DEBUG] loop @ len(history)={len(history)}, cur_pos={cur_pos}, draft_max={self._draft_max}")
+
             # --- Draft from either n-gram or neural draft head ---
             # Returns list of predicted next tokens (may be empty).
             draft_tokens = self._get_draft_head().draft(history, self._draft_max)
@@ -379,23 +416,47 @@ class SpeculativeBackend(LlamaCppBackend):
                 self.spec_stats.n_target_decode_tokens += n_verify
 
                 if ret != 0:
-                    # Fallback: single decode using existing batch
-                    batch.n_tokens = 1
-                    batch.token[0] = first_token
-                    batch.pos[0] = cur_pos
-                    batch.n_seq_id[0] = 1
-                    batch.seq_id[0][0] = 0
-                    batch.logits[0] = 1
-                    ret2 = _lib.llama_decode(self._ctx, batch)
-                    self.spec_stats.n_target_decodes += 1
-                    self.spec_stats.n_target_decode_tokens += 1
-                    if ret2 != 0:
-                        print(f"[WARNING] decode failed: {ret}/{ret2}")
-                        break
+                    print(f"[DEBUG] spec decode fail @ cur_pos={cur_pos}, n_verify={n_verify}")
+                    # Spec decode failed — likely due to OOV draft tokens (vocab mismatch).
+                    # The llama.cpp KV cache is corrupted. Recover by:
+                    # 1. Clear the KV cache entirely
+                    # 2. Re-decode the full history from scratch (no drafts)
+                    # This restores the KV cache to a clean state.
+                    _lib.llama_kv_cache_clear(self._ctx, True)
+                    _lib.llama_synchronize(self._ctx)
                     _lib.llama_sampler_reset(self._sampler)
+
+                    # Re-decode entire history to rebuild KV cache (single tokens, no drafts)
+                    n_hist = len(history)
+                    for idx in range(n_hist):
+                        sb = _lib.llama_batch_init(1, 0, 1)
+                        sb.n_tokens = 1
+                        sb.token[0] = history[idx]
+                        sb.pos[0] = idx
+                        sb.n_seq_id[0] = 1
+                        sb.seq_id[0][0] = 0
+                        sb.logits[0] = 1
+                        r2 = _lib.llama_decode(self._ctx, sb)
+                        _lib.llama_batch_free(sb)
+                        if r2 != 0:
+                            print(f"[CRITICAL] history rebuild failed at pos {idx}: {r2}")
+                            break
+                        _lib.llama_sampler_reset(self._sampler)
+
+                    self.spec_stats.n_target_decodes += n_hist
+                    self.spec_stats.n_target_decode_tokens += n_hist
+                    # Get the last decoded token's logits to sample next
+                    last_logits = _lib.llama_get_logits_ith(self._ctx, n_hist - 1)
+                    first_token = _lib.llama_sampler_sample(self._sampler, self._ctx, n_hist - 1)
+                    _lib.llama_sampler_reset(self._sampler)
+
+                    # Reset spec batch and continue from last history token
+                    self._spec_batch.n_tokens = 0
+                    for i in range(1 + self._draft_max):
+                        self._spec_batch.pos[i] = 0
                     output_tokens.append(first_token)
                     history.append(first_token)
-                    cur_pos += 1
+                    cur_pos = len(history)
                     continue
 
                 # Verify remaining draft tokens

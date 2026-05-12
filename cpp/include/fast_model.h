@@ -127,6 +127,22 @@ std::vector<int> allowed_tokens_for_grammar() const;
 // ── Individual steps
     std::vector<float> prefill(const std::vector<int>& token_ids);
     std::vector<float> decode(int token_id);
+
+    // ── DFlash: decode hidden states at specific layers ──
+    std::vector<std::vector<float>> decode_with_hidden(
+        int token_id,
+        const std::vector<int>& layer_indices
+    );
+    // ── Token embedding lookup (for DFlash noise conditioning) ──
+    std::vector<float> embedding(int token_id) const;
+    // ── Compute logits from a hidden state (final RMSNorm + output layer) ──
+    std::vector<float> lm_head(const std::vector<float>& hidden);
+
+    // ── DFlash: prefill hidden states at specific layers ──
+    std::vector<std::vector<float>> prefill_with_hidden(
+        const std::vector<int>& token_ids,
+        const std::vector<int>& layer_indices
+    );
     void reset();
 
     // ── Tokenizer ──
