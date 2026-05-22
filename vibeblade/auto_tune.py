@@ -231,10 +231,13 @@ def auto_tune(model_path: str) -> OptimizationProfile:
 
 def disable_all():
     """Disable all optimizations — call before baseline benchmarks."""
-    from vibeblade.llama_backend import _lib
+    try:
+        from vibeblade.llama_backend import _lib
 
-    _lib.turbosparse_set_enabled.argtypes = [ctypes.c_bool]
-    _lib.powerinfer_set_enabled.argtypes = [ctypes.c_bool]
+        _lib.turbosparse_set_enabled.argtypes = [ctypes.c_bool]
+        _lib.powerinfer_set_enabled.argtypes = [ctypes.c_bool]
 
-    _lib.turbosparse_set_enabled(False)
-    _lib.powerinfer_set_enabled(False)
+        _lib.turbosparse_set_enabled(False)
+        _lib.powerinfer_set_enabled(False)
+    except FileNotFoundError:
+        pass  # libllama.so not available — nothing to disable
