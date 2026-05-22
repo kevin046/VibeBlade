@@ -10,20 +10,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(VIBEBLADE_CUDA "Enable CUDA GPU acceleration" OFF)
 
 if(VIBEBLADE_CUDA)
-    enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    message(STATUS "CUDA:            ON (Toolkit ${CUDAToolkit_VERSION})")
-    message(STATUS "CUDA Architectures: sm_121 (GB10/Blackwell)")
-    set_target_properties(_vibeblade_native PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
-        CUDA_ARCHITECTURES "121"
-    )
-    target_compile_definitions(_vibeblade_native PRIVATE VIBEBLADE_USE_CUDA)
-    target_link_libraries(_vibeblade_native PRIVATE CUDA::cublas CUDA::cudart)
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  message(STATUS "CUDA: ON (Toolkit ${CUDAToolkit_VERSION})")
+  message(STATUS "CUDA Architectures: sm_121 (GB10/Blackwell)")
+  set(VIBEBLADE_CUDA_SOURCES
+    src/cuda_backend.cpp
+    src/cuda_kernels.cu
+  )
 else()
-    message(STATUS "CUDA:            OFF (build with -DVIBEBLADE_CUDA=ON to enable)")
+  message(STATUS "CUDA: OFF (build with -DVIBEBLADE_CUDA=ON to enable)")
 endif()
 
 # ── OpenMP DISABLED ──
@@ -133,28 +129,39 @@ message(STATUS "NEON FP16:       ${HAS_NEON_FP16}")
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
 
 pybind11_add_module(_vibeblade_native
-    src/bindings.cpp
-    src/fp16_compat.cpp
-    src/gemm.cpp
-    src/norm.cpp
-    src/activation.cpp
-    src/quantize.cpp
-    src/attention.cpp
-    src/rope.cpp
-    src/softmax.cpp
-    src/gguf.cpp
-    src/dequant.cpp
-    src/tokenizer.cpp
-    src/sampler.cpp
-    src/fast_model.cpp
-    src/cuda_backend.cpp
-    src/cuda_kernels.cu
+ src/bindings.cpp
+ src/fp16_compat.cpp
+ src/gemm.cpp
+ src/norm.cpp
+ src/activation.cpp
+ src/quantize.cpp
+ src/attention.cpp
+ src/rope.cpp
+ src/softmax.cpp
+ src/gguf.cpp
+ src/dequant.cpp
+ src/tokenizer.cpp
+ src/sampler.cpp
+ src/fast_model.cpp
+ ${VIBEBLADE_CUDA_SOURCES}
 )
 
 target_include_directories(_vibeblade_native PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+ ${CMAKE_CURRENT_SOURCE_DIR}/include
+ ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+# ── CUDA target properties (after target creation) ──
+if(VIBEBLADE_CUDA)
+  set_target_properties(_vibeblade_native PROPERTIES
+    CUDA_STANDARD 17
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    CUDA_ARCHITECTURES "121"
+  )
+  target_compile_definitions(_vibeblade_native PRIVATE VIBEBLADE_USE_CUDA)
+  target_link_libraries(_vibeblade_native PRIVATE CUDA::cublas CUDA::cudart)
+endif()
 
 # Set optimization flags — cross-compiler (GCC/Clang/MSVC)
 if(MSVC)

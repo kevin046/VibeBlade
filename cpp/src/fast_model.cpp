@@ -20,10 +20,8 @@
 #include <omp.h>
 #endif
 
-#include "fast_model.h"
-#include "cuda_kernels.h"
-
 #ifdef VIBEBLADE_USE_CUDA
+#include "cuda_kernels.h"
 #include "cuda_backend.h"
 #endif
 
@@ -94,7 +92,12 @@ static void softmax(float* x, int n) {
 // ════════════════════════════════════════════════════════════════
 
 VibeBladeFast::VibeBladeFast() = default;
-VibeBladeFast::~VibeBladeFast() = default;
+VibeBladeFast::~VibeBladeFast() {
+#ifdef VIBEBLADE_USE_CUDA
+    delete cuda_backend_;
+    cuda_backend_ = nullptr;
+#endif
+}
 
 // ════════════════════════════════════════════════════════════════
 //  Load GGUF model
