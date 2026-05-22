@@ -446,7 +446,7 @@ class SpeculativeBackend(LlamaCppBackend):
                     self.spec_stats.n_target_decodes += n_hist
                     self.spec_stats.n_target_decode_tokens += n_hist
                     # Get the last decoded token's logits to sample next
-                    last_logits = _lib.llama_get_logits_ith(self._ctx, n_hist - 1)
+                    _lib.llama_get_logits_ith(self._ctx, n_hist - 1)
                     first_token = _lib.llama_sampler_sample(self._sampler, self._ctx, n_hist - 1)
                     _lib.llama_sampler_reset(self._sampler)
 

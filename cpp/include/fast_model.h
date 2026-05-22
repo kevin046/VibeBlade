@@ -213,12 +213,10 @@ private:
     cuda::CudaBackend* cuda_backend_ = nullptr;
 #endif
 
-    int position_ = 0;
-    bool loaded_ = false;
+ int position_ = 0;
+ bool loaded_ = false;
 
-    ~VibeBladeFast();
-
-    static constexpr int MAX_LAYERS = 256;
+ static constexpr int MAX_LAYERS = 256;
     static constexpr int MAX_SEQ = 8192;
 };
 

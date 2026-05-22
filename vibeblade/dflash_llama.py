@@ -20,7 +20,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 import torch
@@ -34,7 +33,6 @@ sys.path.insert(0, "/home/ubuntu/VibeBlade")  # for vibeblade module
 from vibeblade._vibeblade_native import VibeBladeFast
 
 # ── DFlash model ───────────────────────────────────────────────────────────────
-import torch
 from dflash.model import DFlashDraftModel
 from transformers import AutoTokenizer
 
@@ -219,7 +217,7 @@ class DFlashIntegration:
             stats["blocks"] += 1
 
             # Current target position equals number of tokens already consumed (prompt + generated)
-            start_pos = len(tokens)   # matches target position after prefill + decodes
+            # start_pos = len(tokens)  # matches target position after prefill + decodes
 
             # ── Build conditioning tensor from recent context hidden states ──────
             # For first iteration this is the full prompt hidden.
@@ -273,7 +271,6 @@ class DFlashIntegration:
             accepted_this_block = []      # tokens appended this block
             new_hiddens          = []      # per-token concatenated hidden (each (concat,))
             accepted_draft_count = 0
-            rejected             = False
 
             for i, dt in enumerate(draft_tokens):
                 greedy_next = int(np.argmax(prev_logits))
@@ -289,7 +286,6 @@ class DFlashIntegration:
                     hidden_concat = np.concatenate([h for h in hidden_layers_corr], axis=0)
                     new_hiddens.append(hidden_concat)
                     prev_logits = logits_next
-                    rejected = True
                     stats["n_rejected"] += 1
                     if verbose:
                         print(f"  [Reject at pos {i}] draft={dt} accepted={correction}", flush=True)
@@ -376,7 +372,7 @@ if __name__ == "__main__":
         verbose=args.verbose,
     )
 
-    print(f"\n=== DFlash Result ===")
+    print("\n=== DFlash Result ===")
     print(f"Text: {result.text}")
     print(f"Tokens: {len(result.token_ids)}")
     print(f"Speed: {result.tokens_per_second:.1f} tok/s")
