@@ -12,6 +12,10 @@
 #include <memory>
 #include <functional>
 
+#ifdef VIBEBLADE_USE_CUDA
+namespace cuda { class CudaBackend; }
+#endif
+
 namespace vibeblade {
 
 struct FastConfig {
@@ -208,9 +212,9 @@ private:
     Tokenizer tokenizer_;
     Sampler sampler_;
 
-    // ── Backend Selection ──
+// ── Backend Selection ──
 #ifdef VIBEBLADE_USE_CUDA
-    cuda::CudaBackend* cuda_backend_ = nullptr;
+ cuda::CudaBackend* cuda_backend_ = nullptr;
 #endif
 
  int position_ = 0;

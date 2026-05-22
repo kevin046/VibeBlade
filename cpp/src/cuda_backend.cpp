@@ -3,7 +3,19 @@
 
 #include "cuda_backend.h"
 #include "cuda_kernels.h"
-#include "fast_model.h"
+#include "fast_model.h"  // Full definitions for LayerWeights, FastConfig
+
+#ifdef VIBEBLADE_USE_CUDA
+#include <cuda_runtime_api.h>
+#define CUDA_CHECK(call) do { \
+ cudaError_t err = (call); \
+ if (err != cudaSuccess) { \
+ fprintf(stderr, "[CUDA ERROR] %s:%d: %s\n", \
+ __FILE__, __LINE__, cudaGetErrorString(err)); \
+ throw std::runtime_error(cudaGetErrorString(err)); \
+ } \
+} while(0)
+#endif
 #include <cstring>
 #include <stdexcept>
 #include <cstdio>
@@ -24,14 +36,15 @@ void CudaBackend::init(const FastConfig& cfg) {
         throw std::runtime_error("CUDA is not available on this system");
     }
 
-    hidden_dim_ = cfg.hidden_dim;
-    vocab_size_ = cfg.vocab_size;
-    n_layers_ = cfg.n_layers;
-    n_heads_ = cfg.n_heads;
-    n_kv_heads_ = cfg.n_kv_heads;
-    head_dim_ = cfg.head_dim;
-    intermediate_dim_ = cfg.intermediate_dim;
-    context_length_ = cfg.context_length;
+ hidden_dim_ = cfg.hidden_dim;
+ vocab_size_ = cfg.vocab_size;
+ n_layers_ = cfg.n_layers;
+ n_heads_ = cfg.n_heads;
+ n_kv_heads_ = cfg.n_kv_heads;
+ head_dim_ = cfg.head_dim;
+ intermediate_dim_ = cfg.intermediate_dim;
+ context_length_ = cfg.context_length;
+ n_experts_ = cfg.n_experts;
 
     // Allocate working buffers
     d_x_buf_.alloc(hidden_dim_ * sizeof(float));
@@ -133,10 +146,10 @@ void CudaBackend::upload_weights(
             lw_gpu.down.upload(lw.ffn_down, down_bytes, stream_.stream);
         }
 
-        // MoE weights
-        if (lw.has_moe) {
-            int n_exp = cfg.n_experts;
-            int exp_inter = lw.expert_intermediate_dim > 0 ? lw.expert_intermediate_dim : intermediate_dim_;
+ // MoE weights
+ if (lw.has_moe) {
+ int n_exp = n_experts_;
+ int exp_inter = lw.expert_intermediate_dim > 0 ? lw.expert_intermediate_dim : intermediate_dim_;
 
             // Router input
             if (lw.ffn_gate_inp) {
@@ -145,17 +158,17 @@ void CudaBackend::upload_weights(
                 lw_gpu.gate_inp.upload(lw.ffn_gate_inp, gate_inp_bytes, stream_.stream);
             }
 
-            // Experts (consolidated tensors)
-            if (lw.ffn_gate_exps) {
-                size_t gate_exps_bytes = (size_t)n_exp * exp_inter * hidden_dim * ggml_type_size(lw.gate_exps_type);
-                lw_gpu.gate_exps = DeviceBuffer(gate_exps_bytes * n_experts_);
-                lw_gpu.gate_exps.upload(lw.ffn_gate_exps, gate_exps_bytes, stream_.stream);
-            }
-            if (lw.ffn_up_exps) {
-                size_t up_exps_bytes = (size_t)n_exp * exp_inter * hidden_dim * ggml_type_size(lw.up_exps_type);
-                lw_gpu.up_exps = DeviceBuffer(up_exps_bytes * n_experts_);
-                lw_gpu.up_exps.upload(lw.ffn_up_exps, up_exps_bytes, stream_.stream);
-            }
+ // Experts (consolidated tensors)
+ if (lw.ffn_gate_exps) {
+ size_t gate_exps_bytes = (size_t)n_exp * exp_inter * hidden_dim * ggml_type_size(lw.gate_exps_type);
+ lw_gpu.gate_exps = DeviceBuffer(gate_exps_bytes);
+ lw_gpu.gate_exps.upload(lw.ffn_gate_exps, gate_exps_bytes, stream_.stream);
+ }
+ if (lw.ffn_up_exps) {
+ size_t up_exps_bytes = (size_t)n_exp * exp_inter * hidden_dim * ggml_type_size(lw.up_exps_type);
+ lw_gpu.up_exps = DeviceBuffer(up_exps_bytes);
+ lw_gpu.up_exps.upload(lw.ffn_up_exps, up_exps_bytes, stream_.stream);
+ }
             if (lw.ffn_down_exps) {
                 size_t down_exps_bytes = (size_t)n_exp * hidden_dim * exp_inter * ggml_type_size(lw.down_exps_type);
                 lw_gpu.down_exps = DeviceBuffer(down_exps_bytes);
@@ -258,8 +271,8 @@ void CudaBackend::apply_rope(
     float* d_QK, int seq_len, int num_heads, int head_dim,
     bool neox_style
 ) {
-    cuda::apply_rope(d_QK, d_rope_cos_.data(), d_rope_sin_.data(),
-                     seq_len, num_heads, head_dim, neox_style, stream_.stream);
+ cuda::apply_rope(d_QK, rope_cos_gpu(), rope_sin_gpu(),
+ seq_len, num_heads, head_dim, neox_style, stream_.stream);
 }
 
 void CudaBackend::fused_sdpa(
@@ -310,16 +323,16 @@ void CudaBackend::store_kv(int layer, int pos, const float* d_K, const float* d_
     // Copy K, V for this position into cache
     // K shape: (seq_len, kv_dim) already on device
     // We need to copy to position offset
-    size_t offset_bytes = (size_t)pos * kv_dim * sizeof(float);
-    size_t copy_bytes = (size_t)seq_len * kv_dim * sizeof(float);
-    CUDA_CHECK(cudaMemcpyAsync(
-        (char*)d_kv_k_[layer].data() + offset_bytes,
-        d_K, copy_bytes, cudaMemcpyDeviceToDevice, stream_.stream
-    ));
-    CUDA_CHECK(cudaMemcpyAsync(
-        (char*)d_kv_v_[layer].data() + offset_bytes,
-        d_V, copy_bytes, cudaMemcpyDeviceToDevice, stream_.stream
-    ));
+ size_t offset_bytes = (size_t)pos * kv_dim * sizeof(float);
+ size_t copy_bytes = (size_t)seq_len * kv_dim * sizeof(float);
+ CUDA_CHECK(cudaMemcpyAsync(
+ (char*)d_kv_k_[layer].data() + offset_bytes,
+ d_K, copy_bytes, cudaMemcpyDeviceToDevice, (cudaStream_t)stream_.stream
+ ));
+ CUDA_CHECK(cudaMemcpyAsync(
+ (char*)d_kv_v_[layer].data() + offset_bytes,
+ d_V, copy_bytes, cudaMemcpyDeviceToDevice, (cudaStream_t)stream_.stream
+ ));
 }
 
 void CudaBackend::get_kv(int layer, float** d_K_cache, float** d_V_cache) {

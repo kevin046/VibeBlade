@@ -9,12 +9,14 @@
 
 #include "cuda_kernels.h"
 #include "ggml_types.h"
-#include "fast_model.h"
 #include <vector>
 #include <memory>
 #include <unordered_map>
 
 namespace vibeblade {
+
+struct FastConfig;
+struct LayerWeights;
 namespace cuda {
 
 // ════════════════════════════════════════════════════════════════
@@ -126,15 +128,15 @@ public:
     ggml_type emb_type_gpu() const { return emb_type_; }
     ggml_type out_type_gpu() const { return out_type_; }
 
-    // RoPE cache on GPU
-    const float* rope_cos_gpu() const { return d_rope_cos_; }
-    const float* rope_sin_gpu() const { return d_rope_sin_; }
+ // RoPE cache on GPU
+ const float* rope_cos_gpu() const { return static_cast<const float*>(d_rope_cos_.data()); }
+ const float* rope_sin_gpu() const { return static_cast<const float*>(d_rope_sin_.data()); }
 
 private:
-    bool initialized_ = false;
-    CudaStream stream_;
+ bool initialized_ = false;
+ CudaStream stream_;
 
-    // Global weights
+ // Global weights
     DeviceBuffer d_token_emb_;
     DeviceBuffer d_output_norm_;  // fp32
     DeviceBuffer d_output_w_;
@@ -177,15 +179,16 @@ private:
     DeviceBuffer d_top_indices_;    // (n_experts_used,)
     DeviceBuffer d_top_weights_;    // (n_experts_used,)
 
-    // Config
-    int hidden_dim_ = 0;
-    int vocab_size_ = 0;
-    int n_layers_ = 0;
-    int n_heads_ = 0;
-    int n_kv_heads_ = 0;
-    int head_dim_ = 0;
-    int intermediate_dim_ = 0;
-    int context_length_ = 0;
+ // Config
+ int hidden_dim_ = 0;
+ int vocab_size_ = 0;
+ int n_layers_ = 0;
+ int n_heads_ = 0;
+ int n_kv_heads_ = 0;
+ int head_dim_ = 0;
+ int intermediate_dim_ = 0;
+ int context_length_ = 0;
+ int n_experts_ = 0;
 
     // ── Methods ──
     void alloc_kv_cache(int n_layers, int context_length, int kv_dim);

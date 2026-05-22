@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <string>
 
 namespace vibeblade {
 namespace cuda {

@@ -4,6 +4,11 @@
 // Zero malloc in the hot path — all buffers pre-allocated.
 // NEON SIMD on ARM, std::thread multi-threading for parallel gemv.
 
+#ifdef VIBEBLADE_USE_CUDA
+#include "cuda_kernels.h"
+#include "cuda_backend.h"
+#endif
+
 #include "fast_model.h"
 #include "dequant.h"
 #ifdef __aarch64__
@@ -18,11 +23,6 @@
 
 #ifdef _OPENMP
 #include <omp.h>
-#endif
-
-#ifdef VIBEBLADE_USE_CUDA
-#include "cuda_kernels.h"
-#include "cuda_backend.h"
 #endif
 
 namespace vibeblade {
@@ -141,30 +141,31 @@ void VibeBladeFast::load(const char* path) {
     tokenizer_.load(*gguf_);
 
 #ifdef VIBEBLADE_USE_CUDA
-    // Initialize CUDA backend if available
-    if (cuda::is_available()) {
-        try {
-            cuda_backend_ = new cuda::CudaBackend();
-            cuda_backend_->init(cfg_);
-            // Upload weights to GPU
-            cuda_backend_->upload_weights(
-                token_emb_, emb_type_,
-                output_norm_,
-                output_, out_type_,
-                layers_,
-                cfg_.hidden_dim, cfg_.vocab_size
-            );
-            // Upload RoPE cache (built in build_rope_cache())
-            cuda_backend_->stream().upload(rope_cos_.data(), rope_cos_.size() * sizeof(float));
-            cuda_backend_->stream().upload(rope_sin_.data(), rope_sin_.size() * sizeof(float));
-            // Note: We'll set d_rope_cos_/d_rope_sin_ after upload (need to add methods)
-            // For now, we'll upload in a separate step
-        } catch (const std::exception& e) {
-            fprintf(stderr, "[WARN] CUDA backend failed to initialize: %s\n", e.what());
-            delete cuda_backend_;
-            cuda_backend_ = nullptr;
-        }
-    }
+ // Initialize CUDA backend if available
+ if (cuda::is_available()) {
+ try {
+ cuda_backend_ = new cuda::CudaBackend();
+ cuda_backend_->init(cfg_);
+ // Upload weights to GPU
+ cuda_backend_->upload_weights(
+ token_emb_, emb_type_,
+ output_norm_,
+ output_, out_type_,
+ layers_,
+ cfg_.hidden_dim, cfg_.vocab_size
+ );
+ // Upload RoPE cache via DeviceBuffer
+ cuda::DeviceBuffer d_rope_cos, d_rope_sin;
+ d_rope_cos.alloc(rope_cos_.size() * sizeof(float));
+ d_rope_sin.alloc(rope_sin_.size() * sizeof(float));
+ d_rope_cos.upload(rope_cos_.data(), rope_cos_.size() * sizeof(float));
+ d_rope_sin.upload(rope_sin_.data(), rope_sin_.size() * sizeof(float));
+ } catch (const std::exception& e) {
+ fprintf(stderr, "[WARN] CUDA backend failed to initialize: %s\n", e.what());
+ delete cuda_backend_;
+ cuda_backend_ = nullptr;
+ }
+ }
 #endif
 
     loaded_ = true;

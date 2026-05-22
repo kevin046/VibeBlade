@@ -16,6 +16,8 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <vector>
+#include <utility>
 #include <stdexcept>
 
 // ── Error checking macros ──
@@ -852,10 +854,10 @@ void gemv_dequant(
     // Dequantize weight row(s) to fp32 scratch buffer
     int64_t n_elements = (int64_t)M * K;
     switch (ggml_type) {
-        case 0: // GGML_TYPE_F32
-            // Already fp32, no dequant needed
-            gemv_f32(d_weights, d_x, d_y, M, K, 1.0f, 0.0f, s);
-            return;
+ case 0: // GGML_TYPE_F32
+ // Already fp32, no dequant needed
+ gemv_f32(static_cast<const float*>(d_weights), d_x, d_y, M, K, 1.0f, 0.0f, s);
+ return;
         case 1: // GGML_TYPE_F16
             dequantize_row_f16(d_weights, d_scratch, n_elements, s);
             break;
@@ -933,6 +935,7 @@ void embedding_lookup(
 }
 
 // ── MoE top-k (simple version — runs on CPU for now, GPU future) ──
+__host__
 void moe_top_k(
     const float* d_router_logits,
     int* d_top_indices, float* d_top_weights,

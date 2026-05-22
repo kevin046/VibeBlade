@@ -174,7 +174,7 @@ else()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(_vibeblade_native PRIVATE -g -O0 -fno-lto)
     else()
-        target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG -fno-lto)
+        target_compile_options(_vibeblade_native PRIVATE -O3 -DNDEBUG -fno-lto -Wno-stringop-overflow)
     endif()
     # LTO disabled — causes ODR violations with pybind11's std::string ABI
     # on ARM64, leading to segfaults in std::map operations.
