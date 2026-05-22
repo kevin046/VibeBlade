@@ -48,7 +48,7 @@ Usage:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 # ── Lazy imports (torch + transformers are optional dependencies) ─────
@@ -179,7 +179,7 @@ def _dflash_forward_single_pass(
     dflash_model,
     target_hidden: _torch_lazy().Tensor,
     noise_embedding: _torch_lazy().Tensor,
-    position_ids: torch.LongTensor,
+    position_ids: _torch_lazy().LongTensor,
     past_key_values: Optional,
     use_cache: bool = False,
     attention_mode: str = "eager",
@@ -206,9 +206,7 @@ def _dflash_forward_single_pass(
     target_proj = dflash_model.hidden_norm(target_proj)
 
     bsz, block_size, _ = hidden.shape
-    ctx_len = target_proj.shape[1]
 
-    position_embeddings = rotary_emb(hidden, position_ids)
 
     past_kv = past_key_values
 
@@ -301,10 +299,10 @@ def _block_diffusion_step(
 
     # Embed last token to get hidden_dim
     try:
-        embeds = dflash_model.model.embed_tokens(last_id)
+        dflash_model.model.embed_tokens(last_id)
     except AttributeError:
         # Fallback: embed via embedding layer if accessible
-        embeds = dflash_model.embed_tokens(last_id)
+        dflash_model.embed_tokens(last_id)
 
     # Create block: first token = last_token, rest = zeros (or masked)
     # This gives DFlash something to denoise/extend from
