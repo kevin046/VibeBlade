@@ -1,10 +1,30 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.18)
 project(vibeblade_native CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ── CUDA Support (optional, requires CUDA 11.0+) ──
+option(VIBEBLADE_CUDA "Enable CUDA GPU acceleration" OFF)
+
+if(VIBEBLADE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    message(STATUS "CUDA:            ON (Toolkit ${CUDAToolkit_VERSION})")
+    message(STATUS "CUDA Architectures: sm_121 (GB10/Blackwell)")
+    set_target_properties(_vibeblade_native PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        CUDA_ARCHITECTURES "121"
+    )
+    target_compile_definitions(_vibeblade_native PRIVATE VIBEBLADE_USE_CUDA)
+    target_link_libraries(_vibeblade_native PRIVATE CUDA::cublas CUDA::cudart)
+else()
+    message(STATUS "CUDA:            OFF (build with -DVIBEBLADE_CUDA=ON to enable)")
+endif()
 
 # ── OpenMP DISABLED ──
 # GCC on ARM64 auto-enables -flto via -fopenmp, which causes ODR violations
@@ -127,6 +147,8 @@ pybind11_add_module(_vibeblade_native
     src/tokenizer.cpp
     src/sampler.cpp
     src/fast_model.cpp
+    src/cuda_backend.cpp
+    src/cuda_kernels.cu
 )
 
 target_include_directories(_vibeblade_native PRIVATE

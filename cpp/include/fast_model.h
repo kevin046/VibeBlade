@@ -208,8 +208,15 @@ private:
     Tokenizer tokenizer_;
     Sampler sampler_;
 
+    // ── Backend Selection ──
+#ifdef VIBEBLADE_USE_CUDA
+    cuda::CudaBackend* cuda_backend_ = nullptr;
+#endif
+
     int position_ = 0;
     bool loaded_ = false;
+
+    ~VibeBladeFast();
 
     static constexpr int MAX_LAYERS = 256;
     static constexpr int MAX_SEQ = 8192;
