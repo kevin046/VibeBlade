@@ -1,6 +1,48 @@
 # VibeBlade
 
-**Run any LLM on 
+**Run any LLM on your own hardware — no cloud, no subscription.**
+
+[![Star History](https://api.star-history.com/svg?repos=kevin046/VibeBlade)](https://star-history.com/#kevin046/VibeBlade)
+[![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
+[![Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
+
+**Prerequisites** — C++ build tools (required for the fast engine):
+
+|| OS | Install |
+|---|---|
+|| **Ubuntu/Debian** | `sudo apt install build-essential cmake` |
+|| **macOS** | `xcode-select --install && brew install cmake` |
+|| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/) |
+
+Python dependencies (`pip install -e .` handles these):
+- Python 3.10+
+- `numpy`, `pybind11`, `cmake`, `psutil`
+
+**Linux / macOS**
+```bash
+git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
+pip install -e .                # Python deps (numpy, pybind11, etc.)
+python cpp/build_cpp.py         # Build C++ engine (needs cmake + C++17 compiler)
+python -m vibeblade wizard      # Guided setup
+```
+
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
+pip install -e .
+python cpp/build_cpp.py
+python -m vibeblade wizard
+```
+
+[![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
+[![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Tests: 794 passed](https://img.shields.io/badge/tests-794%20passed-brightgreen.svg)]()
+
+📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./BENCHMARK_REPORT.md) · 🔒 [Security](./WHITEPAPER.md#security)
+
+---
+
 ## 🚀 Speculative Decoding with DFlash (Experimental)
 
 **Status:** Beta — Qwen3-4B + Qwen3-4B-DFlash-b16  
@@ -74,47 +116,6 @@ On GPU (CUDA):
 - Block size must match draft's native block_size (16 in current release)
 
 ---
-
-your own hardware — no cloud, no subscription.**
-
-[![Star History](https://api.star-history.com/svg?repos=kevin046/VibeBlade)](https://star-history.com/#kevin046/VibeBlade)
-[![Stars](https://img.shields.io/github/stars/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/stargazers)
-[Forks](https://img.shields.io/github/forks/kevin046/VibeBlade?style=flat)](https://github.com/kevin046/VibeBlade/network)
-
-**Prerequisites** — C++ build tools (required for the fast engine):
-
-|| OS | Install |
-|---|---|
-|| **Ubuntu/Debian** | `sudo apt install build-essential cmake` |
-|| **macOS** | `xcode-select --install && brew install cmake` |
-|| **Windows** | Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/) |
-
-Python dependencies (`pip install -e .` handles these):
-- Python 3.10+
-- `numpy`, `pybind11`, `cmake`, `psutil`
-
-**Linux / macOS**
-```bash
-git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e .                # Python deps (numpy, pybind11, etc.)
-python cpp/build_cpp.py         # Build C++ engine (needs cmake + C++17 compiler)
-python -m vibeblade wizard      # Guided setup
-```
-
-**Windows (PowerShell)**
-```powershell
-git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
-pip install -e .
-python cpp/build_cpp.py
-python -m vibeblade wizard
-```
-
-[![Build Status](https://github.com/kevin046/VibeBlade/workflows/Build/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
-[![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 794 passed](https://img.shields.io/badge/tests-794%20passed-brightgreen.svg)]()
-
-📄 [White Paper](./WHITEPAPER.md) · 📊 [Performance Benchmarks](./BENCHMARK_REPORT.md) · 🔒 [Security](./WHITEPAPER.md#security)
 
 ---
 
@@ -367,8 +368,6 @@ ARM NEON (aarch64) · 4 cores · Q4\_K\_M quantization · 256 ctx · temp=0.0 ·
 - **3-run validation reveals high variance in many configs** — single-run benchmarks can be misleading (± std up to 13.9 t/s for some configs)
 - **No single optimization works universally** — best config varies significantly by model architecture
 
-## Architecture
-
 ---
 
 ## Architecture
@@ -437,7 +436,34 @@ SIMD optimizations are auto-detected at build time:
 || Apple Silicon (M1–M4) | NEON (Metal/CoreML extras) |
 || Anything else | Scalar fallback |
 
----
+### CUDA GPU Backend (NVIDIA Blackwell)
+
+VibeBlade now includes an **optional CUDA backend** for NVIDIA GPUs — targeting **sm_121 (Blackwell/GB10)** with CUDA 13.0. When enabled, the entire forward pass offloads to GPU: weight dequantization, GEMM/GEMV, RMS norm, RoPE, fused SDPA attention, SiLU gating, and MoE top-k routing all run as CUDA kernels with cuBLAS for linear algebra.
+
+```bash
+# Build with CUDA support (requires CUDA Toolkit 13.0+)
+cd cpp/build && cmake .. -DVIBEBLADE_CUDA=ON && make -j$(nproc)
+
+# Or via build script:
+VIBEBLADE_CUDA=ON python cpp/build_cpp.py
+```
+
+When CUDA is **not** available (default), the build compiles cleanly without any CUDA headers or libraries — all GPU code is conditionally excluded via `VIBEBLADE_USE_CUDA` guards.
+
+**CUDA kernel coverage:**
+- `gemm_f32` / `gemv_f32` — cuBLAS-backed dense matrix ops
+- `rms_norm` — fused RMS normalization kernel
+- `fused_sdpa` — scaled dot-product attention (Q·K^T/√d · V)
+- `silu` / `silu_mul` — SiLU activation + gated FFN
+- `residual_add` — fused residual connection
+- `dequantize_row_*` — GGML Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q4_K/Q5_K/Q6_K/F16 → fp32
+- `moe_top_k` — MoE expert routing (top-k selection + shared expert combine)
+- `apply_rope` — Rotary positional embedding kernel
+- `softmax_f32` — Numerically stable softmax
+
+**CudaBackend class** manages per-model GPU state: weight upload to VRAM, KV cache allocation on device, and kernel dispatch for each transformer layer.
+
+|
 
 ## API
 
@@ -494,16 +520,18 @@ model = VibeBladeModel("model.gguf", backend="numpy")  # force NumPy
 
 ```python
 from vibeblade import (
-    # §1 — TurboSparse: EMA neuron prediction + dReLU gating
-    EMANeuronPredictor, drelu_gate,
-    # §2 — ConFu: contemplate-token speculative decoding
-    ConFuSpeculator, ContemplateTokenLayer, ConFuStats,
-    # §3 — RotateKV: outlier-aware 2-bit KV quantization
-    RotateKVCache, rotate_kv, hadamard_rotation_matrix,
-    # §4 — SARATHI: chunked prefill scheduling
-    SarathiScheduler, SarathiConfig, SarathiRequest,
-    # §4 — SageSched: uncertainty-aware scheduling
-    SageSched, SageConfig, entropy_from_logits,
+ # §1 — TurboSparse: EMA neuron prediction + dReLU gating
+ EMANeuronPredictor, drelu_gate,
+ # §2 — ConFu: contemplate-token speculative decoding
+ ConFuSpeculator, ContemplateTokenLayer, ConFuStats,
+ # §3 — RotateKV: outlier-aware 2-bit KV quantization
+ RotateKVCache, rotate_kv, hadamard_rotation_matrix,
+ # §4 — SARATHI: chunked prefill scheduling
+ SarathiScheduler, SarathiConfig, SarathiRequest,
+ # §4 — SageSched: uncertainty-aware scheduling
+ SageSched, SageConfig, entropy_from_logits,
+ # §5 — DFlash: block diffusion speculative decoding
+ DFlashDraftHead, DFlashStats, dflash_generate,
 )
 
 # Example: EMA-based neuron prediction for a 32-layer model
@@ -521,56 +549,124 @@ plan = scheduler.schedule()
 # plan["decode_requests"] → [req_id, ...]
 ```
 
+### DFlash — Block Diffusion Speculative Decoding
+
+```python
+from vibeblade.dflash import DFlashDraftHead, dflash_generate
+from vibeblade.speculative import SpeculativeBackend
+
+# Load target + DFlash draft
+target = SpeculativeBackend()
+target.load("qwen3-4b-q4_k_m.gguf")
+draft = DFlashDraftHead("Qwen3-4B-DFlash-b16")  # HuggingFace repo or local
+
+# Generate with block diffusion speculative decoding
+result = dflash_generate(
+    target=target,
+    draft=draft,
+    prompt="Once upon a time",
+    max_tokens=128,
+    block_size=16,  # Must match draft's trained block_size
+)
+print(result.text)
+print(f"Acceptance: {result.stats.acceptance_rate:.1%}")
+print(f"Effective speedup: {result.stats.effective_speedup:.1f}×")
+```
+
+### DFlash + llama.cpp Integration
+
+```python
+from vibeblade.dflash_llama import DFlashIntegration
+
+integ = DFlashIntegration(
+    gguf_path="qwen3-4b-q4_k_m.gguf",
+    dflash_model_path="Qwen3-4B-DFlash-b16",
+    device="cuda",  # or "cpu"
+)
+
+result = integ.generate(
+    prompt="Once upon a time",
+    max_new_tokens=128,
+    block_size=16,
+    verbose=False,
+)
+print(result.text)
+print(f"Acceptance: {result.acceptance_rate:.1%}")
+```
+
 ---
 
 ## Project structure
 
 ```
-vibeblade/              # Python package
-  ├── __init__.py       # VibeBladeModel + public API
-  ├── fast_backend.py   # C++ fast engine wrapper (single generate() call)
-  ├── transformer.py    # LLaMA forward pass (NumPy fallback)
-  ├── loader.py         # GGUF model loader
-  ├── generate.py       # Text generation + sampling
-  ├── chat.py           # Interactive CLI chat loop
-  ├── benchmark.py      # llama.cpp-style benchmark suite
-  ├── sparse.py         # TurboSparse dReLU + EMA NeuronPredictor
-  ├── quant.py          # RotorQuant 4-bit weight quantization
-  ├── cache.py          # KV cache
-  ├── rotatekv.py       # RotateKV Hadamard rotation + 2-bit quantization
-  ├── confu.py          # ConFu contemplate-token speculative decoding
-  ├── sarathi.py        # SARATHI chunked prefill scheduler
-  ├── sagesched.py      # SageSched uncertainty-aware scheduler
-  ├── moe.py            # MoE router + expert loader
-  ├── auto_tune.py      # Automatic optimization config selection
-  ├── llama_backend.py  # llama.cpp C++ backend with PI/TS/Spec support
-  ├── neural_draft.py   # Neural speculative drafting head
-  ├── speculative.py    # Speculative decoding pipeline
-  ├── phase_scheduler.py # Phase-aware prefill/decode scheduling
-  ├── tiered_memory.py  # VRAM/RAM/SSD 3-tier memory manager
-  ├── eviction.py       # LRU-K / frequency / cost-benefit / bandit policies
-  ├── setup_wizard.py   # Interactive hardware setup (wizard command)
-  └── openai_server.py  # OpenAI-compatible API server
+vibeblade/ # Python package
+ ├── __init__.py # VibeBladeModel + public API
+ ├── fast_backend.py # C++ fast engine wrapper (single generate() call)
+ ├── transformer.py # LLaMA forward pass (NumPy fallback)
+ ├── loader.py # GGUF model loader
+ ├── generate.py # Text generation + sampling
+ ├── chat.py # Interactive CLI chat loop
+ ├── benchmark.py # llama.cpp-style benchmark suite
+ ├── sparse.py # TurboSparse dReLU + EMA NeuronPredictor
+ ├── quant.py # RotorQuant 4-bit weight quantization
+ ├── cache.py # KV cache
+ ├── minicache.py # Minimal KV cache for lightweight inference
+ ├── rotatekv.py # RotateKV Hadamard rotation + 2-bit quantization
+ ├── confu.py # ConFu contemplate-token speculative decoding
+ ├── dflash.py # DFlash block diffusion speculative decoding (PyTorch draft)
+ ├── dflash_llama.py # DFlash integration with llama.cpp target
+ ├── speculative.py # Speculative decoding pipeline (llama.cpp backend)
+ ├── neural_draft.py # Neural speculative drafting head
+ ├── sarathi.py # SARATHI chunked prefill scheduler
+ ├── sagesched.py # SageSched uncertainty-aware scheduler
+ ├── moe.py # MoE router + expert loader
+ ├── moe_profiler.py # MoE expert profiling (hot/cold maps)
+ ├── moe_executor.py # MoE hot/cold expert execution
+ ├── moe_advanced.py # Advanced MoE: confidence routing, context prefetching
+ ├── moe_oracle.py # Expert oracle: pattern prediction for prefetch
+ ├── async_executor.py # Async MoE expert execution + stats
+ ├── phase_scheduler.py # Phase-aware prefill/decode scheduling
+ ├── tiered_memory.py # VRAM/RAM/SSD 3-tier memory manager
+ ├── eviction.py # LRU-K / frequency / cost-benefit / bandit policies
+ ├── grammar.py # Grammar constraints (regex, JSON schema, EBNF)
+ ├── paged_attn.py # Paged attention for KV cache management
+ ├── kv_quant.py # KV cache quantization
+ ├── smoothquant.py # SmoothQuant activation/weight calibration
+ ├── sparse_attn.py # Sparse attention patterns
+ ├── memory.py # Unified memory pool + activation buffer pool
+ ├── gpu.py # GPU backend abstraction
+ ├── batching.py # Request batching
+ ├── model_hub.py # Model hub integration
+ ├── model_manager.py # Model download + management
+ ├── tokenizer.py # GGUF tokenizer wrapper
+ ├── auto_tune.py # Automatic optimization config selection
+ ├── config.py # OffloadConfig, VibeBladeConfig
+ ├── setup_wizard.py # Interactive hardware setup (wizard command)
+ └── openai_server.py # OpenAI-compatible API server
 
-cpp/                    # Native C++ inference engine
-  ├── build_cpp.py      # Cross-platform build script (Linux/macOS/Windows)
-  ├── include/
-  │   ├── gguf.h        # GGUF mmap reader (zero-copy weight loading)
-  │   ├── ggml_types.h  # GGML quantization types (Q4_0/Q5/Q8/K-quants/F16)
-  │   ├── dequant.h     # Inline dequantization kernels + gemv_dequant
-  │   ├── fast_model.h  # VibeBladeFast: full forward pass + generate pipeline
-  │   ├── tokenizer.h   # BPE tokenizer (reads GGUF tokenizer metadata)
-  │   ├── sampler.h     # Sampler (temperature/top-k/top-p/repetition/mirostat)
-  │   └── kernels.h     # SIMD math kernels (GEMM, RMSNorm, SDPA, RoPE)
-  └── src/
-      ├── gguf.cpp      # GGUF binary parser + array metadata
-      ├── dequant.cpp   # Dequantization for all GGML types
-      ├── tokenizer.cpp # GPT-2 byte-level BPE implementation
-      ├── sampler.cpp   # Sampling strategies
-      ├── fast_model.cpp # Full inference: prefill, decode, generate
-      └── bindings.cpp  # pybind11 Python bindings
+cpp/ # Native C++ inference engine
+ ├── build_cpp.py # Cross-platform build script (Linux/macOS/Windows)
+ ├── include/
+ │ ├── gguf.h # GGUF mmap reader (zero-copy weight loading)
+ │ ├── ggml_types.h # GGML quantization types (Q4_0/Q5/Q8/K-quants/F16)
+ │ ├── dequant.h # Inline dequantization kernels + gemv_dequant
+ │ ├── fast_model.h # VibeBladeFast: full forward pass + generate pipeline
+ │ ├── cuda_backend.h # CudaBackend: GPU resource management (conditional)
+ │ ├── cuda_kernels.h # CUDA kernel declarations (sm_121 Blackwell)
+ │ ├── tokenizer.h # BPE tokenizer (reads GGUF tokenizer metadata)
+ │ ├── sampler.h # Sampler (temperature/top-k/top-p/repetition/mirostat)
+ │ └── kernels.h # SIMD math kernels (GEMM, RMSNorm, SDPA, RoPE)
+ └── src/
+ ├── gguf.cpp # GGUF binary parser + array metadata
+ ├── dequant.cpp # Dequantization for all GGML types
+ ├── tokenizer.cpp # GPT-2 byte-level BPE implementation
+ ├── sampler.cpp # Sampling strategies
+ ├── fast_model.cpp # Full inference: prefill, decode, generate
+ ├── cuda_backend.cpp # CUDA backend init, weight upload, kernel dispatch
+ ├── cuda_kernels.cu # CUDA kernel implementations (cuBLAS GEMM/GEMV)
+ └── bindings.cpp # pybind11 Python bindings
 
-tests/                 # 794 tests covering all modules
+tests/ # 794 tests covering all modules
 ```
 
 ---
