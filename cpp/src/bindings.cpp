@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include "kernels.h"
 #include "fast_model.h"
+#include "dequant.h"
 
 namespace py = pybind11;
 using namespace py::literals;
@@ -311,16 +312,13 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
         }, py::arg("token_id"), py::arg("layer_indices"),
             "Decode + extract hidden states at specified layer indices.\n"
             "Returns (logits, [hidden_0, ...]). Each hidden vector has shape (hidden_dim,).")
-        .def("embedding", [](VibeBladeFast& self, int token_id) -> py::array_t<float> {
-            std::vector<float> emb = self.embedding(token_id);
-            return py::array_t<float>(
-                {emb.size()},  // shape
-                {sizeof(float)},  // strides
-                emb.data(),  // buffer
-                py::cast(&emb)  // keep alive
-            );
-        }, py::arg("token_id"),
-            "Return the token embedding vector (float32) for a token ID.")
+.def("embedding", [](VibeBladeFast& self, int token_id) -> py::array_t<float> {
+    std::vector<float> emb = self.embedding(token_id);
+    py::array_t<float> result(emb.size());
+    std::memcpy(result.mutable_data(), emb.data(), emb.size() * sizeof(float));
+    return result;
+}, py::arg("token_id"),
+"Return the token embedding vector (float32) for a token ID.")
 
         .def("lm_head", [](VibeBladeFast& self, py::array_t<float> hidden) -> py::array_t<float> {
             py::buffer_info info = hidden.request();
@@ -333,10 +331,12 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
                                          std::to_string(self.config().hidden_dim) +
                                          ", got " + std::to_string(dim));
             }
-            const float* ptr = static_cast<const float*>(info.ptr);
-            std::vector<float> hvec(ptr, ptr + dim);
-            std::vector<float> logits = self.lm_head(hvec);
-            return py::array_t<float>(logits.size(), logits.data());
+ const float* ptr = static_cast<const float*>(info.ptr);
+ std::vector<float> hvec(ptr, ptr + dim);
+ std::vector<float> logits = self.lm_head(hvec);
+ py::array_t<float> result(logits.size());
+ std::memcpy(result.mutable_data(), logits.data(), logits.size() * sizeof(float));
+ return result;
         }, py::arg("hidden"),
             "Compute logits from a hidden-state vector (final norm + output layer).")
 
@@ -399,7 +399,129 @@ on_token: optional Python callback(token_id: int, piece: str) for streaming.)doc
                 "n_experts_used"_a = c.n_experts_used
             );
         })
-        .def_property_readonly("kv_cache_bytes", [](const VibeBladeFast& self) {
-            return self.kv_cache_bytes();
-        });
-}
+.def_property_readonly("kv_cache_bytes", [](const VibeBladeFast& self) {
+    return self.kv_cache_bytes();
+})
+
+// ── Debug: dequantize a row of a tensor ──
+.def("dequant_row", [](VibeBladeFast& self,
+                        const std::string& tensor_name,
+                        int row_idx,
+                        int n_elements) -> py::array_t<float> {
+    const auto& g = self.gguf();
+    auto* info = g.tensor_info(tensor_name);
+    if (!info) throw std::runtime_error("Tensor not found: " + tensor_name);
+    const void* data = g.tensor_data(tensor_name);
+    int64_t ne0 = info->dims[0];
+    int64_t row_bytes_size = 0;
+    switch (info->type) {
+        case GGML_TYPE_F32: row_bytes_size = ne0 * 4; break;
+        case GGML_TYPE_F16: row_bytes_size = ne0 * 2; break;
+        case GGML_TYPE_Q4_0: row_bytes_size = (ne0 / 32) * 18; break;
+        case GGML_TYPE_Q5_0: row_bytes_size = (ne0 / 32) * 22; break;
+        case GGML_TYPE_Q8_0: row_bytes_size = (ne0 / 32) * 34; break;
+        case GGML_TYPE_Q4_K: row_bytes_size = (ne0 / 256) * 144; break;
+        case GGML_TYPE_Q5_K: row_bytes_size = (ne0 / 256) * 176; break;
+        case GGML_TYPE_Q6_K: row_bytes_size = (ne0 / 256) * 210; break;
+        default: throw std::runtime_error("Unsupported type for dequant_row");
+    }
+    int actual_elements = n_elements > 0 ? n_elements : (int)ne0;
+    const uint8_t* row_ptr = (const uint8_t*)data + row_idx * row_bytes_size;
+    std::vector<float> out(actual_elements);
+    vibeblade::dequantize_row(row_ptr, out.data(), actual_elements, info->type);
+    py::array_t<float> result(actual_elements);
+    std::memcpy(result.mutable_data(), out.data(), actual_elements * sizeof(float));
+    return result;
+}, py::arg("tensor_name"), py::arg("row_idx") = 0, py::arg("n_elements") = 0,
+"Dequantize and return a single row of a GGUF tensor for debugging.")
+
+.def("debug_emb_type", [](const VibeBladeFast& self) -> py::dict {
+    // Expose embedding internals for debugging
+    // We need access to private members — use a trick
+    // Actually, let's just re-derive from the GGUF file
+    const auto& g = self.gguf();
+    auto* info = g.tensor_info("token_embd.weight");
+    if (!info) info = g.tensor_info("wte.weight");
+    int type_id = info ? (int)info->type : -1;
+    int64_t ne0 = info ? info->dims[0] : -1;
+    int64_t ne1 = info ? info->dims[1] : -1;
+    size_t offset = info ? info->offset : 0;
+    size_t tsize = info ? info->size : 0;
+    size_t rb = 0;
+    if (info) {
+        switch (info->type) {
+            case GGML_TYPE_Q5_0: rb = (ne0 / 32) * 22; break;
+            case GGML_TYPE_Q4_0: rb = (ne0 / 32) * 18; break;
+            case GGML_TYPE_Q8_0: rb = (ne0 / 32) * 34; break;
+            case GGML_TYPE_F32: rb = ne0 * 4; break;
+            default: rb = 0;
+        }
+    }
+    return py::dict(
+        "type"_a = type_id,
+        "ne0"_a = (int)ne0,
+        "ne1"_a = (int)ne1,
+        "offset"_a = (int)offset,
+        "size"_a = (int)tsize,
+        "row_bytes"_a = (int)rb
+    );
+})
+
+// ── Debug: compute embedding via both paths and compare ──
+.def("debug_embedding_compare", [](VibeBladeFast& self, int tok) -> py::dict {
+    const auto& g = self.gguf();
+    auto* info = g.tensor_info("token_embd.weight");
+    if (!info) info = g.tensor_info("wte.weight");
+    if (!info) throw std::runtime_error("No embedding tensor found");
+    
+    const void* data_via_gguf = g.tensor_data("token_embd.weight");
+    if (!data_via_gguf) data_via_gguf = g.tensor_data("wte.weight");
+    
+    int hd = info->dims[0]; // 896 for Qwen
+    int64_t ne0 = info->dims[0];
+    size_t row_bytes = 0;
+    switch (info->type) {
+        case GGML_TYPE_Q5_0: row_bytes = (ne0 / 32) * 22; break;
+        case GGML_TYPE_Q4_0: row_bytes = (ne0 / 32) * 18; break;
+        case GGML_TYPE_Q8_0: row_bytes = (ne0 / 32) * 34; break;
+        case GGML_TYPE_F32: row_bytes = ne0 * 4; break;
+        default: row_bytes = 0;
+    }
+    
+    // Path A: dequant via tensor_data (like dequant_row — WORKS)
+    const uint8_t* ptr_a = (const uint8_t*)data_via_gguf + tok * row_bytes;
+    std::vector<float> emb_a(hd);
+    vibeblade::dequantize_row(ptr_a, emb_a.data(), hd, info->type);
+    
+    // Path B: use the embedding() method (BROKEN)
+    std::vector<float> emb_b = self.embedding(tok);
+    
+    // Compare
+    float max_diff = 0;
+    for (int i = 0; i < hd; i++) {
+        float d = fabsf(emb_a[i] - emb_b[i]);
+        if (d > max_diff) max_diff = d;
+    }
+    
+    // Also expose the raw pointer values for comparison
+    auto ptr_val_a = (uintptr_t)ptr_a;
+    auto ptr_val_b = (uintptr_t)data_via_gguf;
+    
+    py::array_t<float> arr_a(hd);
+    py::array_t<float> arr_b(hd);
+    std::memcpy(arr_a.mutable_data(), emb_a.data(), hd * sizeof(float));
+    std::memcpy(arr_b.mutable_data(), emb_b.data(), hd * sizeof(float));
+    
+    return py::dict(
+        "max_diff"_a = max_diff,
+        "emb_a_first5"_a = py::cast(std::vector<float>(emb_a.begin(), emb_a.begin() + 5)),
+        "emb_b_first5"_a = py::cast(std::vector<float>(emb_b.begin(), emb_b.begin() + 5)),
+        "ptr_gguf_data"_a = (int)ptr_val_b,
+        "ptr_row_a"_a = (int)ptr_val_a,
+        "row_bytes"_a = (int)row_bytes,
+        "hd"_a = hd,
+        "type"_a = (int)info->type
+    );
+}, py::arg("tok"))
+;
+} // PYBIND11_MODULE

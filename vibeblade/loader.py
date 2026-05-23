@@ -166,15 +166,7 @@ def _dequant_q5_0(block: bytes, block_size: int = 32) -> np.ndarray:
     packed = np.frombuffer(block[6:22], dtype=np.uint8)
     low = (packed & 0x0F).astype(np.float32)
     high = ((packed >> 4) & 0x0F).astype(np.float32)
-    # qh adds a high bit per nibble: qh[i//2] bit (i%2)*4 gives extra bit
-    for i in range(32):
-        byte_idx = i // 8
-        bit_idx = (i % 8)
-        extra = 1 if (qh[byte_idx] >> bit_idx) & 1 else 0
-        base = low[i] if i % 2 == 0 else high[i // 2]
-        base - 16.0 + extra * 16.0
-        # rebuild properly below
-    # Cleaner approach
+ # qh high bits: unpack all 32 bits from qh
     qh_bits = np.unpackbits(qh)  # 32 bits
     vals = np.empty(block_size, dtype=np.float32)
     vals[0::2] = low
@@ -521,7 +513,10 @@ class GGUFLoader:
         if progress_cb:
             progress_cb("parsing tensor info", 0, self.n_tensors, loading=True)
         self._parse_tensor_infos()
-        self._data_start = self._f.tell()
+        # GGUF spec: data section starts at next aligned boundary (default 32)
+        raw_end = self._f.tell()
+        GGUF_DEFAULT_ALIGNMENT = 32
+        self._data_start = (raw_end + GGUF_DEFAULT_ALIGNMENT - 1) & ~(GGUF_DEFAULT_ALIGNMENT - 1)
 
         if self._use_mmap:
             self._f.close()

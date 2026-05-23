@@ -15,6 +15,7 @@
 #include "neon_kernels.h"
 #endif
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -418,18 +419,40 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
 
         // ── Attention weights ──
         // Try fused QKV first, then fall back to separate Q/K/V
-        auto set_w = [&](const std::string& name, const void*& ptr, ggml_type& type) {
-            auto info = g.tensor_info(pfx + name);
-            if (info) {
-                ptr = g.tensor_data(pfx + name);
-                type = info->type;
-            }
-        };
+ auto set_w = [&](const std::string& name, const void*& ptr, ggml_type& type) {
+ auto info = g.tensor_info(pfx + name);
+ if (info) {
+ ptr = g.tensor_data(pfx + name);
+ type = info->type;
+ if (i == 0 && (name.find("attn_v") != std::string::npos || name.find("attn_k") != std::string::npos || name.find("attn_q") != std::string::npos)) {
+ const uint8_t* raw = (const uint8_t*)ptr;
+ fprintf(stderr, "[WEIGHT DIAG] %s%d: ptr=%p type=%d first_bytes=[%02x %02x %02x %02x %02x %02x %02x %02x]\n",
+ name.c_str(), i, ptr, (int)type,
+ raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
+ }
+ }
+ };
 
-        set_w("attn_q.weight",      lw.attn_q,  lw.qtype);
-        set_w("attn_k.weight",      lw.attn_k,  lw.ktype);
-        set_w("attn_v.weight",      lw.attn_v,  lw.vtype);
-        set_w("attn_output.weight", lw.attn_o,  lw.otype);
+ set_w("attn_q.weight", lw.attn_q, lw.qtype);
+ set_w("attn_k.weight", lw.attn_k, lw.ktype);
+ set_w("attn_v.weight", lw.attn_v, lw.vtype);
+ set_w("attn_output.weight", lw.attn_o, lw.otype);
+
+ // Load Q/K/V biases (F32 tensors, optional)
+ {
+ auto load_bias = [&](const char* suffix, const float*& out) {
+ std::string bname = pfx + "attn_" + suffix + ".bias";
+ auto ti = g.tensor_info(bname);
+ if (ti && ti->n_dims >= 1 && ti->type == GGML_TYPE_F32) {
+ out = (const float*)g.tensor_data(bname);
+ fprintf(stderr, "[WEIGHT] Layer %d: loaded %s (%d dims, shape %lld)\n",
+ i, bname.c_str(), ti->n_dims, (long long)ti->dims[0]);
+ }
+ };
+ load_bias("q", lw.attn_q_bias);
+ load_bias("k", lw.attn_k_bias);
+ load_bias("v", lw.attn_v_bias);
+ }
 
         // Try fused QKV
         set_w("attn_qkv.weight", lw.attn_qkv, lw.qkv_type);
@@ -580,13 +603,40 @@ void VibeBladeFast::forward_layer(
     float* scores    = sp;                    sp += seq_len * cfg_.context_length;
     float* o_proj    = sp;                    sp += seq_len * hd;
 
-    // ── Attention block (steps 1-7) — skipped for SSM-only hybrid blocks ──
-    if (lw.has_attention) {
+ // ── NaN diagnostic (layer 0 only) ──
+ auto check_nan = [&](const char* label, const float* ptr, int count, int layer) {
+ if (layer != 0) return;
+ int nan_count = 0;
+ for (int i = 0; i < count; i++) {
+ if (std::isnan(ptr[i]) || std::isinf(ptr[i])) nan_count++;
+ }
+ if (nan_count > 0) {
+ fprintf(stderr, "[NaN DIAG] Layer %d %s: %d/%d NaN/Inf (first 4: %f %f %f %f)\n",
+ layer, label, nan_count, count, ptr[0], ptr[1], ptr[2], ptr[3]);
+ } else {
+ fprintf(stderr, "[NaN DIAG] Layer %d %s: OK (range [%f, %f])\n",
+ layer, label, ptr[0], ptr[count > 1 ? 1 : 0]);
+ }
+ };
+ // Norm tracker for layer 0 only
+ auto vec_norm = [&](const char* label, const float* ptr, int count) {
+ if (layer_idx != 0 || seq_len < 1) return;
+ float ss = 0.0f;
+ for (int i = 0; i < count; i++) ss += ptr[i] * ptr[i];
+ fprintf(stderr, "[NORM] L0 %s: L2=%.4f max=%.4f min=%.4f\n",
+ label, sqrtf(ss), *std::max_element(ptr, ptr+count), *std::min_element(ptr, ptr+count));
+ };
 
-    // ── 1. Attention RMS Norm ──
-    for (int s = 0; s < seq_len; s++) {
-        rms_norm(input + s * hd, lw.attn_norm, normed + s * hd, hd, cfg_.norm_eps);
-    }
+ // ── Attention block (steps 1-7) — skipped for SSM-only hybrid blocks ──
+ if (lw.has_attention) {
+
+ // ── 1. Attention RMS Norm ──
+ for (int s = 0; s < seq_len; s++) {
+ rms_norm(input + s * hd, lw.attn_norm, normed + s * hd, hd, cfg_.norm_eps);
+ }
+ vec_norm("input", input, hd);
+ vec_norm("after_rms_norm", normed, hd);
+ check_nan("after_rms_norm", normed, hd, layer_idx);
 
     // ── 2. Q, K, V projections (gemv_dequant with inline dequant) ──
     if (lw.has_fused_qkv && lw.attn_qkv) {
@@ -600,13 +650,30 @@ void VibeBladeFast::forward_layer(
             memcpy(K_buf + s * kv_dim, Q + s * qkv_dim + q_dim, kv_dim * sizeof(float));
             memcpy(V_buf + s * kv_dim, Q + s * qkv_dim + q_dim + kv_dim, kv_dim * sizeof(float));
         }
-    } else {
-        for (int s = 0; s < seq_len; s++) {
-            gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype, dequant_buf_.data());
-            gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype, dequant_buf_.data());
-            gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype, dequant_buf_.data());
-        }
-    }
+ } else {
+ for (int s = 0; s < seq_len; s++) {
+ gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim, hd, q_dim, lw.qtype, dequant_buf_.data());
+ gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype, dequant_buf_.data());
+ gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype, dequant_buf_.data());
+ // Add Q/K/V biases if present
+ if (lw.attn_q_bias) {
+ for (int d = 0; d < q_dim; d++) Q[s * q_dim + d] += lw.attn_q_bias[d];
+ }
+ if (lw.attn_k_bias) {
+ for (int d = 0; d < kv_dim; d++) K_buf[s * kv_dim + d] += lw.attn_k_bias[d];
+ }
+ if (lw.attn_v_bias) {
+ for (int d = 0; d < kv_dim; d++) V_buf[s * kv_dim + d] += lw.attn_v_bias[d];
+ }
+
+ }
+ }
+ check_nan("after_Q_proj", Q, q_dim, layer_idx);
+ check_nan("after_K_proj", K_buf, kv_dim, layer_idx);
+ check_nan("after_V_proj", V_buf, kv_dim, layer_idx);
+ vec_norm("Q_proj", Q, q_dim);
+ vec_norm("K_proj", K_buf, kv_dim);
+ vec_norm("V_proj", V_buf, kv_dim);
 
     // ── 3. RoPE on Q and K ──
     for (int s = 0; s < seq_len; s++) {
@@ -655,11 +722,14 @@ void VibeBladeFast::forward_layer(
                     k[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
                 }
 #endif
-            }
-        }
-    }
+ }
+ }
+ }
+ check_nan("after_RoPE_Q", Q, q_dim, layer_idx);
+ vec_norm("Q_after_RoPE", Q, q_dim);
+ vec_norm("K_after_RoPE", K_buf, kv_dim);
 
-    // ── 4. Store K, V into KV cache ──
+ // ── 4. Store K, V into KV cache ──
     auto& k_cache = kv_k_[layer_idx];
     auto& v_cache = kv_v_[layer_idx];
     for (int s = 0; s < seq_len; s++) {
@@ -734,37 +804,43 @@ void VibeBladeFast::forward_layer(
         }
     }
 
-    // ── 6. Output projection ──
-    for (int s = 0; s < seq_len; s++) {
-        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype, dequant_buf_.data());
-    }
+ // ── 6. Output projection ──
+ for (int s = 0; s < seq_len; s++) {
+ gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype, dequant_buf_.data());
+ }
+ vec_norm("attn_out", attn_out, q_dim);
+ vec_norm("o_proj", o_proj, hd);
 
-    // ── 7. Post-attention residual ──
+ // ── 7. Post-attention residual ──
     for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
         memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
         vadd_residual(output + s * hd, o_proj + s * hd, hd);
 #else
         for (int d = 0; d < hd; d++) {
-            output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
-        }
+output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
+ }
 #endif
-    }
+ }
 
-    } // end if (lw.has_attention)
-    else {
-        // SSM-only hybrid block: no attention, pass input through to FFN
-        for (int s = 0; s < seq_len; s++) {
-            memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
-        }
-    }
+ vec_norm("after_attn_residual", output, hd);
 
-    // ── 8. FFN RMS Norm ──
-    for (int s = 0; s < seq_len; s++) {
-        rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
-    }
+ } // end if (lw.has_attention)
+ else {
+ // SSM-only hybrid block: no attention, pass input through to FFN
+ for (int s = 0; s < seq_len; s++) {
+ memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+ }
+ }
+ check_nan("after_attn_residual", output, hd, layer_idx);
 
-    // ── 9. FFN: MoE, Dense, or skip if no weights ──
+ // ── 8. FFN RMS Norm ──
+ for (int s = 0; s < seq_len; s++) {
+ rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
+ }
+ vec_norm("ffn_input_after_norm", normed, hd);
+
+ // ── 9. FFN: MoE, Dense, or skip if no weights ──
     if (lw.has_moe) {
         // ── MoE FFN (top-k expert routing) ──
         int n_exp = cfg_.n_experts;
@@ -829,10 +905,12 @@ void VibeBladeFast::forward_layer(
         for (int s = 0; s < seq_len; s++) {
             gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                          hd, cfg_.intermediate_dim, lw.gate_type, dequant_buf_.data());
-            gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
-                         hd, cfg_.intermediate_dim, lw.up_type, dequant_buf_.data());
+ gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
+ hd, cfg_.intermediate_dim, lw.up_type, dequant_buf_.data());
+ vec_norm("ffn_gate", gate_buf + s * cfg_.intermediate_dim, cfg_.intermediate_dim);
+ vec_norm("ffn_up", up_buf + s * cfg_.intermediate_dim, cfg_.intermediate_dim);
 
-            int id = cfg_.intermediate_dim;
+ int id = cfg_.intermediate_dim;
 
             if (cfg_.use_turbo_sparse) {
                 for (int i = 0; i < id; i++) {
@@ -876,24 +954,27 @@ void VibeBladeFast::forward_layer(
 #endif
             }
 
-            gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
-                         id, hd, lw.down_type, dequant_buf_.data());
-        }
-    } else {
+ gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
+ id, hd, lw.down_type, dequant_buf_.data());
+ vec_norm("ffn_down_out", ff_out + s * hd, hd);
+ }
+ } else {
         // No FFN weights (shouldn't happen in practice)
         memset(ff_out, 0, seq_len * hd * sizeof(float));
     }
 
-    // ── 10. Final residual: output += ff_out ──
-    for (int s = 0; s < seq_len; s++) {
+ // ── 10. Final residual: output += ff_out ──
+ for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
-        vadd_residual(output + s * hd, ff_out + s * hd, hd);
+ vadd_residual(output + s * hd, ff_out + s * hd, hd);
 #else
-        for (int d = 0; d < hd; d++) {
-            output[s * hd + d] += ff_out[s * hd + d];
-        }
+ for (int d = 0; d < hd; d++) {
+ output[s * hd + d] += ff_out[s * hd + d];
+ }
 #endif
-    }
+ }
+ check_nan("after_ffn_residual", output, hd, layer_idx);
+ vec_norm("final_output", output, hd);
 }
 
 // ════════════════════════════════════════════════════════════════

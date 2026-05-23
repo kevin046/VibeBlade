@@ -53,11 +53,15 @@ struct FastConfig {
 };
 
 struct LayerWeights {
-    const void* attn_q = nullptr;      ggml_type qtype = GGML_TYPE_F32;
-    const void* attn_k = nullptr;      ggml_type ktype = GGML_TYPE_F32;
-    const void* attn_v = nullptr;      ggml_type vtype = GGML_TYPE_F32;
-    const void* attn_o = nullptr;      ggml_type otype = GGML_TYPE_F32;
-    const void* ffn_gate = nullptr;    ggml_type gate_type = GGML_TYPE_F32;
+ const void* attn_q = nullptr; ggml_type qtype = GGML_TYPE_F32;
+ const void* attn_k = nullptr; ggml_type ktype = GGML_TYPE_F32;
+ const void* attn_v = nullptr; ggml_type vtype = GGML_TYPE_F32;
+ const void* attn_o = nullptr; ggml_type otype = GGML_TYPE_F32;
+ // Q/K/V biases (optional — Qwen2.5 uses them)
+ const float* attn_q_bias = nullptr;
+ const float* attn_k_bias = nullptr;
+ const float* attn_v_bias = nullptr;
+ const void* ffn_gate = nullptr; ggml_type gate_type = GGML_TYPE_F32;
     const void* ffn_up = nullptr;      ggml_type up_type = GGML_TYPE_F32;
     const void* ffn_down = nullptr;    ggml_type down_type = GGML_TYPE_F32;
     const float* attn_norm = nullptr;
@@ -158,8 +162,11 @@ std::vector<int> allowed_tokens_for_grammar() const;
     int position() const { return position_; }
     const FastConfig& config() const { return cfg_; }
     size_t kv_cache_bytes() const;
-    int eos_id() const { return tokenizer_.eos_id(); }
-    int bos_id() const { return tokenizer_.bos_id(); }
+ int eos_id() const { return tokenizer_.eos_id(); }
+ int bos_id() const { return tokenizer_.bos_id(); }
+
+ // ── Debug access ──
+ const GGUFFile& gguf() const { return *gguf_; }
 
     // ── Sampler config ──
     Sampler& sampler() { return sampler_; }
