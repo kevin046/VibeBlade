@@ -115,6 +115,14 @@ class DFlashStats:
         )
 
 
+def _record_stats(head: "DFlashDraftHead", t0: float, filtered: list[int]) -> None:
+    """Update DFlashStats after a draft call."""
+    elapsed_ms = (time.time() - t0) * 1000
+    head.stats.time_draft_ms += elapsed_ms
+    head.stats.n_draft_blocks += 1
+    head.stats.n_tokens_generated += len(filtered)
+
+
 def sample(logits: _torch_lazy().Tensor, temperature: float = 0.0) -> _torch_lazy().Tensor:
     """Sample from logits (greedy if temperature ≈ 0)."""
     if temperature < 1e-5:
@@ -202,7 +210,11 @@ def _dflash_forward_single_pass(
 
     # Project target_hidden to match draft hidden dimension
     # self.fc: [len(target_layer_ids) * target_hidden_dim] → [draft_hidden_dim]
-    target_proj = dflash_model.fc(target_hidden)  # [1, seq_ctx, draft_hidden]
+    # Cast to fc weight dtype to avoid BFloat16 != Half crash when target model
+    # outputs bf16 but draft weights are fp16 (or vice versa).
+    target_proj = dflash_model.fc(
+        target_hidden.to(dflash_model.fc.weight.dtype)
+    )  # [1, seq_ctx, draft_hidden]
     target_proj = dflash_model.hidden_norm(target_proj)
 
     bsz, block_size, _ = hidden.shape
@@ -522,77 +534,146 @@ class DFlashDraftHead:
         self,
         history: list[int],
         draft_max_override: int = 0,
+        target_hidden=None,
     ) -> list[int]:
         """
-        Generate a block of draft tokens using HuggingFace generate().
+        Generate a block of draft tokens.
 
-        This is the main entry point called by SpeculativeBackend.
-        Uses HF's native generate() for architecture-agnostic drafting.
-        block_size tokens are produced in one call (parallel draft per forward pass).
+        When *target_hidden* is provided (hidden states from the target model at
+        ``target_layer_ids``), uses **DFlash block diffusion** — a single forward
+        pass that produces *block_size* tokens in parallel, conditioned on the
+        target's intermediate representations.
+
+        Without *target_hidden*, falls back to standard autoregressive generation
+        via ``model.generate()`` (one forward pass per token).
 
         Args:
             history: Full token history (prompt + generated tokens so far).
-            draft_max_override: Ignored for DFlash (block_size governs draft length).
+            draft_max_override: Override draft length.
+            target_hidden: ``[1, seq, len(target_layer_ids) * target_hidden_dim]``
+                hidden states from the target model. When provided, enables the
+                DFlash parallel block diffusion path.
 
         Returns:
             List of draft token IDs (length ≤ block_size).
         """
         self._ensure_loaded()
         t0 = time.time()
+        torch = _torch_lazy()
 
-        # Encode history
-        input_ids = _torch_lazy().tensor([history], dtype=_torch_lazy().long, device=self.device)
-        input_length = input_ids.shape[1]
-
-        # How many new tokens to draft
-        n_draft = min(self.block_size, draft_max_override) if draft_max_override > 0 else self.block_size
+        n_draft = (
+            min(self.block_size, draft_max_override)
+            if draft_max_override > 0
+            else self.block_size
+        )
         n_draft = max(n_draft, 1)
 
-        with _torch_lazy().inference_mode():
-            # HuggingFace generate() — does a full forward pass per token internally.
-            # For a DFlash-trained model, this runs the block diffusion forward.
-            # For a regular model, this is a standard AR draft (still architecture-agnostic).
+        # ── DFlash block diffusion (parallel single-pass drafting) ──────
+        if target_hidden is not None:
+            mask_token_id = getattr(
+                self._model, "mask_token_id",
+                self._tokenizer.pad_token_id or 0,
+            )
+
+            if history:
+                last_id = torch.tensor(
+                    [[history[-1]]], dtype=torch.long, device=self.device,
+                )
+            else:
+                last_id = torch.tensor(
+                    [[self._tokenizer.bos_token_id or 1]],
+                    dtype=torch.long, device=self.device,
+                )
+
+            # Build block: last token seed + masked denoise positions
+            block_seq = torch.zeros(
+                (1, n_draft), dtype=torch.long, device=self.device,
+            )
+            block_seq[:, 0] = last_id.item()
+            block_seq[:, 1:] = mask_token_id
+
+            # Embed block tokens
+            try:
+                noise_emb = self._model.model.embed_tokens(block_seq)
+            except AttributeError:
+                noise_emb = self._model.embed_tokens(block_seq)
+
+            # Position IDs for RoPE
+            max_position = len(history)
+            pos_ids = torch.arange(
+                max_position, max_position + n_draft,
+                device=self.device,
+            ).unsqueeze(0)
+
+            with torch.inference_mode():
+                logits, _ = _dflash_forward_single_pass(
+                    self._model,
+                    target_hidden=target_hidden,
+                    noise_embedding=noise_emb,
+                    position_ids=pos_ids,
+                    past_key_values=None,
+                    use_cache=False,
+                )
+                sampled = sample(logits, self.temperature)  # [1, n_draft]
+
+            filtered = self._filter_tokens(sampled, n_draft)
+            _record_stats(self, t0, filtered)
+            return filtered
+
+        # ── AR fallback (standard autoregressive via HF generate) ──────
+        input_ids = torch.tensor(
+            [history], dtype=torch.long, device=self.device,
+        )
+        input_length = input_ids.shape[1]
+
+        with torch.inference_mode():
             output_ids = self._model.generate(
                 input_ids=input_ids,
                 max_new_tokens=n_draft,
-                do_sample=False,  # greedy for consistency with target
+                do_sample=False,
                 pad_token_id=self._tokenizer.pad_token_id or 0,
                 eos_token_id=self._tokenizer.eos_token_id or -1,
-                # Suppress warnings for models with unexpected tokens
                 suppress_tokens=None,
                 output_hidden_states=False,
                 return_dict_in_generate=False,
             )
 
-        # Extract just the new tokens (everything after the prompt)
         drafted = output_ids[0, input_length:].tolist()
+        filtered = self._filter_token_list(drafted)
+        _record_stats(self, t0, filtered)
+        return filtered
 
-        # Determine safe token range
-        # If target_vocab_size is set, clamp draft tokens to avoid decode failures
-        # from vocab mismatch between HF draft tokenizer and GGUF target vocab
-        vocab_max = self.target_vocab_size if self.target_vocab_size else 2**31
-        vocab_min = 0
-
-        # Filter: skip special tokens (but handle -1 / invalid EOS)
+    def _filter_tokens(self, sampled, n_draft):
+        """Filter special tokens from a sampled tensor [1, n_draft]."""
+        torch = _torch_lazy()
         eos_id = self._tokenizer.eos_token_id
         pad_id = self._tokenizer.pad_token_id or 0
         bos_id = self._tokenizer.bos_token_id or 0
+        vocab_max = self.target_vocab_size if self.target_vocab_size else 2**31
+        special_ids = {eos_id, pad_id, bos_id}
+
+        filtered = []
+        for i in range(n_draft):
+            tok_id = sampled[0, i].item()
+            if tok_id in special_ids:
+                continue
+            filtered.append(max(0, min(tok_id, vocab_max - 1)))
+        return filtered
+
+    def _filter_token_list(self, drafted):
+        """Filter special tokens from a token ID list."""
+        eos_id = self._tokenizer.eos_token_id
+        pad_id = self._tokenizer.pad_token_id or 0
+        bos_id = self._tokenizer.bos_token_id or 0
+        vocab_max = self.target_vocab_size if self.target_vocab_size else 2**31
         special_ids = {eos_id, pad_id, bos_id, -1}
-        special_ids.discard(-1)  # don't filter -1, we handle it below
+        special_ids.discard(-1)
 
         filtered = []
         for t in drafted:
             if t in special_ids:
                 continue
-            # Clamp out-of-range tokens (vocab mismatch safety net)
-            clamped = max(vocab_min, min(t, vocab_max - 1))
-            filtered.append(clamped)
-
-        draft_time_ms = (time.time() - t0) * 1000
-        self.stats.time_draft_ms += draft_time_ms
-        self.stats.n_draft_blocks += 1
-        self.stats.n_tokens_generated += len(filtered)
-
+            filtered.append(max(0, min(t, vocab_max - 1)))
         return filtered
 
     def _extract_draft_hidden_features(self, hidden_states: list[_torch_lazy().Tensor]) -> _torch_lazy().Tensor:

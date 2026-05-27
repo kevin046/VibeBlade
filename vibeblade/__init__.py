@@ -94,6 +94,26 @@ from .sparse import (
     drelu_gate,
     EMANeuronPredictor,
 )
+# v2.0: Unified speculative decoding engine (multi-backend, 3 draft strategies)
+from .target_backend import (
+    TargetBackend,
+    TargetLogits,
+    GenerateResult,
+    create_target_backend,
+    sample_from_logits,
+)
+from .draft_heads import (
+    DraftHead,
+    NgramDraftHead,
+    EAGLEDraftHead,
+    DFlashDraftHead,
+    NEXTNDraftHead,
+    create_draft_head,
+)
+from .speculative_decoding import (
+    SpeculativeDecodingEngine,
+    SpeculativeStats,
+)
 # ONNX Runtime / TensorRT accelerated inference (lazy imports — requires onnxruntime)
 # Loaded via __getattr__ at bottom of file to avoid import errors when packages aren't installed.
 
@@ -169,6 +189,10 @@ __all__ = [
     "SageConfig", "SageRequest", "SageSched", "entropy_from_logits", "entropy_from_probs",
     # TurboSparse — EMA neuron prediction + dReLU gating (§1)
     "drelu_gate", "EMANeuronPredictor",
+    # v2.0: Universal speculative decoding (multi-backend, 3 draft strategies)
+    "TargetBackend", "TargetLogits", "GenerateResult", "create_target_backend", "sample_from_logits",
+    "DraftHead", "NgramDraftHead", "EAGLEDraftHead", "DFlashDraftHead", "NEXTNDraftHead", "create_draft_head",
+    "SpeculativeDecodingEngine", "SpeculativeStats",
 ]
 
 
