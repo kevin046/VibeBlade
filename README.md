@@ -8,28 +8,7 @@ LLM inference acceleration platform. Speed up any model on your own hardware usi
 
 ---
 
-## What it does
-
-VibeBlade is an **inference acceleration platform** that combines multiple complementary optimization strategies into a unified pipeline. Each technique targets a different bottleneck — compute, memory, scheduling, or token generation — so you can stack them for maximum throughput.
-
-**Optimization strategies:**
-
-| Strategy | Target bottleneck | Technique | Typical speedup |
-|---|---|---|---:|
-| **Speculative decoding** | Token-by-token serial generation | Draft model proposes, target verifies in batch | 1.3–3x |
-| **Activation sparsity** (TurboSparse) | Dense FFN compute (90%+ wasted) | EMA neuron predictor + dReLU gating skips inactive neurons | 1.3–2.5x |
-| **KV quantization** (RotateKV) | KV cache memory bandwidth | Hadamard rotation + 2-bit quantization | ~8x memory reduction |
-| **Chunked prefill** (SARATHI) | Head-of-line blocking | Interleave prefill chunks with decode iterations | Higher batch throughput |
-| **Entropy scheduling** (SageSched) | Unfair resource allocation | Shannon entropy-based priority for uncertain requests | Better QoS |
-| **MoE tiered memory** | Expert weight transfer over PCIe | 3-tier VRAM/RAM/SSD with adaptive eviction | Near-native latency |
-| **Grammar constraints** | Wasteful re-sampling | Constrained decoding (regex, JSON schema, EBNF) | 2–10x on structured output |
-| **Native C++ engine** | Python interpreter overhead | mmap GGUF, SIMD-optimized (AVX-512/NEON), CUDA optional | Up to 5x over pure Python |
-
-These compose — activation sparsity reduces compute per token, speculative decoding amortizes verification cost, KV quantization fits more sequences in cache, and chunked scheduling keeps the GPU fed.
-
----
-
-## Quick start
+## Install
 
 ### Prerequisites
 
@@ -39,8 +18,6 @@ These compose — activation sparsity reduces compute per token, speculative dec
   - **macOS:** `xcode-select --install && brew install cmake`
   - **Windows:** Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/)
 - **CUDA Toolkit 13.0+** (optional) — for GPU acceleration on NVIDIA GPUs
-
-### Install
 
 **Linux / macOS**
 ```bash
@@ -81,6 +58,31 @@ python cpp/build_cpp.py
 ```
 
 SIMD auto-detected at build time: AVX-512, AVX2, NEON (Apple Silicon / ARM), or scalar fallback.
+
+---
+
+## What it does
+
+VibeBlade is an **inference acceleration platform** that combines multiple complementary optimization strategies into a unified pipeline. Each technique targets a different bottleneck — compute, memory, scheduling, or token generation — so you can stack them for maximum throughput.
+
+**Optimization strategies:**
+
+| Strategy | Target bottleneck | Technique | Typical speedup |
+|---|---|---|---:|
+| **Speculative decoding** | Token-by-token serial generation | Draft model proposes, target verifies in batch | 1.3–3x |
+| **Activation sparsity** (TurboSparse) | Dense FFN compute (90%+ wasted) | EMA neuron predictor + dReLU gating skips inactive neurons | 1.3–2.5x |
+| **KV quantization** (RotateKV) | KV cache memory bandwidth | Hadamard rotation + 2-bit quantization | ~8x memory reduction |
+| **Chunked prefill** (SARATHI) | Head-of-line blocking | Interleave prefill chunks with decode iterations | Higher batch throughput |
+| **Entropy scheduling** (SageSched) | Unfair resource allocation | Shannon entropy-based priority for uncertain requests | Better QoS |
+| **MoE tiered memory** | Expert weight transfer over PCIe | 3-tier VRAM/RAM/SSD with adaptive eviction | Near-native latency |
+| **Grammar constraints** | Wasteful re-sampling | Constrained decoding (regex, JSON schema, EBNF) | 2–10x on structured output |
+| **Native C++ engine** | Python interpreter overhead | mmap GGUF, SIMD-optimized (AVX-512/NEON), CUDA optional | Up to 5x over pure Python |
+
+These compose — activation sparsity reduces compute per token, speculative decoding amortizes verification cost, KV quantization fits more sequences in cache, and chunked scheduling keeps the GPU fed.
+
+---
+
+## Quick start
 
 ### Web UI (chat interface)
 
