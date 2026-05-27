@@ -466,8 +466,8 @@ class DFlashDraftHead:
         dtype_map = {"float32": _torch_lazy().float32, "float16": _torch_lazy().float16, "bfloat16": _torch_lazy().bfloat16}
         dtype = dtype_map.get(self.torch_dtype, _torch_lazy().float32)
 
-        # Load draft model — AutoModelForCausalLM gives the full model with generate()
-        self._model = tf.AutoModelForCausalLM.from_pretrained(
+        # Load draft model — AutoModel resolves DFlashDraftModel via auto_map config
+        self._model = tf.AutoModel.from_pretrained(
             self.draft_model_name,
             torch_dtype=dtype,
             device_map=self.device,
@@ -475,6 +475,12 @@ class DFlashDraftHead:
             token=self.token,
         )
         self._model.eval()
+
+        # Extract DFlash-specific config
+        if hasattr(self._model, 'block_size'):
+            self.block_size = self._model.block_size
+        if hasattr(self._model, 'target_layer_ids'):
+            self._target_layer_ids = self._model.target_layer_ids
 
         # Load target model for tokenizer (and hidden feature extraction if available)
         # Note: we load target lazily; for self-conditioned DFlash we use the draft
