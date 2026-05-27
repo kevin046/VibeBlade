@@ -626,25 +626,41 @@ class DFlashDraftHead:
             _record_stats(self, t0, filtered)
             return filtered
 
-        # ── AR fallback (standard autoregressive via HF generate) ──────
-        input_ids = torch.tensor(
-            [history], dtype=torch.long, device=self.device,
-        )
-        input_length = input_ids.shape[1]
+        # ── No target_hidden provided ──────────────────────────────────────
+        # DFlash is a diffusion head conditioned on target model features.
+        # Without target_hidden, it cannot produce meaningful draft tokens.
+        # Two options:
+        #   1. Use spec_generate() if a local target model is loaded
+        #   2. Return empty draft (caller should use n-gram or EAGLE instead)
+        if self._target is not None:
+            # Local target available — use spec_generate for DFlash block diffusion
+            with torch.inference_mode():
+                input_ids = torch.tensor(
+                    [history[-512:]], dtype=torch.long, device=self.device,
+                )
+                try:
+                    output_ids = self._model.spec_generate(
+                        self._target,
+                        input_ids,
+                        block_size=n_draft,
+                        temperature=self.temperature,
+                    )
+                    drafted = output_ids[0, input_ids.shape[1]:].tolist()
+                except Exception as e:
+                    logger.debug(f"spec_generate failed: {e}")
+                    drafted = []
+        else:
+            # No local target — DFlash can't draft without target hidden states.
+            # Log once per session and return empty.
+            if not getattr(self, '_warned_no_target', False):
+                logger.info(
+                    "DFlash: no target_hidden and no local target model. "
+                    "Draft returns empty — use n-gram/EAGLE for HTTP backends "
+                    "or load a local target model for DFlash block diffusion."
+                )
+                self._warned_no_target = True
+            drafted = []
 
-        with torch.inference_mode():
-            output_ids = self._model.generate(
-                input_ids=input_ids,
-                max_new_tokens=n_draft,
-                do_sample=False,
-                pad_token_id=self._tokenizer.pad_token_id or 0,
-                eos_token_id=self._tokenizer.eos_token_id or -1,
-                suppress_tokens=None,
-                output_hidden_states=False,
-                return_dict_in_generate=False,
-            )
-
-        drafted = output_ids[0, input_length:].tolist()
         filtered = self._filter_token_list(drafted)
         _record_stats(self, t0, filtered)
         return filtered

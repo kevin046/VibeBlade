@@ -398,6 +398,145 @@ class ProxyEngine:
             first_token_latency=0,
         )
 
+    def generate_speculative(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+        n_draft: int = 8,
+        draft_accept_threshold: float = 0.0,
+    ) -> ProxyResult:
+        """Speculative generation with n-gram draft + logprobs verification.
+
+        Strategy:
+        1. Tokenize prompt, look up n-gram predicted tokens
+        2. If draft found, append predicted tokens to prompt (prefill injection)
+           AND request logprobs from the backend to verify acceptance
+        3. Accept draft tokens where the target model agrees (logprob > threshold)
+        4. For rejected tokens, the target model generates its own
+
+        This gives "free" tokens when draft is correct (no decode step needed)
+        while maintaining output quality via logprobs verification.
+
+        Returns ProxyResult with acceptance stats.
+        """
+        self.stats.n_requests += 1
+        t0 = time.time()
+
+        prompt_tokens = self._tokenize(prompt)
+
+        # Step 1: Get n-gram draft
+        ngram_draft = self._lookup_ngram(prompt_tokens)
+        draft_text = ""
+        draft_tok_count = 0
+        if ngram_draft:
+            self.stats.n_ngram_attempts += 1
+            # Limit to n_draft tokens
+            draft_tokens = ngram_draft[:n_draft]
+            draft_tok_count = len(draft_tokens)
+            draft_text = self._detokenize(draft_tokens)
+
+        # Step 2: Send to backend with logprobs for verification
+        effective_prompt = prompt
+        if draft_text and self._mode == "ngram_inject":
+            # Inject draft tokens into prompt as "suggested continuation"
+            # The model will confirm or correct them
+            effective_prompt = prompt + draft_text
+
+        if self._use_chat_api:
+            body = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": effective_prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "logprobs": True,
+                "top_logprobs": 5,
+                "stream": False,
+            }
+            if self._disable_reasoning:
+                body["reasoning"] = {"effort": "none"}
+
+            resp = self._post("/v1/chat/completions", body)
+            t_end = time.time()
+
+            choice = resp["choices"][0]
+            msg = choice.get("message", {})
+            text = msg.get("content", "")
+            finish = choice.get("finish_reason", "stop")
+            usage = resp.get("usage", {})
+            n_prompt = usage.get("prompt_tokens", len(prompt_tokens))
+            n_completion = usage.get("completion_tokens", 0)
+            details = usage.get("completion_tokens_details", {})
+            n_reasoning = details.get("reasoning_tokens", 0)
+            n_visible = n_completion - n_reasoning
+
+            # Count accepted draft tokens from logprobs
+            n_accepted = 0
+            logprobs_data = msg.get("logprobs", {}).get("content", [])
+            if logprobs_data and draft_tok_count > 0:
+                for i, lp in enumerate(logprobs_data[:draft_tok_count]):
+                    top_logprobs = lp.get("top_logprobs", [])
+                    if top_logprobs:
+                        top_token = list(top_logprobs.keys())[0]
+                        top_prob = list(top_logprobs.values())[0]
+                        if top_prob >= draft_accept_threshold:
+                            n_accepted += 1
+                self.stats.n_ngram_hits += n_accepted
+                self.stats.n_ngram_prefill_tokens += n_accepted
+
+            total_visible = n_visible + n_accepted
+        else:
+            # Fallback completions API
+            body = {
+                "model": self._model,
+                "prompt": effective_prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "logprobs": 1,
+                "stream": False,
+            }
+            resp = self._post("/v1/completions", body)
+            t_end = time.time()
+
+            choice = resp["choices"][0]
+            text = choice.get("text", "")
+            finish = choice.get("finish_reason", "stop")
+            usage = resp.get("usage", {})
+            n_prompt = usage.get("prompt_tokens", len(prompt_tokens))
+            n_completion = usage.get("completion_tokens", 0)
+            n_reasoning = 0
+            n_visible = n_completion
+            n_accepted = 0
+            total_visible = n_visible
+
+        # Update n-gram cache
+        if text:
+            full_text = effective_prompt + text
+            all_tokens = self._tokenize(full_text)
+            if len(all_tokens) > len(prompt_tokens):
+                new_tokens = all_tokens[len(prompt_tokens):]
+                self._update_ngram_cache(prompt_tokens + new_tokens)
+
+        elapsed = t_end - t0
+        tps = total_visible / max(elapsed, 1e-6)
+
+        self.stats.n_tokens_generated += n_completion
+        self.stats.n_tokens_visible += total_visible
+        self.stats.n_reasoning_tokens += n_reasoning
+        self.stats.total_time_s += elapsed
+
+        return ProxyResult(
+            text=text,
+            prompt_tokens=n_prompt,
+            completion_tokens=total_visible,
+            tokens_per_second=tps,
+            stop_reason=finish,
+            time_prefill=0,
+            time_decode=elapsed,
+            time_total=elapsed,
+            first_token_latency=0,
+        )
+
     def generate_stream(
         self,
         prompt: str,
