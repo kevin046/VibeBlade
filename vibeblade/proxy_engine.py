@@ -477,7 +477,7 @@ class ProxyEngine:
                 for i, lp in enumerate(logprobs_data[:draft_tok_count]):
                     top_logprobs = lp.get("top_logprobs", [])
                     if top_logprobs:
-                        top_token = list(top_logprobs.keys())[0]
+                        list(top_logprobs.keys())[0]
                         top_prob = list(top_logprobs.values())[0]
                         if top_prob >= draft_accept_threshold:
                             n_accepted += 1

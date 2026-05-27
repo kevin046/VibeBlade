@@ -47,9 +47,12 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # ── Lazy imports (torch + transformers are optional dependencies) ─────
 _torch = None
@@ -667,7 +670,7 @@ class DFlashDraftHead:
 
     def _filter_tokens(self, sampled, n_draft):
         """Filter special tokens from a sampled tensor [1, n_draft]."""
-        torch = _torch_lazy()
+        _torch_lazy()
         eos_id = self._tokenizer.eos_token_id
         pad_id = self._tokenizer.pad_token_id or 0
         bos_id = self._tokenizer.bos_token_id or 0

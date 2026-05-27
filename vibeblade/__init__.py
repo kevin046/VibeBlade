@@ -106,7 +106,6 @@ from .draft_heads import (
     DraftHead,
     NgramDraftHead,
     EAGLEDraftHead,
-    DFlashDraftHead,
     NEXTNDraftHead,
     create_draft_head,
 )

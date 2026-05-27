@@ -544,7 +544,7 @@ Examples:
             draft_backend=None,  # set via --draft-model in future
         )
     elif args.draft == "dflash":
-        from .draft_heads import DFlashDraftHead, NgramDraftHead as _Ngram
+        from .draft_heads import DFlashDraftHead
         if not args.draft_model:
             print("  ⚠️  --draft-model is required for DFlash. Using n-gram fallback.")
             from .draft_heads import NgramDraftHead
@@ -584,10 +584,10 @@ Examples:
     print(f"  Docs:    http://localhost:{args.port}/docs\n")
 
     if target.health():
-        print(f"  ✅ Target backend is healthy\n")
+        print("  ✅ Target backend is healthy\n")
     else:
         print(f"  ⚠️  Target backend not responding at {args.backend_url}")
-        print(f"     Will retry on first request.\n")
+        print("     Will retry on first request.\n")
 
     app = create_app(engine=engine, model_id=args.model)
 

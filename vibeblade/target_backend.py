@@ -42,7 +42,7 @@ import random
 import time
 import urllib.request
 import urllib.error
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Generator, Optional
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def sample_from_logits(
         return int(max(range(len(logits)), key=lambda i: logits[i]))
 
     # Apply temperature
-    scaled = [l / temperature for l in logits]
+    scaled = [x / temperature for x in logits]
 
     # Top-k filtering
     if 0 < top_k < len(scaled):

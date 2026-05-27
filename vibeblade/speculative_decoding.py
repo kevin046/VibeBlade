@@ -39,14 +39,13 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Any, Generator, Optional
+from dataclasses import dataclass
+from typing import Generator, Optional
 
 from .draft_heads import DraftHead, NgramDraftHead
 from .target_backend import (
     GenerateResult,
     TargetBackend,
-    TargetLogits,
     sample_from_logits,
 )
 
@@ -261,7 +260,6 @@ class SpeculativeDecodingEngine:
 
                 # Verify each draft token against target logits
                 n_accepted = 0
-                rejected = False
 
                 for i, draft_tok in enumerate(remaining_draft):
                     if i + 1 >= len(verify_result.logits_per_position):
@@ -278,7 +276,6 @@ class SpeculativeDecodingEngine:
                         # Rejection: use target's prediction instead
                         if target_tok != self.target.eos_token_id():
                             accepted_tokens.append(target_tok)
-                        rejected = True
                         break
 
                 self.stats.n_draft_accepted += n_accepted

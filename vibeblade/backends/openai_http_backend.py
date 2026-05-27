@@ -16,15 +16,11 @@ from __future__ import annotations
 import logging
 import urllib.request
 import urllib.error
-from typing import Any, Optional
+from typing import Optional
 
 from ..target_backend import (
     TargetBackend,
     TargetLogits,
-    GenerateResult,
-    _http_post,
-    _http_get,
-    sample_from_logits,
 )
 
 logger = logging.getLogger(__name__)
