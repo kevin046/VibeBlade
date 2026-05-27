@@ -1,6 +1,6 @@
 # VibeBlade
 
-Universal speculative decoding layer. Run any LLM faster on your own hardware — no cloud, no subscription.
+LLM inference acceleration platform. Speed up any model on your own hardware using a toolkit of complementary optimization strategies — speculative decoding, activation sparsity, KV quantization, chunked scheduling, and more. No cloud, no subscription.
 
 [![Build Status](https://github.com/kevin046/VibeBlade/actions/workflows/build.yml/badge.svg)](https://github.com/kevin046/VibeBlade/actions)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL_1.1-orange.svg)](LICENSE)
@@ -10,21 +10,22 @@ Universal speculative decoding layer. Run any LLM faster on your own hardware �
 
 ## What it does
 
-VibeBlade is a **speculative decoding engine** that sits between your application and any inference backend (sglang, vLLM, llama.cpp, or OpenAI-compatible HTTP servers). It generates draft tokens using one of four strategies, then verifies them against the target model — accepting correct tokens in batches for 1.5–3x throughput improvement.
+VibeBlade is an **inference acceleration platform** that combines multiple complementary optimization strategies into a unified pipeline. Each technique targets a different bottleneck — compute, memory, scheduling, or token generation — so you can stack them for maximum throughput.
 
-**Draft strategies:**
+**Optimization strategies:**
 
-| Strategy | How it works | Best for |
-|---|---|---|
-| **N-gram** | Predicts next tokens from recent history patterns | Repetitive/code text, zero overhead |
-| **EAGLE** | Lightweight neural draft model | General-purpose, high acceptance |
-| **DFlash** | Block diffusion with target hidden-state conditioning | Qwen3 models, parallel draft |
-| **NEXTN** | N-gram + neural hybrid (built into sglang) | Qwen3.6 hybrid MoE+SSM models |
+| Strategy | Target bottleneck | Technique | Typical speedup |
+|---|---|---|---:|
+| **Speculative decoding** | Token-by-token serial generation | Draft model proposes, target verifies in batch | 1.3–3x |
+| **Activation sparsity** (TurboSparse) | Dense FFN compute (90%+ wasted) | EMA neuron predictor + dReLU gating skips inactive neurons | 1.3–2.5x |
+| **KV quantization** (RotateKV) | KV cache memory bandwidth | Hadamard rotation + 2-bit quantization | ~8x memory reduction |
+| **Chunked prefill** (SARATHI) | Head-of-line blocking | Interleave prefill chunks with decode iterations | Higher batch throughput |
+| **Entropy scheduling** (SageSched) | Unfair resource allocation | Shannon entropy-based priority for uncertain requests | Better QoS |
+| **MoE tiered memory** | Expert weight transfer over PCIe | 3-tier VRAM/RAM/SSD with adaptive eviction | Near-native latency |
+| **Grammar constraints** | Wasteful re-sampling | Constrained decoding (regex, JSON schema, EBNF) | 2–10x on structured output |
+| **Native C++ engine** | Python interpreter overhead | mmap GGUF, SIMD-optimized (AVX-512/NEON), CUDA optional | Up to 5x over pure Python |
 
-**Also includes:**
-- **ChatGPT-like web UI** — dark theme, streaming SSE, conversation history, Markdown + syntax highlighting, settings panel
-- **Native C++ inference engine** — mmap'd GGUF weights, SIMD-optimized (AVX-512/NEON), optional CUDA backend
-- **Research modules** — TurboSparse activation sparsity, RotateKV quantization, SARATHI chunked prefill, SageSched scheduling
+These compose — activation sparsity reduces compute per token, speculative decoding amortizes verification cost, KV quantization fits more sequences in cache, and chunked scheduling keeps the GPU fed.
 
 ---
 
@@ -34,7 +35,7 @@ VibeBlade is a **speculative decoding engine** that sits between your applicatio
 
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e ".[all]"    # Python deps + dev tools
+pip install -e ".[all]"
 ```
 
 ### Web UI (chat interface)
@@ -43,16 +44,16 @@ pip install -e ".[all]"    # Python deps + dev tools
 vibeblade chat --backend-url http://localhost:8000 --port 8080
 ```
 
-Opens a ChatGPT-like dark-themed UI at `http://localhost:8080`. Requires an inference backend running (sglang, vLLM, etc.).
+ChatGPT-like dark-themed UI with streaming, Markdown, code highlighting, conversation history, and a settings panel. Just point it at any running inference backend.
 
-### Speculative decoding API server
+### Speculative decoding server
 
 ```bash
 vibeblade serve --backend sglang --backend-url http://localhost:8000 \
                 --model qwen3.6-27b-mtp --draft ngram --max-draft 8
 ```
 
-Starts an OpenAI-compatible API at `/v1/chat/completions` and `/v1/completions` with speculative decoding.
+Wraps any inference backend with speculative decoding. Exposes an OpenAI-compatible API that any client can consume.
 
 ### Benchmark
 
@@ -60,123 +61,38 @@ Starts an OpenAI-compatible API at `/v1/chat/completions` and `/v1/completions` 
 vibeblade bench --backend-url http://localhost:8000 --concurrent 8 --max-tokens 512
 ```
 
-Reports per-request and aggregate tok/s across multiple rounds.
-
 ---
 
 ## CLI
 
 ```
-vibeblade serve   Start speculative decoding API server
+vibeblade serve   Start optimized inference API server (speculative decoding)
 vibeblade chat    Launch web UI
 vibeblade bench   Run throughput benchmarks
 ```
 
-Each subcommand has its own `--help`:
-
 ```bash
-vibeblade serve --help
-vibeblade chat --help
-vibeblade bench --help
+vibeblade serve --help    # Backend, draft strategy, sampling params
+vibeblade chat --help     # Backend URL, host, port
+vibeblade bench --help    # Concurrency, token limits, rounds
 ```
 
 ---
 
-## Web UI
+## Speculative decoding
 
-The `vibeblade chat` command launches a full-featured ChatGPT-like interface:
+The core of VibeBlade's acceleration. A lightweight draft model proposes multiple candidate tokens; the target model verifies them in a single forward pass. Accepted tokens are emitted at batch speed; rejected tokens fall back to autoregressive.
 
-- **Sidebar** — conversation list with search, create, delete, rename
-- **Streaming** — real-time token delivery via SSE with cursor animation
-- **Markdown** — full GFM rendering with syntax-highlighted code blocks (highlight.js)
-- **Settings** — temperature, max tokens, top-p, top-k, system prompt
-- **Persistence** — conversations saved to JSON, settings to localStorage
-- **Copy** — one-click copy on messages and code blocks
-- **Mobile** — responsive layout with collapsible sidebar
-- **Keyboard** — Ctrl+N (new chat), Enter (send), Shift+Enter (newline), Esc (close panels)
+**Draft strategies:**
 
-Architecture: FastAPI backend proxies to the inference server with `reasoning: {"effort": "none"}` to eliminate hidden thinking token overhead. Frontend is a single-page app (HTML/CSS/JS, no framework).
+| Strategy | How it works | Overhead | Best for |
+|---|---|---|---|
+| **N-gram** | Predicts from recent token history | Zero (no model) | Code, repetitive text |
+| **EAGLE** | Lightweight neural draft head | Small | General-purpose, high acceptance |
+| **DFlash** | Block diffusion conditioned on target hidden states | Medium | Qwen3 models, parallel block gen |
+| **NEXTN** | N-gram + neural hybrid (sglang built-in) | Built-in | Qwen3.6 hybrid MoE+SSM |
 
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────┐
-│  Client (curl, openai SDK, web UI, LangChain, etc.)  │
-└──────────────────────────┬──────────────────────────┘
-                           │
-                           ▼
-┌──────────────────────────────────────────────────────┐
-│  VibeBlade API Server (OpenAI-compatible)            │
-│                                                      │
-│  ┌─────────────┐    ┌────────────────────────────┐   │
-│  │ Draft Head  │───▶│ Speculative Decoding Engine │   │
-│  │ (n-gram /   │    │  draft → verify → accept    │   │
-│  │  eagle /    │    └──────────┬─────────────────┘   │
-│  │  dflash /   │               │                     │
-│  │  nextn)     │               ▼                     │
-│  └─────────────┘    ┌──────────────────────┐        │
-│                      │ Target Backend      │        │
-│                      │ (sglang / vLLM /     │        │
-│                      │  llama.cpp / HTTP)   │        │
-│                      └──────────────────────┘        │
-└──────────────────────────────────────────────────────┘
-```
-
-### Target backends
-
-| Backend | Class | Protocol |
-|---|---|---|
-| sglang | `SglangTargetBackend` | HTTP (OpenAI-compatible) |
-| vLLM | `VllmTargetBackend` | HTTP (OpenAI-compatible) |
-| llama.cpp | `OpenAIHttpTargetBackend` | HTTP |
-| Any OpenAI server | `OpenAIHttpTargetBackend` | HTTP |
-
-### API endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/v1/chat/completions` | POST | Chat completions (streaming supported) |
-| `/v1/completions` | POST | Legacy text completions |
-| `/v1/models` | GET | List available models |
-| `/health` | GET | Liveness check |
-| `/v1/me` | GET | API info |
-
-### Web UI API endpoints
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/chat` | POST | Send message (SSE stream) |
-| `/api/conversations` | GET/POST | List / create conversations |
-| `/api/conversations/{id}` | GET/DELETE/PATCH | Read / delete / rename |
-| `/api/models` | GET | List backend models |
-| `/api/health` | GET | Health check |
-
----
-
-## Python API
-
-### Speculative decoding server
-
-```python
-from vibeblade.openai_server import main
-
-# Launch with defaults: OpenAI backend, n-gram draft, port 8080
-main()
-
-# Or with custom args
-main([
-    "--backend", "sglang",
-    "--backend-url", "http://localhost:8000",
-    "--model", "qwen3.6-27b-mtp",
-    "--draft", "ngram",
-    "--max-draft", 8,
-    "--port", 8080,
-])
-```
-
-### Proxy engine (HTTP-based, no local model needed)
+**Target backends:** sglang, vLLM, llama.cpp, any OpenAI-compatible HTTP server.
 
 ```python
 from vibeblade.proxy_engine import ProxyEngine
@@ -187,34 +103,138 @@ engine = ProxyEngine(
     mode="ngram_inject",  # passthrough | ngram_cache | ngram_inject
 )
 
-# Single request
-result = engine.generate("Write a Python sort function", max_tokens=256)
-print(result.text)
+result = engine.generate("Write a sort function", max_tokens=256)
 print(f"{result.stats.tokens_per_second:.1f} tok/s")
 
 # Concurrent benchmark
-results = engine.benchmark(n_concurrent=8, max_tokens=256)
+engine.benchmark(n_concurrent=8, max_tokens=256)
 ```
 
-### Draft heads
+---
+
+## Web UI
+
+The `vibeblade chat` command launches a full-featured interface:
+
+- Streaming SSE with real-time token delivery
+- Sidebar with conversation list (search, create, delete, rename)
+- Markdown rendering with syntax-highlighted code blocks (highlight.js)
+- Settings panel (temperature, max tokens, top-p, top-k, system prompt)
+- Conversation persistence (server-side JSON) and settings (localStorage)
+- Copy buttons on messages and code blocks
+- Mobile responsive, keyboard shortcuts (Ctrl+N, Enter, Shift+Enter, Esc)
+
+Architecture: FastAPI backend proxies to the inference server with `reasoning: {"effort": "none"}` to strip hidden thinking token overhead. Frontend is a single-page app — no framework, no build step.
+
+---
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  Clients: curl, openai SDK, web UI, LangChain, browsers  │
+└──────────────────────────┬───────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────┐
+│  VibeBlade Inference Acceleration Platform               │
+│                                                          │
+│  ┌───────────────┐  ┌────────────┐  ┌────────────────┐  │
+│  │ Speculative   │  │ TurboSparse│  │ Chunked Prefill│  │
+│  │ Decoding      │  │ Activation │  │ Scheduling     │  │
+│  │ Engine        │  │ Sparsity   │  │ (SARATHI)      │  │
+│  │               │  │            │  │                │  │
+│  │ n-gram        │  │ EMA Neuron │  │ Dynamic chunk  │  │
+│  │ EAGLE         │  │ Predictor  │  │ interleaving   │  │
+│  │ DFlash        │  │ + dReLU    │  │                │  │
+│  │ NEXTN         │  │ gating     │  │                │  │
+│  └───────┬───────┘  └──────┬─────┘  └───────┬────────┘  │
+│          │                 │                 │           │
+│          ▼                 ▼                 ▼           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │  Unified Inference Pipeline                          │ │
+│  │                                                     │ │
+│  │  RotateKV    SageSched    Grammar    MoE Tiered     │ │
+│  │  (2-bit KV) (entropy     (regex/    (VRAM/RAM/     │ │
+│  │  quantiz.    scheduling)  JSON/EBNF) SSD memory)     │ │
+│  └──────────────────────┬──────────────────────────────┘ │
+│                         │                                │
+│                         ▼                                │
+│  ┌──────────────────────────────────────────────────────┐│
+│  │  Target Backend                                      ││
+│  │  sglang / vLLM / llama.cpp / OpenAI HTTP / C++ GGUF ││
+│  └──────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────┘
+```
+
+Each optimization is a composable module — use one, or stack them all. The speculative decoding engine runs over HTTP and works with any backend. The native C++ engine runs locally for GGUF models with all optimizations compiled in.
+
+---
+
+## API
+
+### Inference server (`vibeblade serve`)
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/chat/completions` | POST | Chat completions (streaming) |
+| `/v1/completions` | POST | Text completions |
+| `/v1/models` | GET | List models |
+| `/health` | GET | Liveness check |
+
+### Web UI (`vibeblade chat`)
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/chat` | POST | Send message (SSE stream) |
+| `/api/conversations` | GET/POST | List / create conversations |
+| `/api/conversations/{id}` | GET/DELETE/PATCH | Read / delete / rename |
+| `/api/models` | GET | List backend models |
+
+---
+
+## Python API
+
+### Speculative decoding
 
 ```python
 from vibeblade.draft_heads import create_draft_head
+from vibeblade.proxy_engine import ProxyEngine
 
-# N-gram draft (zero overhead, good for code)
 draft = create_draft_head("ngram", n=5, max_draft=8)
-
-# EAGLE neural draft (higher quality predictions)
-draft = create_draft_head("eagle", max_draft=8)
-
-# DFlash block diffusion (requires draft model)
-draft = create_draft_head("dflash", draft_model_name="z-lab/Qwen3.6-27B-DFlash")
-
-# NEXTN hybrid (n-gram + neural)
-draft = create_draft_head("nextn", max_draft=8, ngram=NgramDraftHead(n=5))
+engine = ProxyEngine("http://localhost:8000", "qwen3.6-27b-mtp")
+result = engine.generate("Hello world", max_tokens=256)
 ```
 
-### C++ native inference (GGUF files)
+### Activation sparsity (TurboSparse)
+
+```python
+from vibeblade import EMANeuronPredictor, drelu_gate
+
+predictor = EMANeuronPredictor(hidden_dim=4096, n_layers=32)
+mask = predictor.predict(layer_idx, gate_activations)  # ~10% active
+predictor.update(layer_idx, actual_activations)
+```
+
+### KV quantization (RotateKV)
+
+```python
+from vibeblade import RotateKVCache, rotate_kv
+
+kv_cache = RotateKVCache(num_layers=32, num_heads=32, head_dim=128)
+kv_cache.compress(layer_idx)  # Hadamard rotate + 2-bit quantize
+```
+
+### Constrained decoding
+
+```python
+from vibeblade import Grammar
+
+grammar = Grammar.from_json_schema(my_schema)
+# Forces model output to match schema — no re-sampling needed
+```
+
+### Native C++ inference (GGUF)
 
 ```python
 from vibeblade import VibeBladeModel
@@ -223,41 +243,41 @@ model = VibeBladeModel("model.gguf")
 print(model.generate("Hello world", max_tokens=128))
 ```
 
-Auto-detects and uses the native C++ engine for GGUF files — the entire generate pipeline runs in C++ with zero Python in the decode loop. Supports all architectures: dense transformers, MoE (Mistral, Qwen, DeepSeek), and hybrid attention+SSM.
+Entire pipeline runs in C++ — tokenization, forward pass, sampling, detokenization. SIMD auto-detected (AVX-512/AVX2/NEON). Optional CUDA backend.
 
 ```bash
-# Build C++ engine (optional — only needed for local GGUF inference)
-python cpp/build_cpp.py
+python cpp/build_cpp.py              # Build (Linux/macOS/Windows)
+VIBEBLADE_CUDA=ON python cpp/build_cpp.py  # With CUDA
 ```
-
-SIMD auto-detection at build time: AVX-512, AVX2, NEON, or scalar fallback. Optional CUDA backend for NVIDIA GPUs (sm_121 Blackwell).
 
 ---
 
-## Research modules
+## Benchmarks
 
-VibeBlade includes several research-backed inference optimization components:
+### GB10 (NVIDIA) — Qwen3.6-27B-FP8
 
-| Module | Description | Source |
-|---|---|---|
-| `sparse.py` | TurboSparse — EMA neuron prediction + dReLU gating (~90% FFN skip) | PowerInfer |
-| `confu.py` | ConFu — contemplate-token speculative decoding (85-92% acceptance) | Original |
-| `rotatekv.py` | RotateKV — Hadamard rotation + 2-bit KV quantization (~8x reduction) | RotateKV |
-| `dflash.py` | DFlash — block diffusion speculative decoding with hidden-state conditioning | z-lab |
-| `sarathi.py` | SARATHI — chunked prefill scheduling | SARATHI |
-| `sagesched.py` | SageSched — Shannon entropy-based uncertainty-aware scheduling | Original |
-| `paged_attn.py` | Paged attention for KV cache management | vLLM |
-| `grammar.py` | Constrained decoding (regex, JSON schema, EBNF) | llama.cpp |
+Optimized via sglang NEXTN + reasoning elimination + n-gram prefill injection:
 
-```python
-from vibeblade import (
-    EMANeuronPredictor, drelu_gate,           # TurboSparse
-    ConFuSpeculator, ContemplateTokenLayer,    # ConFu
-    RotateKVCache, rotate_kv,                  # RotateKV
-    DFlashDraftHead, dflash_generate,          # DFlash
-    SarathiScheduler, SageSched,               # Scheduling
-)
-```
+| Config | Single request | 5 concurrent | 8 concurrent |
+|---|---:|---:|---:|
+| Baseline (no optimizations) | 15.6 tok/s | 63.0 tok/s | — |
+| Full optimization stack | 24.5 tok/s | 102.5 tok/s | 152.5 tok/s |
+| **Speedup** | **1.6x** | **1.6x** | — |
+
+### ARM NEON — GGUF Q4_K_M models
+
+3-run validation, 256 ctx, temp=0.0, best config per model:
+
+| Model | Type | Best config | Speedup |
+|---|---|---|---:|
+| TinyLlama-1.1B | Dense 1.1B | PowerInfer | 2.54x |
+| DeepSeek-Coder-V2-Lite | MoE 16B (2.4B active) | PowerInfer | 1.97x |
+| Llama-3.2-3B | Dense 3.2B | Spec+TS | 1.57x |
+| Granite-3.0-3B-A800M | MoE 3B | PI+TS | 1.52x |
+| Qwen3.6-35B-A3B | Hybrid MoE+SSM | PI+TS | 1.32x |
+| Llama-3.1-8B | Dense 8B | PI+TS | 1.25x |
+
+Full results: [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md)
 
 ---
 
@@ -265,99 +285,48 @@ from vibeblade import (
 
 ```
 vibeblade/
-  cli.py              # Unified CLI (serve / chat / bench)
-  openai_server.py    # OpenAI-compatible API server
-  proxy_engine.py     # HTTP proxy with n-gram cache/inject modes
-  speculative_decoding.py  # Draft-then-verify engine
-  draft_heads.py      # Draft head ABC + 4 implementations
-  target_backend.py   # Target backend ABC + factory
-  dflash.py           # DFlash draft model (PyTorch)
-  backends/
-    sglang_backend.py     # sglang target
-    vllm_backend.py       # vLLM target
-    openai_http_backend.py  # Generic HTTP target
-  web_app.py          # uvicorn-reloadable web app factory
-  fast_backend.py     # C++ engine wrapper
-  sparse.py           # TurboSparse activation sparsity
-  confu.py            # ConFu speculative decoding
-  rotatekv.py         # RotateKV quantization
-  sarathi.py / sagesched.py  # Scheduling
-  moe*.py             # MoE routing + tiered memory
-  grammar.py          # Constrained decoding
+  cli.py                    # Unified CLI (serve / chat / bench)
+  openai_server.py          # OpenAI-compatible API server
+  proxy_engine.py           # HTTP proxy with n-gram cache/inject
+  speculative_decoding.py   # Draft-then-verify engine
+  draft_heads.py            # Draft head ABC + 4 implementations
+  target_backend.py         # Target backend ABC + factory
+  dflash.py                 # DFlash block diffusion (PyTorch)
+  sparse.py                 # TurboSparse activation sparsity
+  confu.py                  # ConFu speculative decoding
+  rotatekv.py               # RotateKV Hadamard + 2-bit quant
+  sarathi.py                # Chunked prefill scheduling
+  sagesched.py              # Entropy-based scheduling
+  moe.py / moe_executor.py  # MoE routing + tiered memory
+  grammar.py                # Constrained decoding
+  paged_attn.py             # Paged attention
+  fast_backend.py           # C++ native engine wrapper
+  backends/                 # sglang, vLLM, HTTP target backends
 
 web/
-  app.py              # FastAPI backend for Chat UI
-  static/
-    index.html        # Single-page app
-    style.css         # Dark theme (Linear/Vercel aesthetic)
-    app.js            # Client-side logic
-    icon.svg          # Favicon
+  app.py                    # FastAPI backend for Chat UI
+  static/                   # index.html, style.css, app.js
 
-cpp/                  # Native C++ inference engine
-  build_cpp.py        # Cross-platform build script
-  include/            # Headers (gguf, dequant, CUDA kernels, SIMD)
-  src/                # Implementation + pybind11 bindings
-
-tests/                # 794 tests
+cpp/                        # Native C++ engine (GGUF + SIMD + CUDA)
+tests/                      # 794 tests
 ```
-
----
-
-## Benchmarks
-
-### GB10 (NVIDIA) — Qwen3.6-27B-FP8 with NEXTN speculative decoding
-
-| Config | Single request | 5 concurrent | 8 concurrent |
-|---|---:|---:|---:|
-| sglang baseline | 15.6 tok/s | 63.0 tok/s aggregate | — |
-| Optimized (no thinking) | 24.5 tok/s | 102.5 tok/s aggregate | 152.5 tok/s aggregate |
-
-**Key optimization:** Using `/v1/chat/completions` with `reasoning: {"effort": "none"}` eliminates 30-50% hidden thinking token overhead, giving a 1.6x improvement on visible output speed.
-
-### ARM NEON — GGUF Q4_K_M models
-
-**3-run validation, 256 ctx, temp=0.0**
-
-Best results per model:
-
-| Model | Type | Best Config | Speedup |
-|---|---|---|---:|
-| TinyLlama-1.1B | Dense 1.1B | PowerInfer | 2.54x |
-| DeepSeek-Coder-V2-Lite | MoE 16B (2.4B active) | PowerInfer | 1.97x |
-| Llama-3.2-3B | Dense 3.2B | Spec+TS | 1.57x |
-| Granite-3.0-3B-A800M | MoE 3B | PI+TS | 1.52x |
-| Qwen2.5-MoE | MoE 3B | TurboSparse | 1.41x |
-| Qwen3.6-35B-A3B | Hybrid MoE+SSM | PI+TS | 1.32x |
-| Llama-3.1-8B | Dense 8B | PI+TS | 1.25x |
-
-Full benchmark results are in [BENCHMARK_REPORT.md](./BENCHMARK_REPORT.md).
 
 ---
 
 ## Development
 
 ```bash
-# Install with dev dependencies
 pip install -e ".[dev]"
-
-# Run tests
 pytest
-
-# Lint
 ruff check vibeblade/ tests/
-
-# Build C++ engine
 python cpp/build_cpp.py
-
-# Build with CUDA (requires CUDA Toolkit 13.0+)
-VIBEBLADE_CUDA=ON python cpp/build_cpp.py
 ```
 
 ---
 
 ## Powered by
 
-GGUF format · [sglang](https://github.com/sgl-project/sglang) · [vLLM](https://github.com/vllm-project/vllm) · [llama.cpp](https://github.com/ggerganov/llama.cpp) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) · [EAGLE](https://arxiv.org/abs/2401.15077) · [SARATHI](https://arxiv.org/abs/2403.07219) · [RotateKV](https://arxiv.org/abs/2408.00784) · [DFlash](https://github.com/z-lab/Qwen3.6-27B-DFlash) · [highlight.js](https://highlightjs.org) · [marked.js](https://marked.js.org)
+[sglang](https://github.com/sgl-project/sglang) · [vLLM](https://github.com/vllm-project/vllm) · [llama.cpp](https://github.com/ggerganov/llama.cpp) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) · [EAGLE](https://arxiv.org/abs/2401.15077) · [SARATHI](https://arxiv.org/abs/2403.07219) · [RotateKV](https://arxiv.org/abs/2408.00784) · [DFlash](https://github.com/z-lab/Qwen3.6-27B-DFlash) · [highlight.js](https://highlightjs.org) · [marked.js](https://marked.js.org)
 
 ---
 
