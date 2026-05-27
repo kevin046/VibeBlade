@@ -78,6 +78,9 @@ class ProxyStats:
     """Runtime statistics for the proxy engine."""
     n_requests: int = 0
     n_tokens_generated: int = 0
+    n_tokens_visible: int = 0  # tokens that aren't hidden reasoning
+    n_reasoning_tokens: int = 0
+    n_ngram_prefill_tokens: int = 0  # tokens saved via n-gram prefill
     n_ngram_hits: int = 0
     n_ngram_attempts: int = 0
     total_time_s: float = 0.0
@@ -92,7 +95,15 @@ class ProxyStats:
     def avg_tok_per_sec(self) -> float:
         if self.total_time_s == 0:
             return 0.0
-        return self.n_tokens_generated / self.total_time_s
+        return self.n_tokens_visible / self.total_time_s
+
+    @property
+    def reasoning_overhead(self) -> float:
+        """Fraction of tokens wasted on reasoning."""
+        total = self.n_tokens_generated
+        if total == 0:
+            return 0.0
+        return self.n_reasoning_tokens / total
 
 
 class ProxyEngine:
@@ -120,6 +131,8 @@ class ProxyEngine:
         mode: str = "passthrough",
         ngram_n: int = 5,
         ngram_max_draft: int = 8,
+        use_chat_api: bool = True,
+        disable_reasoning: bool = True,
     ):
         self._url = target_url.rstrip("/")
         self._model = model
@@ -128,6 +141,8 @@ class ProxyEngine:
         self._mode = mode
         self._ngram_n = ngram_n
         self._ngram_max_draft = ngram_max_draft
+        self._use_chat_api = use_chat_api
+        self._disable_reasoning = disable_reasoning
         self.stats = ProxyStats()
 
         # N-gram cache: maps (n-gram tuple) → list of following tokens
@@ -258,69 +273,129 @@ class ProxyEngine:
     ) -> ProxyResult:
         """Generate text via the target backend.
 
-        In passthrough mode, this is a direct proxy call.
-        In ngram_cache mode, adds n-gram caching for future requests.
+        Optimizations:
+        - Uses chat completions API (strips reasoning tokens properly)
+        - reasoning: {"effort": "none"} to disable thinking overhead
+        - N-gram prefill: appends predicted tokens to prompt (mode="ngram_inject")
+        - Tracks visible vs reasoning tokens separately
 
         Returns ProxyResult with timing and stats.
         """
         self.stats.n_requests += 1
         t0 = time.time()
 
-        body = {
-            "model": self._model,
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "top_k": top_k,
-            "stream": False,
-        }
-        if stop:
-            body["stop"] = stop
-
-        # Try n-gram lookahead for the prompt
         prompt_tokens = self._tokenize(prompt)
-        ngram_draft = self._lookup_ngram(prompt_tokens)
 
-        if self._mode == "ngram_cache" and ngram_draft:
-            self.stats.n_ngram_attempts += 1
-            # We could pre-fill with n-gram predicted tokens, but for now
-            # just track the hit
-            self.stats.n_ngram_hits += 1
-            logger.debug(f"N-gram cache hit: {len(ngram_draft)} tokens")
+        # N-gram prefill injection: if prompt ends with a known pattern,
+        # append predicted tokens to the prompt so the model skips them
+        ngram_prefill_tokens: list[int] = []
+        if self._mode == "ngram_inject":
+            ngram_draft = self._lookup_ngram(prompt_tokens)
+            if ngram_draft:
+                self.stats.n_ngram_attempts += 1
+                self.stats.n_ngram_hits += 1
+                # Inject up to ngram_max_draft tokens into prompt
+                ngram_prefill_tokens = ngram_draft[:self._ngram_max_draft]
+                self.stats.n_ngram_prefill_tokens += len(ngram_prefill_tokens)
+                # Extend prompt tokens for cache update later
+                prompt_tokens = prompt_tokens + ngram_prefill_tokens
+                logger.debug(f"N-gram prefill: injected {len(ngram_prefill_tokens)} tokens")
+        elif self._mode == "ngram_cache":
+            ngram_draft = self._lookup_ngram(prompt_tokens)
+            if ngram_draft:
+                self.stats.n_ngram_attempts += 1
+                self.stats.n_ngram_hits += 1
 
-        resp = self._post("/v1/completions", body)
-        t_end = time.time()
+        if self._use_chat_api:
+            # Chat completions API — properly strips reasoning tokens
+            # Convert prompt_tokens back to text for the message content
+            effective_prompt = self._detokenize(prompt_tokens) if ngram_prefill_tokens else prompt
 
-        choice = resp["choices"][0]
-        text = choice.get("text", "")
-        finish = choice.get("finish_reason", "stop")
-        usage = resp.get("usage", {})
-        n_prompt = usage.get("prompt_tokens", len(prompt_tokens))
-        n_completion = usage.get("completion_tokens", 0)
+            body: dict = {
+                "model": self._model,
+                "messages": [{"role": "user", "content": effective_prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": False,
+            }
+            if self._disable_reasoning:
+                body["reasoning"] = {"effort": "none"}
+            if stop:
+                body["stop"] = stop
+
+            resp = self._post("/v1/chat/completions", body)
+            t_end = time.time()
+
+            choice = resp["choices"][0]
+            msg = choice.get("message", {})
+            text = msg.get("content", "")
+            finish = choice.get("finish_reason", "stop")
+            usage = resp.get("usage", {})
+            n_prompt = usage.get("prompt_tokens", len(prompt_tokens))
+            n_completion = usage.get("completion_tokens", 0)
+            details = usage.get("completion_tokens_details", {})
+            n_reasoning = details.get("reasoning_tokens", 0)
+            n_visible = n_completion - n_reasoning
+        else:
+            # Fallback: plain completions API
+            effective_prompt = self._detokenize(prompt_tokens) if ngram_prefill_tokens else prompt
+            body = {
+                "model": self._model,
+                "prompt": effective_prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "top_k": top_k,
+                "stream": False,
+            }
+            if stop:
+                body["stop"] = stop
+
+            resp = self._post("/v1/completions", body)
+            t_end = time.time()
+
+            choice = resp["choices"][0]
+            text = choice.get("text", "")
+            finish = choice.get("finish_reason", "stop")
+            usage = resp.get("usage", {})
+            n_prompt = usage.get("prompt_tokens", len(prompt_tokens))
+            n_completion = usage.get("completion_tokens", 0)
+            n_reasoning = 0
+            n_visible = n_completion
+
+        # Prepend n-gram prefill text to output (these were "free" tokens)
+        prefill_text = ""
+        if ngram_prefill_tokens:
+            prefill_text = self._detokenize(ngram_prefill_tokens)
+            text = prefill_text + text
 
         # Update n-gram cache from generated text
         if text:
-            gen_tokens = self._tokenize(prompt + text)
-            if len(gen_tokens) > len(prompt_tokens):
-                new_tokens = gen_tokens[len(prompt_tokens):]
+            full_gen_tokens = self._tokenize(text)
+            if len(full_gen_tokens) > len(prompt_tokens):
+                new_tokens = full_gen_tokens[len(prompt_tokens):]
                 self._update_ngram_cache(prompt_tokens + new_tokens)
 
         elapsed = t_end - t0
-        tps = n_completion / max(elapsed, 1e-6)
+        total_visible = n_visible + len(ngram_prefill_tokens)
+        tps = total_visible / max(elapsed, 1e-6)
 
         self.stats.n_tokens_generated += n_completion
+        self.stats.n_tokens_visible += total_visible
+        self.stats.n_reasoning_tokens += n_reasoning
         self.stats.total_time_s += elapsed
 
         return ProxyResult(
             text=text,
             prompt_tokens=n_prompt,
-            completion_tokens=n_completion,
+            completion_tokens=total_visible,
             tokens_per_second=tps,
             stop_reason=finish,
-            time_prefill=0,  # not measurable via HTTP
+            time_prefill=0,
             time_decode=elapsed,
             time_total=elapsed,
+            first_token_latency=0,
         )
 
     def generate_stream(
@@ -445,6 +520,8 @@ class ProxyEngine:
             "target": self._url,
             "model": self._model,
             "ngram_hit_rate": self.stats.ngram_hit_rate,
+            "reasoning_overhead": self.stats.reasoning_overhead,
+            "ngram_prefill_tokens": self.stats.n_ngram_prefill_tokens,
             "runs": [
                 {
                     "tps": r.tokens_per_second,
@@ -453,4 +530,51 @@ class ProxyEngine:
                 }
                 for r in results
             ],
+        }
+
+    def benchmark_concurrent(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        n_concurrent: int = 5,
+    ) -> dict:
+        """Benchmark with concurrent requests to measure aggregate throughput.
+
+        Uses threading to fire N requests in parallel and measures total
+        tokens / wall-clock time.
+        """
+        import threading
+
+        results = []
+        lock = threading.Lock()
+        t0 = time.time()
+
+        def worker():
+            r = self.generate(prompt, max_tokens=max_tokens)
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=worker) for _ in range(n_concurrent)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        t_end = time.time()
+        elapsed = t_end - t0
+
+        total_tokens = sum(r.completion_tokens for r in results)
+        aggregate_tps = total_tokens / max(elapsed, 1e-6)
+        per_request_tps = [r.tokens_per_second for r in results]
+
+        return {
+            "n_concurrent": n_concurrent,
+            "aggregate_tokens_per_second": aggregate_tps,
+            "per_request_avg": sum(per_request_tps) / len(per_request_tps) if per_request_tps else 0,
+            "per_request_min": min(per_request_tps) if per_request_tps else 0,
+            "per_request_max": max(per_request_tps) if per_request_tps else 0,
+            "total_tokens": total_tokens,
+            "wall_time_s": elapsed,
+            "mode": self._mode,
+            "reasoning_overhead": self.stats.reasoning_overhead,
         }
