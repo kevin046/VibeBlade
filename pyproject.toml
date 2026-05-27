@@ -25,6 +25,9 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24.0", "psutil>=5.9.0"]
 
+[project.scripts]
+vibeblade = "vibeblade.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 grammar = ["jsonschema>=4.0.0"]

@@ -426,7 +426,7 @@ def create_app(
 # ── CLI Entry Point ──
 
 
-def main():
+def main(argv: list[str] | None = None):
     """Start the VibeBlade speculative decoding server."""
     import argparse
 
@@ -488,7 +488,7 @@ Examples:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--reload", action="store_true", help="Hot reload")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO,
