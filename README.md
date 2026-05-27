@@ -31,12 +31,56 @@ These compose — activation sparsity reduces compute per token, speculative dec
 
 ## Quick start
 
+### Prerequisites
+
+- **Python 3.10+** — [Download](https://www.python.org/downloads/)
+- **C++ build tools** — required for the native engine (optional but recommended):
+  - **Ubuntu/Debian:** `sudo apt install build-essential cmake`
+  - **macOS:** `xcode-select --install && brew install cmake`
+  - **Windows:** Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (C++ workload) + [CMake](https://cmake.org/download/)
+- **CUDA Toolkit 13.0+** (optional) — for GPU acceleration on NVIDIA GPUs
+
 ### Install
 
+**Linux / macOS**
 ```bash
 git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
-pip install -e ".[all]"
+pip install -e ".[all]"            # Python deps + all optional extras
+python cpp/build_cpp.py            # Build native C++ engine (recommended)
 ```
+
+**Windows (PowerShell)**
+```powershell
+git clone https://github.com/kevin046/VibeBlade; cd VibeBlade
+pip install -e ".[all]"
+python cpp/build_cpp.py
+```
+
+**Web UI only** (no C++ build needed — just needs an inference backend like sglang or vLLM running):
+```bash
+git clone https://github.com/kevin046/VibeBlade && cd VibeBlade
+pip install -e .
+vibeblade chat --backend-url http://localhost:8000 --port 8080
+```
+
+> **Tip:** If you only plan to use VibeBlade as a speculative decoding proxy or web UI over an existing sglang/vLLM server, you don't need the C++ engine at all — just `pip install -e .` and you're good.
+
+### Build C++ engine (optional)
+
+The native engine gives you local GGUF inference with SIMD acceleration. Not required for the proxy/web UI modes.
+
+```bash
+# Linux / macOS
+python cpp/build_cpp.py
+
+# With CUDA support (NVIDIA GPUs)
+VIBEBLADE_CUDA=ON python cpp/build_cpp.py
+
+# Windows (from Developer PowerShell for VS)
+python cpp/build_cpp.py
+```
+
+SIMD auto-detected at build time: AVX-512, AVX2, NEON (Apple Silicon / ARM), or scalar fallback.
 
 ### Web UI (chat interface)
 
@@ -316,11 +360,16 @@ tests/                      # 794 tests
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest
-ruff check vibeblade/ tests/
-python cpp/build_cpp.py
+pip install -e ".[dev]"           # Install with dev dependencies (ruff, pytest)
+pytest                             # Run tests (794 tests)
+ruff check vibeblade/ tests/       # Lint
+python cpp/build_cpp.py            # Build native C++ engine
 ```
+
+**Platform-specific notes:**
+- **Linux:** Requires `build-essential` and `cmake` for C++ build
+- **macOS:** Requires Xcode CLI tools (`xcode-select --install`) and cmake (`brew install cmake`). Apple Silicon (M1–M4) uses NEON SIMD automatically
+- **Windows:** Requires Visual Studio Build Tools (C++ workload) and CMake. Run build commands from "Developer PowerShell for VS"
 
 ---
 
