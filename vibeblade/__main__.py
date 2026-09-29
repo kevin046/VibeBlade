@@ -91,51 +91,54 @@ def _check_for_updates() -> None:
         pass  # silent — never block the CLI
 
 
+def _print_help(exit_code: int = 0) -> None:
+    """Unified help screen shared by both entry points."""
+    from .ui import b, c, d, g, header, hr
+
+    print(header())
+    print()
+    print(f" {b('Usage:')} vibeblade {'<command>'} {d('[options]')}")
+    print()
+    print(f" {b('Commands')}")
+    rows = [
+        ("wizard", "Interactive setup wizard", g("first run")),
+        ("chat", "Interactive chat REPL with a loaded model", ""),
+        ("serve", "Start OpenAI-compatible API server", ""),
+        ("run", "Single-prompt inference with memory tiering", ""),
+        ("bench", "Throughput benchmark suite", ""),
+        ("tune", "Generate a hardware-tuned vibeblade.yaml", ""),
+        ("pull", "Download models from HuggingFace", ""),
+        ("models", "List locally available models", ""),
+    ]
+    width = max(len(cmd) for cmd, _, _ in rows)
+    for cmd, desc, tag in rows:
+        line = f"  {c(cmd.ljust(width))}  {d(desc)}"
+        if tag:
+            line += f"  {d('·')} {d(tag)}"
+        print(line)
+    print()
+    print(f" {b('Options')}")
+    print(f"  {c('-h, --help')}      Show this help message")
+    print()
+    print(f" {b('Examples')}")
+    print(f"  {d('vibeblade wizard')}                          {d('# first-time setup')}")
+    print(f"  {d('vibeblade tune --auto')}                     {d('# generate vibeblade.yaml')}")
+    print(f"  {d('vibeblade serve --model model.gguf')}        {d('# OpenAI-compatible API')}")
+    print(f"  {d('vibeblade chat --model model.gguf')}         {d('# interactive REPL')}")
+    print(f"  {d('vibeblade <command> --help')}                {d('# per-command options')}")
+    print()
+    print(hr())
+    print(f" {d('VibeDrift Inc. · vibedrift.com')}")
+    sys.exit(exit_code)
+
+
 def main():
     # Handle -h/--help before anything else
     if len(sys.argv) >= 2 and sys.argv[1] in ("-h", "--help", "help"):
-        print("VibeBlade — Adaptive Memory Tiering for LLM Inference")
-        print("Developed by VibeDrift Inc. — vibedrift.com")
-        print()
-        print("Usage: python -m vibeblade [command] [options]")
-        print()
-        print("Commands:")
-        print("  wizard              Interactive setup wizard (recommended first run)")
-        print("  chat                Interactive chat REPL with loaded model")
-        print("  serve               Start OpenAI-compatible API server")
-        print("  bench               Run performance benchmark suite")
-        print("  run                 Run inference with memory tiering")
-        print()
-        print("Options:")
-        print("  -h, --help          Show this help message")
-        print()
-        print("Examples:")
-        print("  python -m vibeblade wizard          # First-time setup")
-        print("  python -m vibeblade chat             # Chat with model")
-        print("  python -m vibeblade chat --help      # Chat options")
-        print("  python -m vibeblade serve --help     # Server options")
-        print("  python -m vibeblade bench --help     # Benchmark options")
-        print("  python -m vibeblade run --help       # Run options")
-        sys.exit(0)
+        _print_help(exit_code=0)
 
     if len(sys.argv) < 2:
-        print("VibeBlade — Adaptive Memory Tiering for LLM Inference")
-        print("Developed by VibeDrift Inc. — vibedrift.com")
-        print()
-        print("Usage: python -m vibeblade [command] [options]")
-        print()
-        print("Commands:")
-        print("  wizard              Interactive setup wizard (recommended first run)")
-        print("  chat                Interactive chat REPL with loaded model")
-        print("  serve               Start OpenAI-compatible API server")
-        print("  bench               Run performance benchmark suite")
-        print("  run                 Run inference with memory tiering")
-        print()
-        print("Examples:")
-        print("  python -m vibeblade wizard")
-        print("  python -m vibeblade chat")
-        print("  python -m vibeblade chat --help")
-        sys.exit(1)
+        _print_help(exit_code=1)
 
     cmd = sys.argv[1]
 
@@ -218,8 +221,17 @@ def main():
             backend=args.backend,
         )
     else:
-        print(f"Unknown command: {cmd}")
-        print("Use 'serve', 'bench', 'run', or 'wizard'")
+        # Unknown command — suggest the closest real one (typo-friendly)
+        import difflib
+
+        known = ["wizard", "chat", "serve", "bench", "run", "browse",
+                 "tune", "pull", "models", "dashboard"]
+        close = difflib.get_close_matches(cmd, known, n=2, cutoff=0.5)
+        from .ui import d, err
+        print(err(f"unknown command: {cmd}"))
+        if close:
+            print(f"  {d('did you mean:')} {close[0]}?")
+        print(f"  {d('run')} vibeblade --help {d('to see all commands')}")
         sys.exit(1)
 
 

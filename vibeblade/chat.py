@@ -108,16 +108,17 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     history = ChatHistory(max_turns=max(1, ctx_size // 64))
     response_count = 0
 
-    # Print banner
+    # Print banner (shared ui styling)
+    from .ui import d, header, hr, kv, panel
+
     print()
-    print(f" {_c(_b('VibeBlade Chat'))}")
-    print(f" {_d('Model:')} {model_path}")
-    backend_label = {"fast": "C++ fast (requested)", "numpy": "NumPy (pure Python)", "auto": "auto-detect"}
-    print(f" {_d('Backend:')} {backend_label.get(backend, backend)}")
-    print(f" {_d('Temperature:')} {temperature} | {_d('Max tokens:')} {max_tokens} | {_d('Context:')} {ctx_size}")
-    print()
-    print(f" {_d('Commands:')} /help /clear /reset /quit /undo")
-    print(f" {_d('───────────────────────────────────────────')}")
+    backend_label = {"fast": "C++ fast", "numpy": "NumPy", "auto": "auto-detect"}
+    print(panel("chat", [
+        kv("model", d(os.path.basename(model_path))),
+        kv("backend", backend_label.get(backend, backend)),
+        kv("settings", d(f"temp {temperature} · max {max_tokens} tok · ctx {ctx_size}")),
+        kv("commands", d("/help /clear /reset /undo /quit")),
+    ], width=min(72, max(48, len(os.path.basename(model_path)) + 34))))
     print()
 
     # Load model with progress

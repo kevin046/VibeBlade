@@ -153,6 +153,14 @@ Examples:
     pull_parser.add_argument("--include-safetensors", action="store_true",
                              help="Also download safetensors weights (default: GGUF first)")
 
+    # ── models ────────────────────────────────────────────────────
+    models_parser = subparsers.add_parser(
+        "models",
+        help="List locally available models",
+    )
+    models_parser.add_argument("--verbose", "-v", action="store_true",
+                               help="Show full paths and metadata")
+
     # ── tune ──────────────────────────────────────────────────────
     tune_parser = subparsers.add_parser(
         "tune",
@@ -189,6 +197,8 @@ Examples:
         _cmd_pull(args)
     elif args.command == "tune":
         _cmd_tune(args)
+    elif args.command == "models":
+        _cmd_models(args)
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
@@ -343,6 +353,61 @@ def _cmd_bench(args: argparse.Namespace) -> None:
         print(f"  Best round:            {max(results):.1f} tok/s")
 
 
+def _cmd_models(args: argparse.Namespace) -> None:
+    """List locally available models from the VibeBlade model cache."""
+    import os
+    import time
+
+    from .ui import d, header, ok, table
+
+    print(header("local models"))
+    print()
+
+    model_dir = os.path.expanduser("~/.vibeblade/models")
+    registry = os.path.join(model_dir, "models.json")
+
+    entries: list[tuple[str, float, float, str]] = []
+    if os.path.isfile(registry):
+        try:
+            import json
+
+            with open(registry) as f:
+                reg = json.load(f)
+            for item in reg if isinstance(reg, list) else reg.get("models", []):
+                path = item.get("path") or item.get("local_path") or ""
+                name = item.get("name") or os.path.basename(path)
+                size = item.get("size_bytes") or 0
+                if not size and path and os.path.isfile(path):
+                    size = os.path.getsize(path)
+                added = item.get("added_at") or item.get("timestamp") or 0
+                entries.append((name, float(size), float(added), path))
+        except Exception:
+            pass
+
+    # Fall back to scanning the directory for GGUF files
+    if not entries and os.path.isdir(model_dir):
+        for fn in sorted(os.listdir(model_dir)):
+            if fn.endswith(".gguf"):
+                p = os.path.join(model_dir, fn)
+                try:
+                    sz = os.path.getsize(p)
+                except OSError:
+                    sz = 0
+                entries.append((fn, float(sz), os.path.getmtime(p), p))
+
+    if not entries:
+        print(f" {ok('no models yet')}  {d('— pull one with:')} vibeblade pull <hf-repo>")
+        return
+
+    rows = []
+    for name, size, added, path in entries:
+        when = time.strftime("%Y-%m-%d", time.localtime(added)) if added else d("—")
+        rows.append([name, f"{size / (1024 ** 3):.1f} GB", when, d(path)])
+    print(table(["model", "size", "added", "path"], rows))
+    print()
+    print(f" {d(len(entries))} model(s) · {d('serve one with:')} vibeblade serve --model <path>")
+
+
 def _cmd_tune(args: argparse.Namespace) -> None:
     """Generate a hardware-optimized vibeblade.yaml for local LLM hosting."""
     import os
@@ -389,8 +454,55 @@ def _cmd_tune(args: argparse.Namespace) -> None:
     }
     with open(args.output, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-    print(f"Generated {args.output} for model {args.model}")
-    print("To serve: vibeblade serve --config", args.output)
+
+    from .ui import b, c, d, g, kv, ok, panel, status
+
+    mode_line = {
+        "gpu": c("gpu — all weights in VRAM"),
+        "cpu": c("cpu — all weights in system RAM"),
+        "hybrid_ram": c("hybrid — hot layers in VRAM, rest in RAM"),
+        "hybrid_ssd": c("hybrid_ssd — NVMe streaming for cold layers"),
+    }.get(profile.mode.value, profile.mode.value)
+
+    lines = [
+        kv("mode", mode_line),
+        kv("model size", f"{_model_size_gb(profile):.1f} GB"),
+        kv("context", f"{profile.n_ctx:,} tokens"),
+        kv("batch", str(profile.n_batch)),
+        kv("hot threshold", f"{profile.hot_threshold:.2f}"),
+    ]
+    if profile.vram_limit:
+        lines.append(kv("vram budget", f"{profile.vram_limit:.0f} GB"))
+    lines.append(kv("ram budget", f"{profile.ram_limit:.0f} GB"))
+    if profile.ssd_path:
+        lines.append(kv("ssd cache", profile.ssd_path))
+    flags = []
+    if profile.activation_sparsity:
+        flags.append("sparsity")
+    if profile.speculative_decoding:
+        flags.append("spec-decode")
+    if profile.kv_quantization:
+        flags.append("kv-quant")
+    if profile.paged_attention:
+        flags.append("paged-attn")
+    if profile.flash_attention:
+        flags.append("flash-attn")
+    lines.append(kv("optimizations", d(" ".join(flags) or "none")))
+
+    print(panel("tuned config", lines))
+    print()
+    print(f" {ok(f'saved to {args.output}')}")
+    print(f" {d('To serve:')} vibeblade serve --config {args.output}")
+
+
+def _model_size_gb(profile) -> float:
+    """Best-effort model size for the tune summary panel."""
+    import os
+
+    try:
+        return os.path.getsize(profile.model_path) / (1024 ** 3)
+    except OSError:
+        return 0.0
 
 
 def _cmd_pull(args: argparse.Namespace) -> None:
