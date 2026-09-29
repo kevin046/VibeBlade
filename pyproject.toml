@@ -31,9 +31,10 @@ vibeblade = "vibeblade.cli:main"
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 grammar = ["jsonschema>=4.0.0"]
+server = ["fastapi>=0.110", "uvicorn>=0.29"]
 gpu-metal = []  # Requires macOS 13+ / Apple Silicon (C++ build)
 gpu-vulkan = []  # Requires Vulkan SDK 1.2+ (C++ build)
-all = ["vibeblade[grammar,dev]"]
+all = ["vibeblade[grammar,server,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/kevin046/VibeBlade"

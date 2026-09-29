@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import logging
 import time
 import uuid
@@ -212,6 +213,69 @@ async def _generate(
     return await loop.run_in_executor(None, _run)
 
 
+
+
+# ── Prometheus-style Metrics (stdlib, no dependency) ─────────────────────────
+
+
+class MetricsRegistry:
+    """Minimal Prometheus text-format metrics: counters + latency histograms.
+
+    Thread-safe; intended to be exposed at GET /metrics.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counters: dict[str, float] = {}
+        self._latency_buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
+                                 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, float("inf")]
+        self._latency: dict[str, list[int]] = {}   # route -> bucket counts
+        self._latency_sum: dict[str, float] = {}   # route -> total seconds
+        self._latency_count: dict[str, int] = {}
+
+    def inc(self, name: str, value: float = 1.0, labels: str = "") -> None:
+        key = name if not labels else f"{name}{{{labels}}}"
+        with self._lock:
+            self._counters[key] = self._counters.get(key, 0.0) + value
+
+    def observe_latency(self, route: str, seconds: float) -> None:
+        with self._lock:
+            if route not in self._latency:
+                self._latency[route] = [0] * len(self._latency_buckets)
+                self._latency_sum[route] = 0.0
+                self._latency_count[route] = 0
+            for i, upper in enumerate(self._latency_buckets):
+                if seconds <= upper:
+                    self._latency[route][i] += 1
+            self._latency_sum[route] += seconds
+            self._latency_count[route] += 1
+
+    def render(self) -> str:
+        lines: list[str] = []
+        with self._lock:
+            for key, value in sorted(self._counters.items()):
+                lines.append(f"{key} {value}")
+            for route in sorted(self._latency):
+                safe = route.strip("/").replace("/", "_") or "root"
+                cum = 0
+                for i, upper in enumerate(self._latency_buckets):
+                    cum += self._latency[route][i]
+                    bound = "" if upper == float("inf") else f"{upper}"
+                    lines.append(
+                        f'http_request_duration_seconds_bucket{{route="{safe}",le="{bound}"}} {cum}')
+                lines.append(f'http_request_duration_seconds_sum{{route="{safe}"}} '
+                             f'{self._latency_sum[route]:.6f}')
+                lines.append(f'http_request_duration_seconds_count{{route="{safe}"}} '
+                             f'{self._latency_count[route]}')
+        lines.append("# TYPE vibeblade_uptime_seconds gauge")
+        lines.append(f"vibeblade_uptime_seconds {time.time() - _START_TIME:.3f}")
+        return "\n".join(lines) + "\n"
+
+
+_START_TIME = time.time()
+_metrics = MetricsRegistry()
+
+
 # ── App Factory ──
 
 
@@ -219,10 +283,22 @@ def create_app(
     engine=None,
     model_id: str = "vibeblade",
     registry: Optional[EngineRegistry] = None,
+    api_keys: Optional[set] = None,
+    enable_metrics: bool = True,
 ):
-    """Create the FastAPI application wired to a SpeculativeDecodingEngine."""
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import JSONResponse, StreamingResponse
+    """Create the FastAPI application wired to a SpeculativeDecodingEngine.
+
+    Args:
+        api_keys: Set of valid caller Bearer keys. None/empty = auth disabled
+            (bind to localhost only in that case!).
+        enable_metrics: Expose GET /metrics in Prometheus text format.
+    """
+    import secrets as _secrets
+    import time as _time
+
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+    from starlette.middleware.base import BaseHTTPMiddleware
 
     app = FastAPI(
         title="VibeBlade",
@@ -233,6 +309,49 @@ def create_app(
     )
 
     reg = registry or _registry
+    # Routes that never require auth.
+    _PUBLIC_PATHS = {"/health", "/metrics"}
+
+    class _VibeBladeMiddleware(BaseHTTPMiddleware):
+        """Incoming API-key auth + request metrics + structured access log."""
+
+        async def dispatch(self, request: Request, call_next):
+            request_id = _secrets.token_hex(8)
+            started = _time.perf_counter()
+            auth_error = None
+            if api_keys and request.url.path not in _PUBLIC_PATHS:
+                header = request.headers.get("authorization", "")
+                token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+                if not token:
+                    auth_error = "missing"
+                elif not any(_secrets.compare_digest(token, k) for k in api_keys):
+                    auth_error = "invalid"
+            if auth_error:
+                _metrics.inc("vibeblade_auth_failures_total", labels=f'reason="{auth_error}"')
+                logger.warning("req_id=%s auth=%s path=%s", request_id, auth_error, request.url.path)
+                return JSONResponse(
+                    {"error": {"message": f"Invalid API key ({auth_error})", "type": "auth_error",
+                               "code": "invalid_api_key"}},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer", "X-Request-Id": request_id},
+                )
+            try:
+                response = await call_next(request)
+            except Exception:
+                _metrics.inc("vibeblade_requests_total",
+                             labels=f'route="{request.url.path}",status="500"')
+                logger.exception("req_id=%s unhandled_error path=%s", request_id, request.url.path)
+                raise
+            elapsed = _time.perf_counter() - started
+            response.headers["X-Request-Id"] = request_id
+            _metrics.inc("vibeblade_requests_total",
+                         labels=f'route="{request.url.path}",status="{response.status_code}"')
+            _metrics.observe_latency(request.url.path, elapsed)
+            logger.info("req_id=%s %s %s -> %s %.1fms", request_id, request.method,
+                        request.url.path, response.status_code, elapsed * 1000)
+            return response
+
+    app.add_middleware(_VibeBladeMiddleware)
 
     @app.on_event("startup")
     async def _startup():
@@ -245,6 +364,14 @@ def create_app(
     @app.get("/health")
     async def health():
         return {"status": "ok", "version": API_VERSION, "model": model_id}
+
+    # ── Metrics (Prometheus text format) ──
+
+    @app.get("/metrics")
+    async def metrics():
+        if not enable_metrics:
+            raise HTTPException(404, "metrics disabled")
+        return PlainTextResponse(_metrics.render(), media_type="text/plain; version=0.0.4")
 
     # ── API Info ──
 
@@ -451,6 +578,7 @@ def create_app(
 def main(argv: list[str] | None = None):
     """Start the VibeBlade speculative decoding server."""
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(
         description="VibeBlade — Universal Speculative Decoding Server",
@@ -479,10 +607,13 @@ Examples:
     parser.add_argument("--backend", default="openai",
                         choices=["sglang", "vllm", "llama_cpp", "openai"],
                         help="Target model backend type (default: openai)")
-    parser.add_argument("--backend-url", default="http://localhost:8000",
-                        help="Target backend URL (default: http://localhost:8000)")
-    parser.add_argument("--model", required=True,
-                        help="Model name at the target backend")
+    parser.add_argument("--backend-url",
+                        default=os.environ.get("VIBEBLADE_BACKEND_URL",
+                                               "http://localhost:8000"),
+                        help="Target backend URL (default: http://localhost:8000 "
+                             "or VIBEBLADE_BACKEND_URL)")
+    parser.add_argument("--model", default=os.environ.get("VIBEBLADE_MODEL"),
+                        help="Model name at the target backend (or VIBEBLADE_MODEL)")
     parser.add_argument("--api-key", default=None,
                         help="API key for target backend (if required)")
 
@@ -505,10 +636,19 @@ Examples:
     parser.add_argument("--top-p", type=float, default=0.95,
                         help="Top-p (nucleus) filtering (default: 0.95)")
 
-    # Server
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    # Server args (env overrides let Docker/compose configure without argv changes)
+    parser.add_argument("--host", default=os.environ.get("VIBEBLADE_HOST", DEFAULT_HOST))
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("VIBEBLADE_PORT", DEFAULT_PORT)))
     parser.add_argument("--reload", action="store_true", help="Hot reload")
+    _env_key = os.environ.get("VIBEBLADE_API_KEY")
+    parser.add_argument("--require-api-key", default=_env_key, metavar="KEY",
+                        help="Require this Bearer key from API callers (server-side auth). "
+                             "Use 'env:VARNAME' to read from an environment variable. "
+                             "Falls back to VIBEBLADE_API_KEY. "
+                             "Auto-generates one when binding to a non-localhost host without a key.")
+    parser.add_argument("--no-metrics", action="store_true",
+                        help="Disable the GET /metrics endpoint")
 
     args = parser.parse_args(argv)
 
@@ -611,7 +751,26 @@ Examples:
         print(f"  ⚠️  Target backend not responding at {args.backend_url}")
         print("     Will retry on first request.\n")
 
-    app = create_app(engine=engine, model_id=args.model)
+    # ── Server-side auth ──
+    caller_keys: set = set()
+    if args.require_api_key:
+        if args.require_api_key.startswith("env:"):
+            import os
+            key = os.environ.get(args.require_api_key[4:], "")
+            if not key:
+                parser.error(f"environment variable {args.require_api_key[4:]} is not set")
+        else:
+            key = args.require_api_key
+        caller_keys = {key}
+    elif args.host not in ("127.0.0.1", "localhost", "::1"):
+        import secrets as _secrets_mod
+        generated = f"vb-{_secrets_mod.token_hex(24)}"
+        caller_keys = {generated}
+        print(f"  🔑 Auto-generated API key (no key given for non-localhost bind): {generated}")
+
+    app = create_app(engine=engine, model_id=args.model,
+                     api_keys=caller_keys or None,
+                     enable_metrics=not args.no_metrics)
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, reload=args.reload, log_level="info")

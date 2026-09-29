@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.so
+.git/
+llama.cpp/
+tests/
+scripts/
+docs/
+*.md
+!README.md
+egg-info/
+.whitepaper*
+ClawMolt/

@@ -1,0 +1,39 @@
+# VibeBlade speculative decoding proxy + target backend
+#
+#   docker compose up --build
+#
+# The proxy requires an upstream OpenAI-compatible target (vLLM / sglang /
+# llama.cpp server). Point VIBEBLADE_BACKEND_URL at yours, or start the
+# bundled target service below.
+#
+# Auth: VIBEBLADE_API_KEY is REQUIRED in production. Generate one:
+#   python -c "import secrets; print('vb-'+secrets.token_hex(24))"
+
+services:
+  vibeblade:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      VIBEBLADE_BACKEND_URL: ${VIBEBLADE_BACKEND_URL:-http://target:8000}
+      VIBEBLADE_API_KEY: ${VIBEBLADE_API_KEY:?set VIBEBLADE_API_KEY (python -c "import secrets; print('vb-'+secrets.token_hex(24))")}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    depends_on:
+      target:
+        condition: service_healthy
+
+  # Example target: llama.cpp server (replace with vLLM/sglang as needed)
+  target:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command: >
+      -m /models/model.gguf --host 0.0.0.0 --port 8000
+    volumes:
+      - ${VIBEBLADE_MODEL_PATH:-./models}:/models:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
