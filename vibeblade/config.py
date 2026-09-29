@@ -1,8 +1,17 @@
 """VibeBlade Configuration — vibeblade.yaml offload strategy loader.
 
-Supports two modes:
+Supports four modes:
 - RAM_ONLY: all cold experts in system RAM (requires 128GB+ RAM for 230B MoE)
 - HYBRID_SSD: hot experts in VRAM, medium-heat in RAM buffer, cold on SSD
+- GPU_AUTO: fill VRAM to vram_limit, spill to RAM, optionally SSD — the
+  default consumer mode when a GPU is present
+- LAYER_MAP: explicit tier per layer range, e.g.
+    offload_strategy:
+      mode: "LAYER_MAP"
+      layer_map: "gpu:0-15, ram:16-23, ssd:24-31"
+      ssd_path: "/mnt/nvme/vibeblade_cache"
+  Tiers accept aliases: gpu|vram, ram|cpu|memory, ssd|disk. Ranges are
+  0-based inclusive layer indices; overlaps are rejected at load time.
 
 Example vibeblade.yaml:
   offload_strategy:
@@ -45,6 +54,14 @@ class ConfigError(ValueError):
 class OffloadMode(Enum):
     RAM_ONLY = "RAM_ONLY"
     HYBRID_SSD = "HYBRID_SSD"
+    # GPU first: fill VRAM to vram_limit, spill to RAM, (optionally) SSD.
+    # The default consumer mode — uses the GPU when one is present.
+    GPU_AUTO = "GPU_AUTO"
+    # Explicit per-layer-range placement, e.g.:
+    #   layer_map: "gpu:0-15, ram:16-23, ssd:24-31"
+    # Ranges are layer indices (0-based, inclusive). Unlisted layers follow
+    # GPU_AUTO spill order (gpu → ram → ssd).
+    LAYER_MAP = "LAYER_MAP"
 
 
 # ---------------------------------------------------------------------------
@@ -121,11 +138,16 @@ class OffloadConfig:
     ram_buffer_ratio: float = 0.25
     ssd_preemptive_layers: int = 2
 
+    # LAYER_MAP extras — explicit tier per layer range.
+    # layer_map: "gpu:0-15, ram:16-23, ssd:24-31"  (0-based inclusive ranges)
+    layer_map: Optional[str] = None
+
     # Known keys (used for validation)
     _KNOWN_KEYS: frozenset = field(
         default=frozenset({
             "mode", "vram_limit", "ram_limit", "hot_threshold",
             "ssd_path", "ram_buffer_ratio", "ssd_preemptive_layers",
+            "layer_map",
         }),
         init=False,
         repr=False,
@@ -157,6 +179,85 @@ class OffloadConfig:
                 raise ConfigError(
                     f"ssd_preemptive_layers must be >= 0, got {self.ssd_preemptive_layers}"
                 )
+        if self.mode == OffloadMode.LAYER_MAP:
+            if not self.layer_map:
+                raise ConfigError("layer_map is required when mode is LAYER_MAP")
+            # Parse now so bad config fails at load, not mid-run
+            self.parsed_layer_map = parse_layer_map(self.layer_map)
+            if self.mode == OffloadMode.LAYER_MAP and not self.ssd_path and "ssd" in self.parsed_layer_map.values():
+                raise ConfigError("ssd_path is required when layer_map places layers on ssd")
+
+    # Populated by _validate() when mode == LAYER_MAP:
+    # {layer_index: "gpu" | "ram" | "ssd"}
+    parsed_layer_map: dict = field(default_factory=dict, init=False, repr=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# Layer map parsing
+# ---------------------------------------------------------------------------
+
+_LAYER_TIER_RE = re.compile(
+    r"""^\s*(?P<tier>gpu|vram|cpu|ram|memory|ssd|disk)\s*:\s*(?P<spec>[\d,\s\-]+)\s*$""",
+    re.IGNORECASE,
+)
+
+
+def parse_layer_map(spec: str) -> dict[int, str]:
+    """Parse a layer_map string into {layer_index: tier}.
+
+    Accepts: "gpu:0-15, ram:16-23, ssd:24-31" — comma-separated tier:ranges.
+    Tiers: gpu (alias vram), ram (alias cpu/memory), ssd (alias disk).
+    Raises ConfigError on any malformed entry or overlapping ranges.
+    """
+    placement: dict[int, str] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = _LAYER_TIER_RE.match(part)
+        if not m:
+            raise ConfigError(
+                f"Invalid layer_map entry: {part!r} — expected tier:ranges like 'gpu:0-15'"
+            )
+        tier_raw = m.group("tier").lower()
+        tier = {"vram": "gpu", "cpu": "ram", "memory": "ram", "disk": "ssd"}.get(tier_raw, tier_raw)
+        ranges = m.group("spec")
+        for rng in ranges.split(","):
+            rng = rng.strip()
+            if not rng:
+                continue
+            if "-" in rng:
+                a, _, b = rng.partition("-")
+                try:
+                    lo, hi = int(a.strip()), int(b.strip())
+                except ValueError:
+                    raise ConfigError(f"Invalid layer range: {rng!r}") from None
+            else:
+                try:
+                    lo = hi = int(rng)
+                except ValueError:
+                    raise ConfigError(f"Invalid layer index: {rng!r}") from None
+            if lo > hi:
+                lo, hi = hi, lo
+            if lo < 0:
+                raise ConfigError(f"Layer indices are 0-based: {rng!r}")
+            for idx in range(lo, hi + 1):
+                if idx in placement and placement[idx] != tier:
+                    raise ConfigError(
+                        f"Layer {idx} assigned to both {placement[idx]} and {tier}"
+                    )
+                placement[idx] = tier
+    if not placement:
+        raise ConfigError("layer_map assigned no layers")
+    return placement
+
+
+def layer_tier_summary(placement: dict[int, str]) -> str:
+    """Human summary: 'gpu: 16 layers, ram: 8 layers, ssd: 8 layers'."""
+    counts: dict[str, int] = {}
+    for tier in placement.values():
+        counts[tier] = counts.get(tier, 0) + 1
+    return ", ".join(f"{t}: {n} layers" for t, n in sorted(counts.items()))
 
 
 @dataclass
@@ -320,6 +421,7 @@ _OFFLOAD_CONFIG_FIELD_MAP = {
     "ssd_path": ("ssd_path", str),
     "ram_buffer_ratio": ("ram_buffer_ratio", float),
     "ssd_preemptive_layers": ("ssd_preemptive_layers", int),
+    "layer_map": ("layer_map", str),
 }
 
 

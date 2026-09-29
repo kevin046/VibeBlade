@@ -128,6 +128,33 @@ class SpeculativeDecodingEngine:
         self.top_k = top_k
         self.top_p = top_p
         self.stats = SpeculativeStats()
+        # ── Draft auto-economics (Deltafin pattern) ──
+        # Drafting must PAY for itself: if live acceptance is below
+        # min_acceptance after the evaluation window, drafting is disabled
+        # and the full target runs alone (quality identical, no wasted
+        # proposal work). It may re-challenge at a clean boundary.
+        self.economics_enabled = True
+        self.min_acceptance = 0.20     # drafted tokens worth proposing
+        self.evaluation_window = 256   # drafts between economic reviews
+        self._consecutive_disabled = 0
+
+    def _review_economics(self) -> None:
+        """Disable drafting when it loses money; re-challenge occasionally."""
+        if not self.economics_enabled:
+            # Re-challenge at a clean boundary after a cool-down
+            self._consecutive_disabled += 1
+            if self._consecutive_disabled >= 8:
+                self.economics_enabled = True
+                self._consecutive_disabled = 0
+                self.stats = SpeculativeStats()
+            return
+        if self.stats.n_draft_generated < self.evaluation_window:
+            return  # not enough evidence yet
+        rate = self.stats.acceptance_rate
+        if rate < self.min_acceptance:
+            # Drafting doesn't repay its cost — run target-only
+            self.economics_enabled = False
+            self._consecutive_disabled = 0
 
     def reset_stats(self) -> None:
         """Reset statistics counters."""
@@ -199,7 +226,16 @@ class SpeculativeDecodingEngine:
         while len(output_tokens) < max_tokens:
             cur_pos = len(history)
 
-            if not speculative:
+            # ── Draft auto-economics check (Deltafin pattern) ──
+            # A request that explicitly passed speculative=False never gets
+            # overridden; but speculative=True means "draft if it pays".
+            if speculative and not self.economics_enabled:
+                self._review_economics()  # may re-enable after cool-down
+                effective_spec = self.economics_enabled
+            else:
+                effective_spec = speculative
+
+            if not effective_spec:
                 # Plain autoregressive — no draft
                 self.stats.n_target_decodes += 1
                 self.stats.n_target_decode_tokens += 1
@@ -297,6 +333,14 @@ class SpeculativeDecodingEngine:
             # Update state
             output_tokens.extend(accepted_tokens)
             history.extend(accepted_tokens)
+
+            # Economic review once per spec step (cheap counter check)
+            if effective_spec:
+                self._review_economics()
+                if not self.economics_enabled:
+                    # Drafting just proved unprofitable mid-request — the rest
+                    # of this request runs target-only (identical output).
+                    continue
 
             if first_token == self.target.eos_token_id():
                 break

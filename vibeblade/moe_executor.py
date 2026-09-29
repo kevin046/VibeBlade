@@ -94,6 +94,10 @@ class HotColdExecutor:
         self._cpu_threads = cpu_threads
         self._tiered_mgr = tiered_mgr
 
+        # ── Expert heat (Deltafin pattern): persistent route histogram ──
+        # Observes routes AFTER the router publishes; advisory only.
+        self._heat = None  # lazily attached via attach_expert_heat()
+
         # Load hot expert weights into GPU (if GPU available)
         self._gpu_expert_weights: dict[int, dict[int, tuple]] = {}
         if self._gpu and self._gpu.is_gpu:
@@ -102,6 +106,15 @@ class HotColdExecutor:
         # Cumulative stats
         self._total_stats = ExecutorStats()
         self._stats_lock = threading.Lock()
+
+    def attach_expert_heat(self, heat) -> None:
+        """Attach an ExpertHeat recorder (vibeblade.expert_heat). Advisory."""
+        self._heat = heat
+
+    def flush_expert_heat(self) -> bool:
+        if self._heat is not None:
+            return self._heat.flush()
+        return True
 
     def _pin_hot_experts(self) -> None:
         """Load hot expert weights into GPU memory.
@@ -184,6 +197,18 @@ class HotColdExecutor:
         # ── Step 2: route ──
         indices, weights = router.route(x)  # each (1, topk) since batch=1
         topk = router.topk
+
+        # ── Step 2b: observe the AUTHORITATIVE route (expert heat) ──
+        # Deltafin pattern: fold the router's published IDs into the persistent
+        # histogram. Advisory storage-placement signal only — it can never
+        # alter routing, weights or output. Infallible by contract.
+        if self._heat is not None:
+            try:
+                self._heat.record_routes(
+                    layer_idx, [int(i) for i in np.asarray(indices).ravel().tolist()]
+                )
+            except (TypeError, ValueError):
+                pass
 
         # ── Step 3: shared expert (always computed on available device) ──
         t_sync_start = time.perf_counter()

@@ -131,6 +131,28 @@ Examples:
     bench_parser.add_argument("--rounds", type=int, default=3,
                               help="Number of benchmark rounds (default: 3)")
 
+    # ── pull ──────────────────────────────────────────────────────
+    pull_parser = subparsers.add_parser(
+        "pull",
+        help="Download any compatible model from HuggingFace",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  vibeblade pull bartowski/Llama-3.2-3B-Instruct-GGUF
+
+  vibeblade pull bartowski/Qwen2.5-7B-Instruct-GGUF --quant Q4_K_M
+
+  vibeblade pull org/model --dir /mnt/nvme/models --include-safetensors
+        """,
+    )
+    pull_parser.add_argument("repo", help="HuggingFace repo id (org/model)")
+    pull_parser.add_argument("--quant", default=None,
+                             help="Prefer files matching this quant substring (e.g. Q4_K_M)")
+    pull_parser.add_argument("--dir", default="", help="Destination directory (default: ~/.vibeblade/models)")
+    pull_parser.add_argument("--revision", default="main", help="HF revision/branch (default: main)")
+    pull_parser.add_argument("--include-safetensors", action="store_true",
+                             help="Also download safetensors weights (default: GGUF first)")
+
     # ── Parse and dispatch ────────────────────────────────────────
     args = parser.parse_args(argv)
 
@@ -144,6 +166,8 @@ Examples:
         _cmd_chat(args)
     elif args.command == "bench":
         _cmd_bench(args)
+    elif args.command == "pull":
+        _cmd_pull(args)
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
@@ -296,6 +320,42 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     if results:
         print(f"  Average across rounds: {sum(results) / len(results):.1f} tok/s")
         print(f"  Best round:            {max(results):.1f} tok/s")
+
+
+def _cmd_pull(args: argparse.Namespace) -> None:
+    """Download any compatible model from HuggingFace and register it locally."""
+    from vibeblade.model_pull import PullError, pull_model
+
+    try:
+        result = pull_model(
+            args.repo,
+            dest_dir=args.dir or "",
+            pattern=args.quant,
+            revision=args.revision,
+            include_safetensors=args.include_safetensors,
+        )
+        print()
+        print(result.summary())
+
+        # Auto-optimize: run the tuner on the first downloaded weight file so
+        # the model is served with its best profile immediately.
+        try:
+            from vibeblade.auto_tune import auto_tune
+
+            weight_files = sorted(
+                p for p in __import__("pathlib").Path(result.model_dir).iterdir()
+                if p.suffix in (".gguf", ".safetensors")
+            )
+            if weight_files:
+                profile = auto_tune(str(weight_files[0]))
+                print("\nAuto-tune profile applied:")
+                for key, val in vars(profile).items():
+                    print(f"  {key}: {val}")
+        except Exception as e:  # tuning is advisory — never fail the pull
+            print(f"(auto-tune skipped: {e})")
+    except PullError as e:
+        print(f"pull failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
