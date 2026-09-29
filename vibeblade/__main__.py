@@ -165,6 +165,12 @@ def main():
     elif cmd == "wizard":
         from . import setup_wizard as _sw
         _sw.main()
+    elif cmd in ("tune", "pull", "models"):
+        # Newer subcommands live in cli.py's argparse tree — delegate so
+        # python -m vibeblade and the `vibeblade` console script stay in sync.
+        from .cli import main as cli_main
+
+        cli_main(sys.argv[1:])
     elif cmd == "chat":
         from .chat import chat_loop
         import argparse

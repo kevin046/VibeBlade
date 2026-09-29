@@ -241,3 +241,174 @@ def disable_all():
         _lib.powerinfer_set_enabled(False)
     except FileNotFoundError:
         pass  # libllama.so not available — nothing to disable
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Hardware-tuned serving profile (vibeblade tune)
+# ══════════════════════════════════════════════════════════════════
+
+from dataclasses import field
+from enum import Enum
+
+
+class OffloadMode(Enum):
+    """Where the model's weights live at inference time."""
+    GPU = "gpu"                # everything in VRAM
+    CPU = "cpu"                # everything in system RAM
+    HYBRID_RAM = "hybrid_ram"  # hot layers VRAM, rest RAM
+    HYBRID_SSD = "hybrid_ssd"  # hot VRAM+RAM, cold layers streamed from NVMe
+
+
+@dataclass
+class HardwareProfile:
+    """Serving configuration tuned for a specific hardware + model pair."""
+    model_path: str
+    n_ctx: int                 # context size that fits the budget
+    n_batch: int               # token batch size
+    mode: OffloadMode
+    vram_limit_gb: float       # usable GPU VRAM (0 = CPU-only)
+    ram_limit_gb: float        # usable system RAM for weights
+    hot_threshold: float       # neuron activation cutoff (PI2 hot budget)
+    ssd_path: str = ""         # NVMe cache path for HYBRID_SSD
+    ram_buffer_ratio: float = 0.0    # fraction of layers kept in RAM (HYBRID_SSD)
+    ssd_preemptive_layers: int = 0   # layers prefetched from SSD before need
+    layer_map: dict = field(default_factory=dict)  # layer_idx → "gpu"|"ram"|"ssd"
+    # Optimization flags (reuse PI+TS calibration)
+    activation_sparsity: bool = False
+    speculative_decoding: bool = False
+    kv_quantization: bool = False
+    paged_attention: bool = True
+    use_native_engine: bool = True
+    flash_attention: bool = False   # only with CUDA build
+
+    # Attribute aliases the CLI writes into vibeblade.yaml
+    @property
+    def vram_limit(self) -> float:
+        return self.vram_limit_gb
+
+    @property
+    def ram_limit(self) -> float:
+        return self.ram_limit_gb
+
+
+def _parse_size_gb(s: str) -> float:
+    """'24GB' → 24.0; '512MB' → 0.5; plain number = GB."""
+    s = s.strip().upper()
+    if s.endswith("GB"):
+        return float(s[:-2])
+    if s.endswith("MB"):
+        return float(s[:-2]) / 1024.0
+    return float(s)
+
+
+def _probe_ram_gb() -> float:
+    with open("/proc/meminfo") as f:
+        for line in f:
+            if line.startswith("MemTotal"):
+                return int(line.split()[1]) / (1024 * 1024)
+    return 8.0
+
+
+def tune_hardware(
+    model_path: str,
+    gpu_vram_str: str | None = None,
+    ram_str: str | None = None,
+    ssd_path: str | None = None,
+    auto: bool = False,
+    model_size_gb: float | None = None,
+) -> HardwareProfile:
+    """Build a serving HardwareProfile for the given hardware.
+
+    auto=True probes /proc/meminfo (and prefers SSD path if given) instead
+    of requiring --ram. model_size_gb overrides GGUF estimation when the
+    file isn't available locally yet.
+    """
+    import os as _os
+
+    if gpu_vram_str:
+        vram = _parse_size_gb(gpu_vram_str)
+    else:
+        vram = 0.0
+
+    if auto and not ram_str:
+        ram = max(_probe_ram_gb() * 0.75, 2.0)  # leave headroom for OS
+    elif ram_str:
+        ram = _parse_size_gb(ram_str)
+    else:
+        ram = max(_probe_ram_gb() * 0.75, 2.0)
+
+    # Model size: stat the file, else fall back to param estimate
+    if model_size_gb is None:
+        try:
+            model_size_gb = _os.path.getsize(model_path) / (1024 ** 3)
+        except OSError:
+            # Missing file (auto-dry-run): fall back to GGUF param estimate,
+            # and if that fails too, assume a 7B-class model (~4 GB at Q4).
+            try:
+                model_size_gb = estimate_params_from_file(model_path) * BYTES_PER_PARAM_Q4 / (1024 ** 3)
+            except (OSError, Exception):
+                model_size_gb = 4.0
+
+    # Context budget: KV cache ≈ 2 × n_ctx × n_layers_kv × 2 bytes / 1e9.
+    # Conservative: reserve the smaller of 15% of RAM or 2 GB for KV+compute.
+    kv_budget_gb = min(ram * 0.15, 2.0)
+    # ctx scaled by model size — bigger model, smaller per-token KV headroom claim
+    n_ctx = int(min(32768, max(2048, kv_budget_gb * 1e9 / max(model_size_gb * 2048, 1))))
+    # Round to a friendly power-of-two-ish value
+    for v in (2048, 4096, 8192, 16384, 32768):
+        if n_ctx <= v:
+            n_ctx = v
+            break
+    n_batch = 512 if model_size_gb < 15 else 256
+
+    # Offload mode selection
+    if vram >= model_size_gb * 1.2:
+        mode = OffloadMode.GPU
+        ram_buffer_ratio = 0.0
+        layer_map = {}
+    elif vram > 0:
+        mode = OffloadMode.HYBRID_RAM
+        ram_buffer_ratio = 0.0
+        layer_map = {}
+    elif ssd_path and model_size_gb > ram * 0.8:
+        mode = OffloadMode.HYBRID_SSD
+        ram_buffer_ratio = 0.35  # hottest 35% resident in RAM
+        ssd_preemptive_layers = 2
+        layer_map = {}
+    else:
+        mode = OffloadMode.CPU
+        ram_buffer_ratio = 0.0
+        layer_map = {}
+
+    # PI2 hot threshold from the same empirical calibration as PI budget
+    try:
+        n_params = estimate_params_from_file(model_path)
+        profile = get_profile(n_params)
+        hot_threshold = profile.pi_budget
+    except Exception:
+        hot_threshold = 0.10
+
+    hp = HardwareProfile(
+        model_path=model_path,
+        n_ctx=n_ctx,
+        n_batch=n_batch,
+        mode=mode,
+        vram_limit_gb=vram,
+        ram_limit_gb=ram,
+        hot_threshold=hot_threshold,
+        ssd_path=ssd_path or "",
+        ram_buffer_ratio=ram_buffer_ratio,
+        ssd_preemptive_layers=ssd_preemptive_layers if mode == OffloadMode.HYBRID_SSD else 0,
+        layer_map=layer_map,
+        activation_sparsity=hot_threshold > 0,
+        speculative_decoding=model_size_gb < 8,   # draft overhead not worth it on big models
+        kv_quantization=ram < 32 and model_size_gb > 10,
+        paged_attention=True,
+        use_native_engine=True,
+        flash_attention=vram > 0,  # CUDA kernels only meaningful with a GPU
+    )
+    logger.info(
+        "tune_hardware: %s (%.1f GB) | gpu %.0fGB ram %.0fGB → %s, ctx=%d batch=%d hot=%.2f"
+        % (model_path, model_size_gb, vram, ram, mode.value, n_ctx, n_batch, hot_threshold)
+    )
+    return hp

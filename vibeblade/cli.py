@@ -153,6 +153,25 @@ Examples:
     pull_parser.add_argument("--include-safetensors", action="store_true",
                              help="Also download safetensors weights (default: GGUF first)")
 
+    # ── tune ──────────────────────────────────────────────────────
+    tune_parser = subparsers.add_parser(
+        "tune",
+        help="Generate a hardware-optimized vibeblade.yaml for local LLM hosting",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Examples:
+  vibeblade tune --gpu 24GB --ram 128GB --ssd /mnt/nvme/vibeblade_cache \\
+                  --model /models/KimiK3-Inst.Q4_K.gguf --output vibeblade.yaml
+
+  vibeblade tune --auto --output vibeblade.yaml  # auto-detect hardware
+        """,
+    )
+    tune_parser.add_argument("--gpu", type=str, help="GPU VRAM size (e.g. 24GB, 12GB)")
+    tune_parser.add_argument("--ram", type=str, help="System RAM size (e.g. 128GB, 64GB)")
+    tune_parser.add_argument("--ssd", type=str, help="Path to fast NVMe SSD for offload (required for HYBRID_SSD)")
+    tune_parser.add_argument("--model", type=str, required=True, help="Path to GGUF model file")
+    tune_parser.add_argument("--output", type=str, default="vibeblade.yaml", help="Output config file path")
+    tune_parser.add_argument("--auto", action="store_true", help="Auto-detect hardware (Linux only)")
+
     # ── Parse and dispatch ────────────────────────────────────────
     args = parser.parse_args(argv)
 
@@ -168,6 +187,8 @@ Examples:
         _cmd_bench(args)
     elif args.command == "pull":
         _cmd_pull(args)
+    elif args.command == "tune":
+        _cmd_tune(args)
 
 
 def _cmd_serve(args: argparse.Namespace) -> None:
@@ -320,6 +341,56 @@ def _cmd_bench(args: argparse.Namespace) -> None:
     if results:
         print(f"  Average across rounds: {sum(results) / len(results):.1f} tok/s")
         print(f"  Best round:            {max(results):.1f} tok/s")
+
+
+def _cmd_tune(args: argparse.Namespace) -> None:
+    """Generate a hardware-optimized vibeblade.yaml for local LLM hosting."""
+    import os
+
+    import yaml
+
+    from .auto_tune import tune_hardware
+
+    args.model = os.path.abspath(args.model)
+    if not os.path.exists(args.model) and not args.auto:
+        print(f"  Error: model file not found: {args.model}")
+        sys.exit(1)
+    profile = tune_hardware(
+        model_path=args.model,
+        gpu_vram_str=args.gpu,
+        ram_str=args.ram,
+        ssd_path=args.ssd,
+        auto=args.auto,
+    )
+    config = {
+        "model": {
+            "path": args.model,
+            "n_ctx": profile.n_ctx,
+            "n_batch": profile.n_batch,
+        },
+        "offload_strategy": {
+            "mode": profile.mode.value,
+            "vram_limit": profile.vram_limit,
+            "ram_limit": profile.ram_limit,
+            "hot_threshold": profile.hot_threshold,
+            "ssd_path": profile.ssd_path,
+            "ram_buffer_ratio": profile.ram_buffer_ratio,
+            "ssd_preemptive_layers": profile.ssd_preemptive_layers,
+            "layer_map": profile.layer_map,
+        },
+        "optimization": {
+            "activation_sparsity": profile.activation_sparsity,
+            "speculative_decoding": profile.speculative_decoding,
+            "kv_quantization": profile.kv_quantization,
+            "paged_attention": profile.paged_attention,
+            "use_native_engine": profile.use_native_engine,
+            "flash_attention": profile.flash_attention,
+        },
+    }
+    with open(args.output, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    print(f"Generated {args.output} for model {args.model}")
+    print("To serve: vibeblade serve --config", args.output)
 
 
 def _cmd_pull(args: argparse.Namespace) -> None:
