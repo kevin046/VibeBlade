@@ -99,8 +99,16 @@ class EngineRegistry:
     def get(self, model_id: str):
         engine = self._engines.get(model_id)
         if engine is None:
-            raise KeyError(f"Engine '{model_id}' not found. Available: {list(self._engines.keys())}")
+            raise KeyError(f"Engine '{model_id}' not loaded. Available: {list(self._engines.keys())}")
         return engine
+
+    def remove(self, model_id: str) -> bool:
+        """Unload an engine. Returns True if it was loaded, False otherwise."""
+        if model_id in self._engines:
+            del self._engines[model_id]
+            logger.info("Unloaded engine '%s'", model_id)
+            return True
+        return False
 
     def list_models(self) -> list[dict]:
         return [
@@ -110,6 +118,8 @@ class EngineRegistry:
 
 
 _registry = EngineRegistry()
+# Legacy alias: the test suite and docs refer to the model-facing registry by this name.
+ModelRegistry = EngineRegistry
 
 
 # ── Prompt formatting ──
@@ -133,6 +143,21 @@ def _apply_stop(generated_text: str, stop: list[str]) -> str:
         if idx != -1 and idx < earliest:
             earliest = idx
     return generated_text[:earliest]
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate when no tokenizer stats are available (~4 chars/token).
+
+    Always returns at least 1 — the OpenAI API never reports 0 tokens for a request.
+    """
+    return max(1, len(text or "") // 4)
+
+
+def _finish_reason(text: str, max_tokens: int) -> str:
+    """OpenAI finish_reason: 'length' when the output filled the budget, else 'stop'."""
+    if max_tokens is not None and _estimate_tokens(text) >= max_tokens:
+        return "length"
+    return "stop"
 
 
 # ── Generation (runs in thread pool) ──
@@ -161,13 +186,10 @@ async def _generate(
 
         text = _apply_stop(result.text or "", stop)
 
-        # Finish reason
-        if result.stop_reason == "eos":
-            finish = "stop"
-        elif result.stop_reason == "max_tokens":
+        if result.stop_reason == "max_tokens":
             finish = "length"
         else:
-            finish = "stop"
+            finish = _finish_reason(text, max_tokens)
 
         stats = {
             "tokens_per_second": result.tokens_per_second,

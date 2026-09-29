@@ -36,22 +36,23 @@ class MockModel:
         self.response_text = response_text
         self.generate_call_count = 0
 
-    def generate(self, token_ids, max_tokens=128, temperature=0.7,
-                 top_p=0.9, on_token=None):
+    def generate(self, prompt, max_tokens=256, temperature=None,
+                 top_k=None, top_p=None, speculative=True,
+                 stop_tokens=None):
+        """Mirror SpeculativeDecodingEngine.generate's contract."""
         self.generate_call_count += 1
-        # Return a few dummy tokens
-        n_prompt = len(token_ids)
-        gen_tokens = np.array([72, 101, 108, 108, 111, 33], dtype=np.int32)  # "Hello!"
-        result = np.concatenate([token_ids[:1], gen_tokens])  # minimal valid output
-        stats = {
-            "n_prompt": n_prompt,
-            "n_generated": len(gen_tokens),
-            "prefill_ms": 10.0,
-            "decode_ms_per_token": 5.0,
-            "total_ms": 40.0,
-            "tokens_per_sec": 25.0,
-        }
-        return result, 25.0, stats
+        from vibeblade.speculative_decoding import GenerateResult
+        text = self.response_text if self.response_text is not None else "Hello!"
+        return GenerateResult(
+            text=text,
+            tokens=list(range(max_tokens if max_tokens < 6 else 6)),
+            tokens_per_second=25.0,
+            prompt_tokens=len(prompt) // 4,
+            stop_reason="eos",
+            time_prefill=0.01,
+            time_decode=0.24,
+            time_total=0.25,
+        )
 
     def enable_sparse(self):
         pass
@@ -69,8 +70,8 @@ class MockModel:
 @pytest.fixture
 def mock_registry():
     reg = ModelRegistry()
-    reg._models["test-model"] = MockModel()
-    reg._models["another-model"] = MockModel("World!")
+    reg._engines["test-model"] = MockModel()
+    reg._engines["another-model"] = MockModel("World!")
     return reg
 
 
@@ -133,7 +134,8 @@ class TestApplyStop:
 
 class TestFinishReason:
     def test_long_output(self):
-        assert _finish_reason("x" * 200, max_tokens=200) == "length"
+        # 200 chars ~ 50 estimated tokens; only "length" when the estimate fills the budget
+        assert _finish_reason("x" * 800, max_tokens=200) == "length"
 
     def test_short_output(self):
         assert _finish_reason("hi", max_tokens=100) == "stop"

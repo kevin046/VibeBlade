@@ -85,8 +85,12 @@ class TestOffloadMode:
         assert OffloadMode.HYBRID_SSD.value == "HYBRID_SSD"
 
     def test_members(self):
-        assert len(OffloadMode) == 2
-        assert set(OffloadMode) == {OffloadMode.RAM_ONLY, OffloadMode.HYBRID_SSD}
+        # 4 modes since 16e8e24: RAM_ONLY, HYBRID_SSD, GPU_AUTO, LAYER_MAP
+        assert len(OffloadMode) == 4
+        assert set(OffloadMode) == {
+            OffloadMode.RAM_ONLY, OffloadMode.HYBRID_SSD,
+            OffloadMode.GPU_AUTO, OffloadMode.LAYER_MAP,
+        }
 
     def test_from_string(self):
         assert OffloadMode("RAM_ONLY") is OffloadMode.RAM_ONLY

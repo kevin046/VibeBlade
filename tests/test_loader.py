@@ -269,6 +269,11 @@ class TestTensorLoading:
             f.write(struct.pack("<I", GGUF_TYPE_F32))  # dtype = F32 (type 0)
             f.write(struct.pack("<Q", 0))           # offset
 
+            # GGUF spec: tensor data starts at a 32-byte aligned offset.
+            # The loader honors this (GGUF_DEFAULT_ALIGNMENT); the fixture must too.
+            data_start = f.tell()
+            pad = (-data_start) % 32
+            f.write(bytes(pad))  # zero padding to 32-byte alignment
             f.write(tensor_data)
 
         return path
