@@ -83,5 +83,5 @@ jobs:
 
       - name: Lint
         run: |
-          pip install ruff
+          pip install "ruff>=0.15,<0.17"
           ruff check vibeblade/ tests/
