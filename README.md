@@ -75,6 +75,8 @@ VibeBlade is an **inference acceleration platform** that combines multiple compl
 | **Chunked prefill** (SARATHI) | Head-of-line blocking | Interleave prefill chunks with decode iterations | Higher batch throughput |
 | **Entropy scheduling** (SageSched) | Unfair resource allocation | Shannon entropy-based priority for uncertain requests | Better QoS |
 | **MoE tiered memory** | Expert weight transfer over PCIe | 3-tier VRAM/RAM/SSD with adaptive eviction | Near-native latency |
+| **PowerInfer 2** | Dense FFN compute on MoE/LLM | Adaptive hot/cold neuron clustering (profile → cluster → sparse GEMV) with activation caching | 1.5–2x on skewed activations |
+| **FlashAttention** | Attention memory bandwidth | Fused softmax attention kernels (sm80 CUDA, vendored under `cpp/src/flash_attention/`) | 2–4x on long contexts |
 | **Grammar constraints** | Wasteful re-sampling | Constrained decoding (regex, JSON schema, EBNF) | 2–10x on structured output |
 | **Native C++ engine** | Python interpreter overhead | mmap GGUF, SIMD-optimized (AVX-512/NEON), CUDA optional | Up to 5x over pure Python |
 
@@ -112,15 +114,57 @@ vibeblade bench --backend-url http://localhost:8000 --concurrent 8 --max-tokens 
 ## CLI
 
 ```
-vibeblade serve   Start optimized inference API server (speculative decoding)
-vibeblade chat    Launch web UI
-vibeblade bench   Run throughput benchmarks
+vibeblade wizard   Interactive setup wizard (recommended first run)
+vibeblade chat     Interactive chat REPL with a loaded model
+vibeblade serve    OpenAI-compatible API server (speculative decoding, auth, metrics)
+vibeblade run      Single-prompt inference with memory tiering
+vibeblade bench    Throughput benchmark suite
+vibeblade tune     Generate a hardware-tuned vibeblade.yaml for this machine
+vibeblade pull     Download models from HuggingFace
+vibeblade models   List locally available models
 ```
 
 ```bash
-vibeblade serve --help    # Backend, draft strategy, sampling params
+vibeblade serve --help    # Backend, draft strategy, API keys, sampling params
 vibeblade chat --help     # Backend URL, host, port
 vibeblade bench --help    # Concurrency, token limits, rounds
+```
+
+Every subcommand supports `--help`; color output auto-disables under `NO_COLOR` or when piped.
+
+### Hardware auto-tuning
+
+Generate a serving config matched to your machine — offload mode (GPU / CPU / NVMe streaming), context sized to your KV budget, batch size, and sparsity hot-threshold:
+
+```bash
+vibeblade tune --auto --output vibeblade.yaml
+vibeblade tune --gpu 24GB --ram 128GB --ssd /mnt/nvme/cache \
+               --model models/KimiK3-Inst.Q4_K.gguf --output vibeblade.yaml
+
+vibeblade serve --config vibeblade.yaml
+```
+
+### Model management
+
+```bash
+vibeblade pull Qwen/Qwen3-8B-GGUF     # fetch from HuggingFace
+vibeblade models                      # list local models with sizes
+```
+
+### Server authentication & metrics
+
+`vibeblade serve` exposes a Prometheus `GET /metrics` endpoint and supports Bearer-token API-key auth:
+
+```bash
+vibeblade serve --model qwen3.6-27b-mtp --api-key $MY_SECRET_KEY
+curl -H "Authorization: Bearer $MY_SECRET_KEY" http://localhost:8000/v1/models
+curl http://localhost:8000/metrics   # request counters + latency histograms
+```
+
+### Docker
+
+```bash
+docker compose up   # builds the native engine and starts the API server
 ```
 
 ---
@@ -262,6 +306,20 @@ mask = predictor.predict(layer_idx, gate_activations)  # ~10% active
 predictor.update(layer_idx, actual_activations)
 ```
 
+### PowerInfer 2 (adaptive sparse FFN)
+
+```python
+import vibeblade.powerinfer2 as pi2
+
+eng = pi2.PowerInfer2Engine(n_layers=32, hidden_dim=4096, n_neurons=11008)
+eng.configure(n_threads=8, hot_cluster_ratio=0.25)
+for layer, acts in enumerate(calibration_activations):
+    pi2.profile(layer, acts)          # calibrate on real activation traces
+eng.finalize()                        # cluster hot/cold neurons
+pi2.set_enabled(True)
+stats = eng.stats()                   # hot/cold activation counters
+```
+
 ### KV quantization (RotateKV)
 
 ```python
@@ -377,7 +435,7 @@ python cpp/build_cpp.py            # Build native C++ engine
 
 ## Powered by
 
-[sglang](https://github.com/sgl-project/sglang) · [vLLM](https://github.com/vllm-project/vllm) · [llama.cpp](https://github.com/ggerganov/llama.cpp) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) · [EAGLE](https://arxiv.org/abs/2401.15077) · [SARATHI](https://arxiv.org/abs/2403.07219) · [RotateKV](https://arxiv.org/abs/2408.00784) · [DFlash](https://github.com/z-lab/Qwen3.6-27B-DFlash) · [highlight.js](https://highlightjs.org) · [marked.js](https://marked.js.org)
+[sglang](https://github.com/sgl-project/sglang) · [vLLM](https://github.com/vllm-project/vllm) · [llama.cpp](https://github.com/ggerganov/llama.cpp) · [PowerInfer](https://github.com/Tiiny-AI/PowerInfer) · [EAGLE](https://arxiv.org/abs/2401.15077) · [EAGLE-3](https://github.com/SafeAILab/EAGLE) · [SARATHI](https://arxiv.org/abs/2403.07219) · [RotateKV](https://arxiv.org/abs/2408.00784) · [DFlash](https://github.com/z-lab/Qwen3.6-27B-DFlash) · [FlashAttention](https://github.com/Dao-AILab/flash-attention) · [highlight.js](https://highlightjs.org) · [marked.js](https://marked.js.org)
 
 ---
 
