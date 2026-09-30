@@ -109,7 +109,7 @@ def chat_loop(model_path: str, max_tokens: int = 512, temperature: float = 0.7,
     response_count = 0
 
     # Print banner (shared ui styling)
-    from .ui import d, header, hr, kv, panel
+    from .ui import d, kv, panel
 
     print()
     backend_label = {"fast": "C++ fast", "numpy": "NumPy", "auto": "auto-detect"}

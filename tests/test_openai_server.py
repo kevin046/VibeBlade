@@ -7,7 +7,6 @@ so these tests are skipped gracefully.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 # Skip entire module if fastapi not installed

@@ -34,10 +34,10 @@ def _profile_structured(eng, layers=2, tokens=30, neurons=256, rng=None):
     """Neurons 0..63 fire strongly, the rest get weak noise."""
     rng = rng or np.random.default_rng(42)
     for _ in range(tokens):
-        for l in range(layers):
+        for li in range(layers):
             acts = rng.uniform(0, 0.05, neurons).astype(np.float32)
             acts[:64] = rng.uniform(0.5, 2.0, 64).astype(np.float32)
-            pi2.profile(l, acts)
+            pi2.profile(li, acts)
 
 
 @requires_lib

@@ -28,7 +28,8 @@ import ctypes
 import logging
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 
 logger = logging.getLogger(__name__)
 
@@ -246,10 +247,6 @@ def disable_all():
 # ══════════════════════════════════════════════════════════════════
 #  Hardware-tuned serving profile (vibeblade tune)
 # ══════════════════════════════════════════════════════════════════
-
-from dataclasses import field
-from enum import Enum
-
 
 class OffloadMode(Enum):
     """Where the model's weights live at inference time."""

@@ -24,7 +24,6 @@ import os
 import struct
 import tempfile
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 MAGIC = b"VBHT"

@@ -455,7 +455,7 @@ def _cmd_tune(args: argparse.Namespace) -> None:
     with open(args.output, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-    from .ui import b, c, d, g, kv, ok, panel, status
+    from .ui import c, d, kv, ok, panel
 
     mode_line = {
         "gpu": c("gpu — all weights in VRAM"),
