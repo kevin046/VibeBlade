@@ -24,6 +24,8 @@ from .quant import (
     quantization_error,
 )
 from .cache import KVCache
+from .kv_int8 import quantize_int8_block, dequantize_int8_block
+from .prefix_cache import PrefixCache, PrefixKVState
 from .scheduler import NeuronPredictor, PowerInferScheduler
 from .loader import GGUFLoader, load_model, _LazyWeights
 from .transformer import (
@@ -137,7 +139,8 @@ __all__ = [
     "pack_nibbles", "unpack_nibbles", "build_so4_rotor",
     "quantize_4bit", "dequantize_4bit", "quantization_error",
     # Cache
-    "KVCache",
+    "KVCache", "quantize_int8_block", "dequantize_int8_block",
+    "PrefixCache", "PrefixKVState",
     # Scheduler
     "NeuronPredictor", "PowerInferScheduler",
     # Loader
@@ -252,6 +255,18 @@ class VibeBladeModel:
             }
         
         self._setup_components()
+
+        # ── Try to load C++ fast-path engine (VibeBladeFast) ──
+        self._cpp_engine = None
+        if path.suffix == ".gguf":
+            try:
+                from vibeblade._vibeblade_native import VibeBladeFast
+                self._cpp_engine = VibeBladeFast()
+                self._cpp_engine.load(str(path))
+                print(f"   C++ engine: VibeBladeFast loaded")
+            except Exception as e:
+                print(f"   C++ engine: unavailable ({type(e).__name__}: {str(e)[:60]})")
+
         print(f"🚀 VibeBlade v{__version__} initialized")
         print(f"   Backend: {'C++ AVX-512' if _CPP_BACKEND else 'NumPy (pure Python)'}")
         print(f"   Sparse: {'ON' if use_sparse else 'OFF'}")
@@ -507,6 +522,36 @@ class VibeBladeModel:
         Returns:
             (generated_text, tokens_per_second) tuple
         """
+        # ── C++ fast path (VibeBladeFast — NEON-FP16 SIMD + Spec + TurboSparse) ──
+        if self._cpp_engine is not None and prompt is not None:
+            try:
+                import time
+                t0 = time.time()
+
+                # Use the C++ generate path with TurboSparse (fast, single-token decode)
+                # Speculative decoding is experimental; use only when stable
+                result = self._cpp_engine.generate(
+                    prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    repetition_penalty=1.0,
+                    seed=-1,
+                    on_token=None
+                )
+
+                elapsed = time.time() - t0
+                n_generated = len(result.token_ids)
+                tps = n_generated / max(elapsed, 0.001)
+                if stream:
+                    print(result.text, end="", flush=True)
+                return result.text, tps
+            except Exception as e:
+                # Fall through to NumPy path
+                print(f"[C++ engine fallback: {e}] ", end="", flush=True)
+
+        # ── NumPy path (original pure-Python forward pass) ──
         self.generator.temperature = temperature
         self.generator.top_k = top_k
         self.generator.top_p = top_p
@@ -534,7 +579,11 @@ class VibeBladeModel:
         # Get shared weights
         token_emb = self.weights["token_embd.weight"]
         output_norm_w = self.weights["output_norm.weight"]
-        output_w = self.weights["output.weight"]
+        # Support weight-tying: some models reuse token_embd.weight as output projection
+        if "output.weight" in self.weights:
+            output_w = self.weights["output.weight"]
+        else:
+            output_w = token_emb  # tied weights
         
         # Step 1: Prefill — process all prompt tokens at once
         logits, kv_caches_k, kv_caches_v = forward_prefill(
@@ -796,3 +845,7 @@ def __getattr__(name):
         mod = importlib.import_module(_lazy[name])
         return getattr(mod, name)
     raise AttributeError(f"module 'vibeblade' has no attribute {name!r}")
+
+
+# OpenAI-compatible backend (for agent orchestration frameworks)
+from .openai_compat import OpenAIBackend, VibeBladeOpenAI  # noqa: E402

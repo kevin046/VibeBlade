@@ -1,13 +1,16 @@
 """VibeBlade KV Cache — Memory-efficient key-value cache for transformer inference.
 
-Supports two storage modes:
+Supports three storage modes:
   - float16 (default): fast, 2 bytes per value
+  - int8: per-block INT8 quantization (~1.6x smaller), good accuracy
   - Q4_0 quantized: ~0.56 bytes per value (3.5x smaller), slight quality loss
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+from .kv_int8 import quantize_int8_block, dequantize_int8_block
 
 
 def _quant_q4_0(arr: np.ndarray) -> np.ndarray:
@@ -92,7 +95,12 @@ def _dequant_q4_0(packed: np.ndarray, kv_dim: int) -> np.ndarray:
 class KVCache:
     """Ring-buffer KV cache for transformer layers.
 
-    Supports optional Q4_0 quantization for ~3.5x memory reduction.
+    Supports optional quantization for memory reduction:
+      - 'int8': Per-block INT8 symmetric quantization (~1.6x smaller than float16)
+      - 'q4_0': Q4_0 quantization (~3.5x smaller than float16)
+      - 'float16': Default uncompressed storage (2 bytes per value)
+      - 'float32': Full precision storage (4 bytes per value)
+
     Quantization is lossy but the KV cache is less sensitive to precision
     than weights (paper: "K-V Cache Quantization" — GPTQ-style).
 
@@ -101,9 +109,10 @@ class KVCache:
         num_heads: Number of attention heads.
         head_dim: Dimension per head.
         max_seq_len: Maximum sequence length.
-        dtype: Storage dtype for non-quantized mode (default float16).
-        quantize: If True, store KV values in Q4_0 format (50% less memory than
-                  float16, 7x less than float32).
+        storage_dtype: Storage type ('float16', 'float32', or 'int8').
+                      When 'int8', KV values are stored in quantized format.
+        quantize: Legacy alias for storage_dtype='int8' behavior.
+                  Kept for backwards compatibility.
     """
 
     def __init__(
@@ -112,19 +121,33 @@ class KVCache:
         num_heads: int,
         head_dim: int,
         max_seq_len: int,
-        dtype=np.float16,
+        dtype=None,
         quantize: bool = False,
+        storage_dtype: str = 'float16',
     ) -> None:
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
-        self.dtype = dtype
-        self.quantize = quantize
+        self._storage_dtype = storage_dtype
+        self.dtype = dtype or np.float16
 
         kv_dim = num_heads * head_dim
+        self._kv_dim = kv_dim
 
-        if quantize:
+        # Determine storage mode
+        if storage_dtype == 'int8' or quantize:
+            # INT8 storage: 1.25 bytes per value (8 vals + 2 byte scale per block)
+            n_blocks = (kv_dim + 7) // 8
+            bytes_per_dim = n_blocks * 9
+            self.k_cache = np.zeros(
+                (num_layers, max_seq_len, bytes_per_dim), dtype=np.uint8
+            )
+            self.v_cache = np.zeros(
+                (num_layers, max_seq_len, bytes_per_dim), dtype=np.uint8
+            )
+            self._storage_mode = 'int8'
+        elif storage_dtype == 'q4_0':
             # Q4_0 storage: ~0.56 bytes per value vs 2 bytes for float16
             n_blocks = (kv_dim + 31) // 32
             bytes_per_dim = n_blocks * 18
@@ -134,14 +157,19 @@ class KVCache:
             self.v_cache = np.zeros(
                 (num_layers, max_seq_len, bytes_per_dim), dtype=np.uint8
             )
-            self._kv_dim = kv_dim
-        else:
-            # Standard float16/float32 storage
+            self._storage_mode = 'q4_0'
+        elif storage_dtype == 'float32':
             self.k_cache = np.zeros(
-                (num_layers, 2, num_heads, max_seq_len, head_dim), dtype=dtype
+                (num_layers, 2, num_heads, max_seq_len, head_dim), dtype=np.float32
             )
-            self.v_cache = None  # share k_cache buffer (dim 1: 0=K, 1=V)
-            self._kv_dim = kv_dim
+            self.v_cache = None
+            self._storage_mode = 'float32'
+        else:  # float16 (default)
+            self.k_cache = np.zeros(
+                (num_layers, 2, num_heads, max_seq_len, head_dim), dtype=np.float16
+            )
+            self.v_cache = None
+            self._storage_mode = 'float16'
 
         self._lengths = np.zeros(num_layers, dtype=np.int64)
 
@@ -162,14 +190,20 @@ class KVCache:
             key = key[:, np.newaxis, :]
             value = value[:, np.newaxis, :]
 
-        if self.quantize:
-            # Quantize and store as packed uint8
-            # Flatten heads: (num_heads, seq, head_dim) → (seq, num_heads * head_dim)
+        if self._storage_mode == 'int8':
+            # INT8: per-block quantization
+            k_flat = key.transpose(1, 0, 2).reshape(1, self._kv_dim)
+            v_flat = value.transpose(1, 0, 2).reshape(1, self._kv_dim)
+            self.k_cache[layer_idx, position] = quantize_int8_block(k_flat)
+            self.v_cache[layer_idx, position] = quantize_int8_block(v_flat)
+        elif self._storage_mode == 'q4_0':
+            # Q4_0: 4-bit quantization
             k_flat = key.transpose(1, 0, 2).reshape(1, self._kv_dim)
             v_flat = value.transpose(1, 0, 2).reshape(1, self._kv_dim)
             self.k_cache[layer_idx, position] = _quant_q4_0(k_flat)
             self.v_cache[layer_idx, position] = _quant_q4_0(v_flat)
         else:
+            # Float storage: float16 or float32
             self.k_cache[layer_idx, 0, :, position:position + 1, :] = key
             self.k_cache[layer_idx, 1, :, position:position + 1, :] = value
 
@@ -185,10 +219,21 @@ class KVCache:
         if end is None:
             end = int(self._lengths[layer_idx])
 
-        if self.quantize:
-            k_packed = self.k_cache[layer_idx, start:end]  # (seq, bytes)
+        seq_len = max(0, end - start)
+
+        if self._storage_mode == 'int8':
+            k_packed = self.k_cache[layer_idx, start:end]
             v_packed = self.v_cache[layer_idx, start:end]
-            k_flat = _dequant_q4_0(k_packed, self._kv_dim)  # (seq, kv_dim)
+            k_flat = dequantize_int8_block(k_packed, self._kv_dim)
+            v_flat = dequantize_int8_block(v_packed, self._kv_dim)
+            seq_len = k_flat.shape[0]
+            k = k_flat.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
+            v = v_flat.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
+            return k, v
+        elif self._storage_mode == 'q4_0':
+            k_packed = self.k_cache[layer_idx, start:end]
+            v_packed = self.v_cache[layer_idx, start:end]
+            k_flat = _dequant_q4_0(k_packed, self._kv_dim)
             v_flat = _dequant_q4_0(v_packed, self._kv_dim)
             seq_len = k_flat.shape[0]
             k = k_flat.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)

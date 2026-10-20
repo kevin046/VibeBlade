@@ -596,7 +596,7 @@ class GGUFLoader:
         if vtype == _GGUF_VAL_ARRAY:
             (etype,) = struct.unpack("<I", self._read(4))
             (count,) = struct.unpack("<Q", self._read(8))
-            if count > (1 << 18):
+            if count > (1 << 22):  # Increased from 2^18 to handle larger GGUF metadata arrays
                 raise ValueError(f"Array too large: {count}")
             return [self._read_value(etype) for _ in range(count)]
         fmt = _STRUCT_FMT.get(vtype)

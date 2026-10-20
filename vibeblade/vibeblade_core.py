@@ -8,7 +8,7 @@ _CPP_BACKEND = False
 def _init_backend():
     global _CPP_BACKEND, ts_rotor_unpack, ts_drelu_activation
     try:
-        from vibeblade._vibeblade_core import ts_rotor_unpack as _cpp_rotor, ts_drelu_activation as _cpp_drelu
+        from vibeblade._vibeblade_native import ts_rotor_unpack as _cpp_rotor, ts_drelu_activation as _cpp_drelu
         ts_rotor_unpack = _cpp_rotor
         ts_drelu_activation = _cpp_drelu
         _CPP_BACKEND = True

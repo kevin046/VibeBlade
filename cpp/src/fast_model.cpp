@@ -4,23 +4,16 @@
 // Zero malloc in the hot path — all buffers pre-allocated.
 // NEON SIMD on ARM, std::thread multi-threading for parallel gemv.
 
-#ifdef VIBEBLADE_USE_CUDA
-#include "cuda_kernels.h"
-#include "cuda_backend.h"
-#endif
-
 #include "fast_model.h"
 #include "dequant.h"
 #ifdef __aarch64__
 #include "neon_kernels.h"
 #endif
 #include <chrono>
-#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
 #include <numeric>
-#include <unordered_map>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -93,12 +86,7 @@ static void softmax(float* x, int n) {
 // ════════════════════════════════════════════════════════════════
 
 VibeBladeFast::VibeBladeFast() = default;
-VibeBladeFast::~VibeBladeFast() {
-#ifdef VIBEBLADE_USE_CUDA
-    delete cuda_backend_;
-    cuda_backend_ = nullptr;
-#endif
-}
+VibeBladeFast::~VibeBladeFast() = default;
 
 // ════════════════════════════════════════════════════════════════
 //  Load GGUF model
@@ -120,7 +108,7 @@ void VibeBladeFast::load(const char* path) {
                     (long)qkv_info->dims[0], (long)qkv_info->dims[1], qkv_info->n_dims);
         }
         if (cfg_.use_fused_qkv && cfg_.n_layers > 0 && qkv_info && qkv_info->n_dims >= 2) {
-            int64_t qkv_rows = qkv_info->dims[0];  // (n_h*hd + 2*n_kv*hd)
+            int64_t qkv_rows = qkv_info->dims[1];  // (n_h*hd + 2*n_kv*hd) — GGUF stores (in_dim, out_dim)
             int q_dim = cfg_.n_heads * cfg_.head_dim;
             int64_t kv_total = qkv_rows - q_dim;
             fprintf(stderr, "[DEBUG] qkv_rows=%ld, q_dim=%d, kv_total=%ld, head_dim=%d\n",
@@ -140,34 +128,6 @@ void VibeBladeFast::load(const char* path) {
     map_weights(*gguf_);
     alloc_kv_cache();
     tokenizer_.load(*gguf_);
-
-#ifdef VIBEBLADE_USE_CUDA
- // Initialize CUDA backend if available
- if (cuda::is_available()) {
- try {
- cuda_backend_ = new cuda::CudaBackend();
- cuda_backend_->init(cfg_);
- // Upload weights to GPU
- cuda_backend_->upload_weights(
- token_emb_, emb_type_,
- output_norm_,
- output_, out_type_,
- layers_,
- cfg_.hidden_dim, cfg_.vocab_size
- );
- // Upload RoPE cache via DeviceBuffer
- cuda::DeviceBuffer d_rope_cos, d_rope_sin;
- d_rope_cos.alloc(rope_cos_.size() * sizeof(float));
- d_rope_sin.alloc(rope_sin_.size() * sizeof(float));
- d_rope_cos.upload(rope_cos_.data(), rope_cos_.size() * sizeof(float));
- d_rope_sin.upload(rope_sin_.data(), rope_sin_.size() * sizeof(float));
- } catch (const std::exception& e) {
- fprintf(stderr, "[WARN] CUDA backend failed to initialize: %s\n", e.what());
- delete cuda_backend_;
- cuda_backend_ = nullptr;
- }
- }
-#endif
 
     loaded_ = true;
     position_ = 0;
@@ -363,8 +323,9 @@ void VibeBladeFast::alloc_kv_cache() {
     int id = cfg_.intermediate_dim;
     int q_dim = cfg_.n_heads * cfg_.head_dim;
     int kv_dim_scratch = cfg_.n_kv_heads * cfg_.head_dim;
-    int64_t scratch_per_seq = (int64_t)hd + q_dim + 2 * kv_dim_scratch + q_dim +
-                              2 * id + hd + cfg_.context_length + hd;
+    int64_t q_buf_size = cfg_.use_fused_qkv ? (q_dim + 2 * kv_dim_scratch) : q_dim;
+    int64_t scratch_per_seq = (int64_t)hd + q_buf_size + 2 * kv_dim_scratch +
+                               q_dim + 2 * id + hd + cfg_.context_length + hd;
     scratch_.resize(max_seq * scratch_per_seq);
 
     // Instance-owned decode buffers (sized once, zero realloc during hot loop)
@@ -419,40 +380,18 @@ void VibeBladeFast::map_weights(const GGUFFile& g) {
 
         // ── Attention weights ──
         // Try fused QKV first, then fall back to separate Q/K/V
- auto set_w = [&](const std::string& name, const void*& ptr, ggml_type& type) {
- auto info = g.tensor_info(pfx + name);
- if (info) {
- ptr = g.tensor_data(pfx + name);
- type = info->type;
- if (i == 0 && (name.find("attn_v") != std::string::npos || name.find("attn_k") != std::string::npos || name.find("attn_q") != std::string::npos)) {
- const uint8_t* raw = (const uint8_t*)ptr;
- fprintf(stderr, "[WEIGHT DIAG] %s%d: ptr=%p type=%d first_bytes=[%02x %02x %02x %02x %02x %02x %02x %02x]\n",
- name.c_str(), i, ptr, (int)type,
- raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]);
- }
- }
- };
+        auto set_w = [&](const std::string& name, const void*& ptr, ggml_type& type) {
+            auto info = g.tensor_info(pfx + name);
+            if (info) {
+                ptr = g.tensor_data(pfx + name);
+                type = info->type;
+            }
+        };
 
- set_w("attn_q.weight", lw.attn_q, lw.qtype);
- set_w("attn_k.weight", lw.attn_k, lw.ktype);
- set_w("attn_v.weight", lw.attn_v, lw.vtype);
- set_w("attn_output.weight", lw.attn_o, lw.otype);
-
- // Load Q/K/V biases (F32 tensors, optional)
- {
- auto load_bias = [&](const char* suffix, const float*& out) {
- std::string bname = pfx + "attn_" + suffix + ".bias";
- auto ti = g.tensor_info(bname);
- if (ti && ti->n_dims >= 1 && ti->type == GGML_TYPE_F32) {
- out = (const float*)g.tensor_data(bname);
- fprintf(stderr, "[WEIGHT] Layer %d: loaded %s (%d dims, shape %lld)\n",
- i, bname.c_str(), ti->n_dims, (long long)ti->dims[0]);
- }
- };
- load_bias("q", lw.attn_q_bias);
- load_bias("k", lw.attn_k_bias);
- load_bias("v", lw.attn_v_bias);
- }
+        set_w("attn_q.weight",      lw.attn_q,  lw.qtype);
+        set_w("attn_k.weight",      lw.attn_k,  lw.ktype);
+        set_w("attn_v.weight",      lw.attn_v,  lw.vtype);
+        set_w("attn_output.weight", lw.attn_o,  lw.otype);
 
         // Try fused QKV
         set_w("attn_qkv.weight", lw.attn_qkv, lw.qkv_type);
@@ -593,7 +532,13 @@ void VibeBladeFast::forward_layer(
     // ── Scratch allocation (NO malloc — all from pre-allocated buffer) ──
     float* sp = scratch_.data();
     float* normed    = sp;                    sp += seq_len * hd;
-    float* Q         = sp;                    sp += seq_len * q_dim;
+    float* Q         = sp;
+        fprintf(stderr, "[TRACE] fused QKV branch active\n");
+if (lw.has_fused_qkv && lw.attn_qkv) {
+        sp += seq_len * (q_dim + 2 * kv_dim);  // fused QKV needs one big buffer
+    } else {
+        sp += seq_len * q_dim;                  // separate Q
+    }
     float* K_buf     = sp;                    sp += seq_len * kv_dim;
     float* V_buf     = sp;                    sp += seq_len * kv_dim;
     float* attn_out  = sp;                    sp += seq_len * q_dim;
@@ -603,77 +548,33 @@ void VibeBladeFast::forward_layer(
     float* scores    = sp;                    sp += seq_len * cfg_.context_length;
     float* o_proj    = sp;                    sp += seq_len * hd;
 
- // ── NaN diagnostic (layer 0 only) ──
- auto check_nan = [&](const char* label, const float* ptr, int count, int layer) {
- if (layer != 0) return;
- int nan_count = 0;
- for (int i = 0; i < count; i++) {
- if (std::isnan(ptr[i]) || std::isinf(ptr[i])) nan_count++;
- }
- if (nan_count > 0) {
- fprintf(stderr, "[NaN DIAG] Layer %d %s: %d/%d NaN/Inf (first 4: %f %f %f %f)\n",
- layer, label, nan_count, count, ptr[0], ptr[1], ptr[2], ptr[3]);
- } else {
- fprintf(stderr, "[NaN DIAG] Layer %d %s: OK (range [%f, %f])\n",
- layer, label, ptr[0], ptr[count > 1 ? 1 : 0]);
- }
- };
- // Norm tracker for layer 0 only
- auto vec_norm = [&](const char* label, const float* ptr, int count) {
- if (layer_idx != 0 || seq_len < 1) return;
- float ss = 0.0f;
- for (int i = 0; i < count; i++) ss += ptr[i] * ptr[i];
- fprintf(stderr, "[NORM] L0 %s: L2=%.4f max=%.4f min=%.4f\n",
- label, sqrtf(ss), *std::max_element(ptr, ptr+count), *std::min_element(ptr, ptr+count));
- };
+    // ── Attention block (steps 1-7) — skipped for SSM-only hybrid blocks ──
+    if (lw.has_attention) {
 
- // ── Attention block (steps 1-7) — skipped for SSM-only hybrid blocks ──
- if (lw.has_attention) {
-
- // ── 1. Attention RMS Norm ──
- for (int s = 0; s < seq_len; s++) {
- rms_norm(input + s * hd, lw.attn_norm, normed + s * hd, hd, cfg_.norm_eps);
- }
- vec_norm("input", input, hd);
- vec_norm("after_rms_norm", normed, hd);
- check_nan("after_rms_norm", normed, hd, layer_idx);
+    // ── 1. Attention RMS Norm ──
+    for (int s = 0; s < seq_len; s++) {
+        rms_norm(input + s * hd, lw.attn_norm, normed + s * hd, hd, cfg_.norm_eps);
+    }
 
     // ── 2. Q, K, V projections (gemv_dequant with inline dequant) ──
     if (lw.has_fused_qkv && lw.attn_qkv) {
         // Fused QKV: one gemv, then split
         int qkv_dim = q_dim + 2 * kv_dim;
         for (int s = 0; s < seq_len; s++) {
-            gemv_dequant(normed + s * hd, lw.attn_qkv, Q + s * q_dim,
+            gemv_dequant(normed + s * hd, lw.attn_qkv, Q + s * (q_dim + 2 * kv_dim),
                          hd, qkv_dim, lw.qkv_type, dequant_buf_.data());
             // Q is already at Q + s*q_dim, K and V follow
             // QKV layout: [Q | K | V] — but K/V are packed after Q
             memcpy(K_buf + s * kv_dim, Q + s * qkv_dim + q_dim, kv_dim * sizeof(float));
             memcpy(V_buf + s * kv_dim, Q + s * qkv_dim + q_dim + kv_dim, kv_dim * sizeof(float));
         }
- } else {
- for (int s = 0; s < seq_len; s++) {
- gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim, hd, q_dim, lw.qtype, dequant_buf_.data());
- gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype, dequant_buf_.data());
- gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype, dequant_buf_.data());
- // Add Q/K/V biases if present
- if (lw.attn_q_bias) {
- for (int d = 0; d < q_dim; d++) Q[s * q_dim + d] += lw.attn_q_bias[d];
- }
- if (lw.attn_k_bias) {
- for (int d = 0; d < kv_dim; d++) K_buf[s * kv_dim + d] += lw.attn_k_bias[d];
- }
- if (lw.attn_v_bias) {
- for (int d = 0; d < kv_dim; d++) V_buf[s * kv_dim + d] += lw.attn_v_bias[d];
- }
-
- }
- }
- check_nan("after_Q_proj", Q, q_dim, layer_idx);
- check_nan("after_K_proj", K_buf, kv_dim, layer_idx);
- check_nan("after_V_proj", V_buf, kv_dim, layer_idx);
- vec_norm("Q_proj", Q, q_dim);
- vec_norm("K_proj", K_buf, kv_dim);
- vec_norm("V_proj", V_buf, kv_dim);
+    } else {
+        for (int s = 0; s < seq_len; s++) {
+            gemv_dequant(normed + s * hd, lw.attn_q, Q + s * q_dim,     hd, q_dim,  lw.qtype, dequant_buf_.data());
+            gemv_dequant(normed + s * hd, lw.attn_k, K_buf + s * kv_dim, hd, kv_dim, lw.ktype, dequant_buf_.data());
+            gemv_dequant(normed + s * hd, lw.attn_v, V_buf + s * kv_dim, hd, kv_dim, lw.vtype, dequant_buf_.data());
+        }
+    }
 
     // ── 3. RoPE on Q and K ──
     for (int s = 0; s < seq_len; s++) {
@@ -722,14 +623,11 @@ void VibeBladeFast::forward_layer(
                     k[i + head_d / 2] = x0 * sin_v[i] + x1 * cos_v[i];
                 }
 #endif
- }
- }
- }
- check_nan("after_RoPE_Q", Q, q_dim, layer_idx);
- vec_norm("Q_after_RoPE", Q, q_dim);
- vec_norm("K_after_RoPE", K_buf, kv_dim);
+            }
+        }
+    }
 
- // ── 4. Store K, V into KV cache ──
+    // ── 4. Store K, V into KV cache ──
     auto& k_cache = kv_k_[layer_idx];
     auto& v_cache = kv_v_[layer_idx];
     for (int s = 0; s < seq_len; s++) {
@@ -804,43 +702,37 @@ void VibeBladeFast::forward_layer(
         }
     }
 
- // ── 6. Output projection ──
- for (int s = 0; s < seq_len; s++) {
- gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype, dequant_buf_.data());
- }
- vec_norm("attn_out", attn_out, q_dim);
- vec_norm("o_proj", o_proj, hd);
+    // ── 6. Output projection ──
+    for (int s = 0; s < seq_len; s++) {
+        gemv_dequant(attn_out + s * q_dim, lw.attn_o, o_proj + s * hd, q_dim, hd, lw.otype, dequant_buf_.data());
+    }
 
- // ── 7. Post-attention residual ──
+    // ── 7. Post-attention residual ──
     for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
         memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
         vadd_residual(output + s * hd, o_proj + s * hd, hd);
 #else
         for (int d = 0; d < hd; d++) {
-output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
- }
+            output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
+        }
 #endif
- }
+    }
 
- vec_norm("after_attn_residual", output, hd);
+    } // end if (lw.has_attention)
+    else {
+        // SSM-only hybrid block: no attention, pass input through to FFN
+        for (int s = 0; s < seq_len; s++) {
+            memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
+        }
+    }
 
- } // end if (lw.has_attention)
- else {
- // SSM-only hybrid block: no attention, pass input through to FFN
- for (int s = 0; s < seq_len; s++) {
- memcpy(output + s * hd, input + s * hd, hd * sizeof(float));
- }
- }
- check_nan("after_attn_residual", output, hd, layer_idx);
+    // ── 8. FFN RMS Norm ──
+    for (int s = 0; s < seq_len; s++) {
+        rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
+    }
 
- // ── 8. FFN RMS Norm ──
- for (int s = 0; s < seq_len; s++) {
- rms_norm(output + s * hd, lw.ffn_norm, normed + s * hd, hd, cfg_.norm_eps);
- }
- vec_norm("ffn_input_after_norm", normed, hd);
-
- // ── 9. FFN: MoE, Dense, or skip if no weights ──
+    // ── 9. FFN: MoE, Dense, or skip if no weights ──
     if (lw.has_moe) {
         // ── MoE FFN (top-k expert routing) ──
         int n_exp = cfg_.n_experts;
@@ -905,12 +797,10 @@ output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
         for (int s = 0; s < seq_len; s++) {
             gemv_dequant(normed + s * hd, lw.ffn_gate, gate_buf + s * cfg_.intermediate_dim,
                          hd, cfg_.intermediate_dim, lw.gate_type, dequant_buf_.data());
- gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
- hd, cfg_.intermediate_dim, lw.up_type, dequant_buf_.data());
- vec_norm("ffn_gate", gate_buf + s * cfg_.intermediate_dim, cfg_.intermediate_dim);
- vec_norm("ffn_up", up_buf + s * cfg_.intermediate_dim, cfg_.intermediate_dim);
+            gemv_dequant(normed + s * hd, lw.ffn_up, up_buf + s * cfg_.intermediate_dim,
+                         hd, cfg_.intermediate_dim, lw.up_type, dequant_buf_.data());
 
- int id = cfg_.intermediate_dim;
+            int id = cfg_.intermediate_dim;
 
             if (cfg_.use_turbo_sparse) {
                 for (int i = 0; i < id; i++) {
@@ -954,27 +844,40 @@ output[s * hd + d] = input[s * hd + d] + o_proj[s * hd + d];
 #endif
             }
 
- gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
- id, hd, lw.down_type, dequant_buf_.data());
- vec_norm("ffn_down_out", ff_out + s * hd, hd);
- }
- } else {
+            gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
+                         id, hd, lw.down_type, dequant_buf_.data());
+        }
+    } else if (lw.ffn_up && lw.ffn_down) {
+        // Dense MLP without gate (Phi-2, GPT-2 style): up -> gelu -> down
+        for (int s = 0; s < seq_len; s++) {
+            int id = cfg_.intermediate_dim;
+            // Up projection
+            gemv_dequant(normed + s * hd, lw.ffn_up, gate_buf + s * id,
+                         hd, id, lw.up_type, dequant_buf_.data());
+            // GELU activation
+            for (int i = 0; i < id; i++) {
+                float x = gate_buf[s * id + i];
+                gate_buf[s * id + i] = 0.5f * x * (1.0f + tanhf(0.7978845608f * (x + 0.044715f * x * x * x)));
+            }
+            // Down projection
+            gemv_dequant(gate_buf + s * id, lw.ffn_down, ff_out + s * hd,
+                         id, hd, lw.down_type, dequant_buf_.data());
+        }
+    } else {
         // No FFN weights (shouldn't happen in practice)
         memset(ff_out, 0, seq_len * hd * sizeof(float));
     }
 
- // ── 10. Final residual: output += ff_out ──
- for (int s = 0; s < seq_len; s++) {
+    // ── 10. Final residual: output += ff_out ──
+    for (int s = 0; s < seq_len; s++) {
 #ifdef __aarch64__
- vadd_residual(output + s * hd, ff_out + s * hd, hd);
+        vadd_residual(output + s * hd, ff_out + s * hd, hd);
 #else
- for (int d = 0; d < hd; d++) {
- output[s * hd + d] += ff_out[s * hd + d];
- }
+        for (int d = 0; d < hd; d++) {
+            output[s * hd + d] += ff_out[s * hd + d];
+        }
 #endif
- }
- check_nan("after_ffn_residual", output, hd, layer_idx);
- vec_norm("final_output", output, hd);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1059,184 +962,6 @@ std::vector<float> VibeBladeFast::decode(int token_id) {
 
     position_++;
     return logits_buf_;  // Copy — safe because caller owns it
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-//  Decode + extract hidden states at specific layer indices (for DFlash)
-// ══════════════════════════════════════════════════════════════════════════════
-
-std::vector<std::vector<float>> VibeBladeFast::decode_with_hidden(
-    int token_id,
-    const std::vector<int>& layer_indices
-) {
-    if (!loaded_) throw std::runtime_error("Model not loaded");
-    if (position_ >= cfg_.context_length)
-        throw std::runtime_error("Context length exceeded");
-    if (token_id < 0 || token_id >= cfg_.vocab_size)
-        throw std::runtime_error("Token ID out of range: " + std::to_string(token_id));
-
-    int hd = cfg_.hidden_dim;
-
-    // Build a quick lookup set for O(1) "is this layer wanted?"
-    bool want_layer[256] = {false};
-    int n_wanted = 0;
-    for (int idx : layer_indices) want_layer[idx] = true, n_wanted++;
-
-    // Allocate output buffers lazily for wanted layers
-    std::vector<std::vector<float>> hidden_outputs;
-    hidden_outputs.reserve(layer_indices.size());
-    for (size_t i = 0; i < layer_indices.size(); i++) {
-        hidden_outputs.emplace_back(hd, 0.0f);
-    }
-    // Map layer_idx → output vector index
-    std::unordered_map<int, size_t> layer_to_out;
-    for (size_t i = 0; i < layer_indices.size(); i++) {
-        layer_to_out[layer_indices[i]] = i;
-    }
-
-    // ── Token embedding for single token ──
-    size_t row_bytes = tensor_nbytes(emb_type_, hd);
-    const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
-    dequantize_row(emb_row, x_buf_.data(), hd, emb_type_);
-
-    // ── Run through all layers ──
-    for (int l = 0; l < cfg_.n_layers; l++) {
-        forward_layer(x_buf_.data(), 1, hidden_buf_.data(), layers_[l], l);
-        std::swap(x_buf_, hidden_buf_);
-
-        // Capture hidden states at wanted layers (x_buf_ now holds this layer's output)
-        auto it = layer_to_out.find(l);
-        if (it != layer_to_out.end()) {
-            std::memcpy(hidden_outputs[it->second].data(), x_buf_.data(), hd * sizeof(float));
-        }
-    }
-
-    // ── Final RMS norm ──
-    rms_norm(x_buf_.data(), output_norm_, normed_buf_.data(), hd, cfg_.norm_eps);
-
-    // ── Output projection → logits ──
-    gemv_dequant_mt(normed_buf_.data(), output_, logits_buf_.data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
-
-    position_++;
-
-    // Prepend logits as the first element of the return vector
-    hidden_outputs.insert(hidden_outputs.begin(), std::vector<float>(logits_buf_.begin(), logits_buf_.end()));
-    return hidden_outputs;
-}
-// ============================================================================
-// Token embedding lookup (for DFlash noise conditioning)
-// ============================================================================
-std::vector<float> VibeBladeFast::embedding(int token_id) const {
-    if (!loaded_) throw std::runtime_error("Model not loaded");
-    if (token_id < 0 || token_id >= cfg_.vocab_size)
-        throw std::runtime_error("Token ID out of range: " + std::to_string(token_id));
-
-    int hd = cfg_.hidden_dim;
-    std::vector<float> emb(hd);
-    size_t row_bytes = tensor_nbytes(emb_type_, hd);
-    const void* emb_row = (const uint8_t*)token_emb_ + token_id * row_bytes;
-    dequantize_row(emb_row, emb.data(), hd, emb_type_);
-    return emb;
-}
-// ============================================================================
-// Compute logits from a hidden state vector (final RMSNorm + output layer)
-// ============================================================================
-std::vector<float> VibeBladeFast::lm_head(const std::vector<float>& hidden) {
-    if (!loaded_) throw std::runtime_error("Model not loaded");
-    if ((int)hidden.size() != cfg_.hidden_dim)
-        throw std::runtime_error("lm_head: hidden size mismatch (expected " + std::to_string(cfg_.hidden_dim) + ")");
-
-    // Apply final RMSNorm (same as in decode/prefill)
-    std::vector<float> normed(cfg_.hidden_dim);
-    rms_norm(hidden.data(), output_norm_, normed.data(), cfg_.hidden_dim, cfg_.norm_eps);
-
-    // Dequant output weight and compute logits
-    std::vector<float> logits(cfg_.vocab_size);
-    gemv_dequant_mt(normed.data(), output_, logits.data(),
-                    cfg_.hidden_dim, cfg_.vocab_size,
-                    out_type_, 0, dequant_buf_.data());
-    return logits;
-}
-
-
-
-// ════════════════════════════════════════════════════════════════
-//  Prefill + extract hidden states at specific layer indices
-// ════════════════════════════════════════════════════════════════
-std::vector<std::vector<float>> VibeBladeFast::prefill_with_hidden(
-    const std::vector<int>& token_ids,
-    const std::vector<int>& layer_indices
-) {
-    if (!loaded_) throw std::runtime_error("Model not loaded");
-    if (token_ids.empty()) throw std::runtime_error("Empty prompt");
-
-    int seq_len = (int)token_ids.size();
-    if (position_ + seq_len > cfg_.context_length)
-        throw std::runtime_error("Prompt exceeds context length");
-
-    int hd = cfg_.hidden_dim;
-
-    // ── Build lookup for wanted layers ──
-    bool want_layer[256] = {false};
-    int n_wanted = 0;
-    for (int idx : layer_indices) {
-        if (idx >= 0 && idx < cfg_.n_layers) {
-            want_layer[idx] = true;
-            n_wanted++;
-        }
-    }
-
-    // ── Allocate output buffers ──
-    // Return format: [logits] + [hidden_layer_i for each requested i]
-    std::vector<std::vector<float>> hidden_outputs;
-    hidden_outputs.reserve(1 + n_wanted);
-    hidden_outputs.emplace_back(cfg_.vocab_size, 0.0f);  // logits placeholder
-    std::unordered_map<int, size_t> layer_to_out;
-    for (size_t i = 0; i < layer_indices.size(); i++) {
-        int l = layer_indices[i];
-        if (l >= 0 && l < cfg_.n_layers) {
-            hidden_outputs.emplace_back(seq_len * hd, 0.0f);
-            layer_to_out[l] = i + 1;
-        }
-    }
-
-    // ── Token embeddings ──
-    std::vector<float> x(seq_len * hd);
-    for (int s = 0; s < seq_len; s++) {
-        int tok = token_ids[s];
-        if (tok < 0 || tok >= cfg_.vocab_size)
-            throw std::runtime_error("Token ID out of range: " + std::to_string(tok));
-
-        size_t row_bytes = tensor_nbytes(emb_type_, hd);
-        const void* emb_row = (const uint8_t*)token_emb_ + tok * row_bytes;
-        dequantize_row(emb_row, x.data() + s * hd, hd, emb_type_);
-    }
-
-    // ── Run layers, capturing x after each wanted layer ──
-    std::vector<float> hidden(seq_len * hd);
-    std::vector<float> normed(seq_len * hd);
-    for (int l = 0; l < cfg_.n_layers; l++) {
-        forward_layer(x.data(), seq_len, hidden.data(), layers_[l], l);
-        x.swap(hidden);
-
-        auto it = layer_to_out.find(l);
-        if (it != layer_to_out.end()) {
-            std::memcpy(hidden_outputs[it->second].data(), x.data(), seq_len * hd * sizeof(float));
-        }
-    }
-
-    // ── Final RMS norm on last token of last layer ──
-    for (int s = 0; s < seq_len; s++) {
-        rms_norm(x.data() + s * hd, output_norm_, normed.data() + s * hd, hd, cfg_.norm_eps);
-    }
-
-    // Logits from the last token only
-    int last = seq_len - 1;
-    gemv_dequant_mt(normed.data() + last * hd, output_,
-                    hidden_outputs[0].data(), hd, cfg_.vocab_size, out_type_, 0, dequant_buf_.data());
-
-    position_ += seq_len;
-    return hidden_outputs;
 }
 
 // ════════════════════════════════════════════════════════════════
